@@ -1,1 +1,1071 @@
-<!DOCTYPE html><html><body><h1>Telexia Pipeline – placeholder</h1><p>Den riktiga appen laddas upp strax.</p></body></html>
+<!DOCTYPE html>
+<html lang="sv">
+<head>
+<meta charset="UTF-8">
+<title>Telexia – Säljpipeline</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif;
+    background: #0f1115;
+    color: #e5e7eb;
+  }
+  .topbar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 16px 20px;
+    background: #161922;
+    border-bottom: 1px solid #262b36;
+  }
+  .topbar h1 { font-size: 18px; font-weight: 600; margin: 0; color: #f3f4f6; }
+  .topbar .sub { font-size: 12px; color: #9ca3af; margin-top: 2px; }
+  .tabs { display: flex; gap: 4px; padding: 0 20px; background: #161922; border-bottom: 1px solid #262b36; }
+  .tab-btn {
+    border: none; background: none; padding: 10px 14px; font-size: 13px; font-weight: 500;
+    color: #9ca3af; cursor: pointer; border-bottom: 2px solid transparent;
+  }
+  .tab-btn.active { color: #60a5fa; border-bottom-color: #60a5fa; }
+  .toolbar {
+    display: flex; align-items: center; gap: 10px; padding: 12px 20px; flex-wrap: wrap;
+  }
+  .toolbar input[type="text"] {
+    padding: 7px 10px; border: 1px solid #2a2e37; border-radius: 6px; font-size: 13px; min-width: 220px;
+    background: #1a1d27; color: #e5e7eb;
+  }
+  .btn {
+    padding: 7px 14px; border-radius: 6px; border: 1px solid #3b82f6; background: #3b82f6; color: #fff;
+    font-size: 13px; font-weight: 500; cursor: pointer;
+  }
+  .btn:hover { background: #2563eb; }
+  .btn.secondary { background: #1a1d27; color: #60a5fa; border-color: #2a2e37; }
+  .btn.secondary:hover { background: #20242f; }
+  .btn.ghost { background: #1a1d27; color: #9ca3af; border-color: #2a2e37; }
+  .btn.ghost:hover { background: #20242f; }
+  .btn:disabled { opacity: 0.5; cursor: not-allowed; }
+  .stats-row { display: flex; gap: 10px; padding: 0 20px 12px; flex-wrap: wrap; }
+  .stat-pill {
+    background: #161922; border: 1px solid #262b36; border-radius: 8px; padding: 8px 12px; font-size: 12px; color: #cbd5e1;
+  }
+  .stat-pill b { font-size: 14px; color: #f3f4f6; margin-right: 4px; }
+  .stat-pill.overdue { border-color: #7f1d1d; background: rgba(248,113,113,0.08); color: #fca5a5; }
+
+  .board { display: flex; gap: 12px; padding: 0 20px 24px; overflow-x: auto; align-items: flex-start; }
+  .column {
+    flex: 0 0 240px; background: #161922; border-radius: 10px; padding: 10px; min-height: 120px;
+    border: 1px solid #20242f;
+  }
+  .column.dragover { background: #1e2a44; }
+  .column-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; padding: 0 2px; }
+  .column-head span.name { font-size: 12px; font-weight: 600; color: #cbd5e1; }
+  .column-head span.count { font-size: 11px; color: #0f1115; background: #6b7280; border-radius: 10px; padding: 1px 7px; }
+  .card {
+    background: #1d212b; border-radius: 8px; padding: 10px; margin-bottom: 8px; border: 1px solid #2a2e37;
+    cursor: grab; box-shadow: 0 1px 2px rgba(0,0,0,0.3);
+  }
+  .card.overdue { border-left: 3px solid #f87171; }
+  .card .kund { font-size: 13px; font-weight: 600; color: #f3f4f6; }
+  .card .kontakt { font-size: 11px; color: #9ca3af; margin-top: 2px; }
+  .card .next { font-size: 11px; color: #cbd5e1; margin-top: 6px; }
+  .card .date { font-size: 10px; color: #6b7280; margin-top: 4px; }
+  .card .date.overdue { color: #f87171; font-weight: 600; }
+  .card .varde { font-size: 11px; color: #34d399; margin-top: 4px; font-weight: 500; }
+  .card .logbadge { font-size: 10px; color: #93c5fd; margin-top: 4px; }
+  .card a.card-link { color: #60a5fa; text-decoration: none; }
+  .card a.card-link:hover { text-decoration: underline; }
+  .empty-hint { font-size: 11px; color: #6b7280; text-align: center; padding: 16px 4px; }
+
+  table { width: 100%; border-collapse: collapse; background: #161922; border-radius: 8px; overflow: hidden; }
+  th, td { text-align: left; padding: 9px 12px; font-size: 13px; border-bottom: 1px solid #20242f; color: #d1d5db; }
+  th { background: #1a1d27; font-weight: 600; color: #9ca3af; font-size: 12px; }
+  tr:hover td { background: #1a1e29; }
+  select.status-select { font-size: 12px; padding: 3px 6px; border-radius: 6px; border: 1px solid #2a2e37; background: #1a1d27; color: #e5e7eb; }
+  .q-status-ny { color: #fbbf24; font-weight: 600; }
+  .q-status-pagar { color: #60a5fa; font-weight: 600; }
+  .q-status-lost { color: #34d399; font-weight: 600; }
+  .row-actions button { font-size: 11px; padding: 3px 8px; border-radius: 5px; border: 1px solid #2a2e37; background: #1a1d27; color: #d1d5db; cursor: pointer; margin-right: 4px; }
+  .table-wrap { padding: 0 20px 24px; }
+
+  .modal-backdrop {
+    position: absolute; inset: 0; background: rgba(0,0,0,0.55); display: none; align-items: flex-start; justify-content: center;
+    padding-top: 30px; z-index: 50;
+  }
+  .modal-backdrop.open { display: flex; }
+  .modal {
+    background: #161922; border: 1px solid #262b36; border-radius: 10px; padding: 20px; width: 460px; max-width: 92vw;
+    max-height: 88vh; overflow-y: auto; box-shadow: 0 8px 24px rgba(0,0,0,0.5);
+  }
+  .modal h2 { font-size: 15px; margin: 0 0 14px; color: #f3f4f6; }
+  .field { margin-bottom: 10px; }
+  .field label { display: block; font-size: 12px; color: #9ca3af; margin-bottom: 4px; font-weight: 500; }
+  .field input, .field select, .field textarea {
+    width: 100%; padding: 7px 9px; border: 1px solid #2a2e37; border-radius: 6px; font-size: 13px; font-family: inherit;
+    background: #1a1d27; color: #e5e7eb;
+  }
+  .field textarea { min-height: 50px; resize: vertical; }
+  .field-row { display: flex; gap: 10px; }
+  .field-row .field { flex: 1; }
+  .modal-actions { display: flex; justify-content: space-between; margin-top: 16px; }
+  .modal-actions .left { display: flex; gap: 8px; }
+  .hint { font-size: 11px; color: #6b7280; margin: -4px 0 10px; }
+
+  .section-title { font-size: 12px; font-weight: 600; color: #9ca3af; margin: 16px 0 8px; text-transform: uppercase; letter-spacing: 0.03em; }
+  .log-list { max-height: 170px; overflow-y: auto; border: 1px solid #20242f; border-radius: 8px; padding: 8px; margin-bottom: 8px; background: #11141b; }
+  .log-empty { font-size: 11px; color: #6b7280; padding: 8px; text-align: center; }
+  .log-entry { padding: 7px 6px; border-bottom: 1px solid #1c202a; }
+  .log-entry:last-child { border-bottom: none; }
+  .log-entry .ts { font-size: 10px; color: #6b7280; margin-bottom: 3px; }
+  .log-entry .txt { font-size: 12px; color: #d1d5db; white-space: pre-wrap; }
+  .log-entry img { max-width: 100%; max-height: 120px; border-radius: 6px; border: 1px solid #2a2e37; cursor: zoom-in; display: block; margin-bottom: 4px; }
+  .log-entry .ai-tag { font-size: 10px; color: #93c5fd; margin-bottom: 2px; }
+  .log-add-row { display: flex; gap: 6px; margin-bottom: 8px; }
+  .log-add-row input { flex: 1; }
+
+  .paste-zone {
+    border: 1.5px dashed #2a2e37; border-radius: 8px; padding: 14px; text-align: center; font-size: 12px;
+    color: #6b7280; cursor: text; background: #11141b; min-height: 20px; outline: none;
+  }
+  .paste-zone:focus { border-color: #3b82f6; color: #93c5fd; }
+  .paste-zone.has-image { padding: 6px; }
+  .paste-zone img { max-width: 100%; max-height: 140px; border-radius: 6px; display: block; margin: 0 auto; }
+  .paste-row { display: flex; gap: 8px; align-items: center; margin-top: 6px; }
+  .ai-status { font-size: 11px; color: #93c5fd; }
+  .ai-status.err { color: #fca5a5; }
+</style>
+<script src="https://accounts.google.com/gsi/client" async defer></script>
+</head>
+<body>
+
+<div class="topbar">
+  <div>
+    <h1>Telexia – Säljpipeline &amp; produktspecialist</h1>
+    <div class="sub">Timpunkt · arbetsordersystem</div>
+  </div>
+  <div style="display:flex;align-items:center;gap:10px;">
+    <div id="lastSavedLabel" class="sub"></div>
+    <div id="driveStatus" class="sub"></div>
+    <button class="btn secondary" id="driveSignInBtn">Logga in med Google</button>
+    <button class="btn ghost" id="driveSignOutBtn" style="display:none">Logga ut</button>
+  </div>
+</div>
+
+<div class="tabs">
+  <button class="tab-btn active" data-tab="pipeline">Pipeline</button>
+  <button class="tab-btn" data-tab="questions">Produktspecialist-frågor</button>
+</div>
+
+<div id="pipelineView">
+  <div class="toolbar">
+    <input type="text" id="searchInput" placeholder="Sök kund eller kontaktperson...">
+    <button class="btn" id="addLeadBtn">+ Ny kund</button>
+    <button class="btn secondary" id="addLeadFromImageBtn">+ Ny kund från skärmdump</button>
+    <button class="btn ghost" id="exportLeadsBtn">Exportera CSV</button>
+  </div>
+  <div class="stats-row" id="statsRow"></div>
+  <div class="board" id="board"></div>
+</div>
+
+<div id="questionsView" style="display:none">
+  <div class="toolbar">
+    <input type="text" id="qSearchInput" placeholder="Sök fråga eller kund...">
+    <button class="btn" id="addQuestionBtn">+ Ny fråga</button>
+    <button class="btn ghost" id="exportQuestionsBtn">Exportera CSV</button>
+  </div>
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr><th>Kund</th><th>Fråga</th><th>Status</th><th>Datum</th><th>Anteckning</th><th></th></tr>
+      </thead>
+      <tbody id="questionsBody"></tbody>
+    </table>
+  </div>
+</div>
+
+<!-- Lead create/edit modal -->
+<div class="modal-backdrop" id="leadModalBackdrop">
+  <div class="modal">
+    <h2 id="leadModalTitle">Ny kund</h2>
+    <input type="hidden" id="leadId">
+    <div class="field-row">
+      <div class="field"><label>Kundnamn</label><input type="text" id="leadKund"></div>
+      <div class="field"><label>Kontaktperson</label><input type="text" id="leadKontakt"></div>
+    </div>
+    <div class="field-row">
+      <div class="field"><label>E-post</label><input type="text" id="leadEmail"></div>
+      <div class="field"><label>Telefonnummer (kontaktperson)</label><input type="text" id="leadTelefon"></div>
+    </div>
+    <div class="field">
+      <label>Adress</label>
+      <input type="text" id="leadAdress" placeholder="Gata, postnummer, ort">
+      <div class="hint" id="leadAdressMapHint" style="display:none;margin-top:4px"><a id="leadAdressMapLink" href="#" target="_blank" rel="noopener" style="color:#60a5fa">Öppna i Google Maps ↗</a></div>
+    </div>
+    <div class="field-row">
+      <div class="field"><label>Värde (kr)</label><input type="number" id="leadVarde"></div>
+      <div class="field">
+        <label>Sannolikhet</label>
+        <select id="leadWeight">
+          <option value="0">0%</option>
+          <option value="25">25%</option>
+          <option value="50" selected>50%</option>
+          <option value="75">75%</option>
+          <option value="100">100%</option>
+        </select>
+      </div>
+    </div>
+    <div class="hint" id="leadWeightedHint"></div>
+    <div class="field">
+      <label>Steg i pipeline</label>
+      <select id="leadStage">
+        <option value="booked">Möte bokat</option>
+        <option value="held">Möte hållet</option>
+        <option value="followup">Uppföljning skickad</option>
+        <option value="proposal">Avtalsförslag skickat</option>
+        <option value="proposal_followup">Uppföljning av avtalsförslag</option>
+        <option value="langbank">Långbänk</option>
+        <option value="signed">Signerat</option>
+        <option value="lost">Förlorad</option>
+      </select>
+    </div>
+    <div class="field-row">
+      <div class="field"><label>Nästa steg</label><input type="text" id="leadNext" placeholder="t.ex. ring kund om avtalsförslag"></div>
+      <div class="field"><label>Nästa steg – datum</label><input type="date" id="leadNextDate"></div>
+    </div>
+
+    <div class="section-title">Logg / anteckningar</div>
+    <div class="log-list" id="leadLogList"></div>
+    <div class="log-add-row">
+      <input type="text" id="leadLogText" placeholder="Skriv en anteckning...">
+      <button class="btn ghost" id="leadLogAddBtn">Lägg till</button>
+    </div>
+    <div class="paste-zone" id="leadPasteZone" contenteditable="true" tabindex="0" data-placeholder="Klicka här och klistra in en skärmdump (Ctrl+V)">Klicka här och klistra in en skärmdump (Ctrl+V)</div>
+    <div class="paste-row">
+      <button class="btn ghost" id="leadPasteFileBtn">Välj fil istället</button>
+      <input type="file" id="leadPasteFileInput" accept="image/*" style="display:none">
+      <span class="ai-status" id="leadAiStatus"></span>
+    </div>
+
+    <div class="modal-actions">
+      <div class="left">
+        <button class="btn ghost" id="leadCancelBtn">Avbryt</button>
+        <button class="btn ghost" id="leadDeleteBtn" style="display:none;color:#f87171;border-color:#7f1d1d">Ta bort</button>
+      </div>
+      <button class="btn" id="leadSaveBtn">Spara</button>
+    </div>
+  </div>
+</div>
+
+<!-- New customer from screenshot modal -->
+<div class="modal-backdrop" id="shotModalBackdrop">
+  <div class="modal">
+    <h2>Ny kund från skärmdump</h2>
+    <div class="hint">Klistra in en skärmdump med kunduppgifter (t.ex. från mail eller Upsale). Skärmdumpen sparas i kundens logg — fyll i kundnamn, kontaktperson och e-post i nästa steg.</div>
+    <div class="paste-zone" id="shotPasteZone" contenteditable="true" tabindex="0" data-placeholder="Klicka här och klistra in en skärmdump (Ctrl+V)">Klicka här och klistra in en skärmdump (Ctrl+V)</div>
+    <div class="paste-row">
+      <button class="btn ghost" id="shotPasteFileBtn">Välj fil istället</button>
+      <input type="file" id="shotPasteFileInput" accept="image/*" style="display:none">
+    </div>
+    <div class="ai-status" id="shotAiStatus" style="margin-top:8px"></div>
+    <div class="modal-actions">
+      <div class="left">
+        <button class="btn ghost" id="shotCancelBtn">Avbryt</button>
+      </div>
+      <button class="btn" id="shotCreateBtn" disabled>Skapa kund</button>
+    </div>
+  </div>
+</div>
+
+<!-- Question modal -->
+<div class="modal-backdrop" id="qModalBackdrop">
+  <div class="modal">
+    <h2 id="qModalTitle">Ny fråga</h2>
+    <input type="hidden" id="qId">
+    <div class="field"><label>Kund</label><input type="text" id="qKund"></div>
+    <div class="field"><label>Fråga</label><textarea id="qFraga"></textarea></div>
+    <div class="field-row">
+      <div class="field">
+        <label>Status</label>
+        <select id="qStatus">
+          <option value="ny">Ny</option>
+          <option value="pagar">Pågår</option>
+          <option value="lost">Löst</option>
+        </select>
+      </div>
+      <div class="field"><label>Datum</label><input type="date" id="qDatum"></div>
+    </div>
+    <div class="field"><label>Anteckning</label><textarea id="qAnteckning"></textarea></div>
+    <div class="modal-actions">
+      <div class="left">
+        <button class="btn ghost" id="qCancelBtn">Avbryt</button>
+        <button class="btn ghost" id="qDeleteBtn" style="display:none;color:#f87171;border-color:#7f1d1d">Ta bort</button>
+      </div>
+      <button class="btn" id="qSaveBtn">Spara</button>
+    </div>
+  </div>
+</div>
+
+<!-- Lightbox -->
+<div class="modal-backdrop" id="lightboxBackdrop" style="align-items:center;padding-top:0">
+  <img id="lightboxImg" style="max-width:90vw;max-height:90vh;border-radius:8px">
+</div>
+
+<script>
+const STAGES = [
+  { key: 'booked', name: 'Möte bokat' },
+  { key: 'held', name: 'Möte hållet' },
+  { key: 'followup', name: 'Uppföljning skickad' },
+  { key: 'proposal', name: 'Avtalsförslag skickat' },
+  { key: 'proposal_followup', name: 'Uppföljning av avtalsförslag' },
+  { key: 'langbank', name: 'Långbänk' },
+  { key: 'signed', name: 'Signerat' },
+  { key: 'lost', name: 'Förlorad' },
+];
+
+function mapsUrl(address) {
+  return 'https://www.google.com/maps/search/?api=1&query=' + encodeURIComponent(address);
+}
+
+const LEADS_KEY = 'telexia_pipeline_leads_v1';
+const Q_KEY = 'telexia_pipeline_questions_v1';
+
+function todayStr() {
+  const d = new Date();
+  return d.toISOString().slice(0,10);
+}
+function nowLabel() {
+  return new Date().toLocaleString('sv-SE', { dateStyle: 'short', timeStyle: 'short' });
+}
+
+function migrateLeads(data) {
+  // migrate legacy single "notes" field to log array
+  data.forEach(l => {
+    if (!l.log) l.log = [];
+    if (l.notes) {
+      l.log.unshift({ id: uid(), type: 'text', content: l.notes, ts: nowLabel() });
+      delete l.notes;
+    }
+    if (l.weight === undefined || l.weight === null || l.weight === '') l.weight = 100;
+  });
+  return data;
+}
+function loadLeads() {
+  let data;
+  try { data = JSON.parse(localStorage.getItem(LEADS_KEY)) || []; } catch(e) { data = []; }
+  return migrateLeads(data);
+}
+function saveLeads(data) {
+  localStorage.setItem(LEADS_KEY, JSON.stringify(data));
+  touchSavedLabel();
+  scheduleDrivePush();
+}
+function loadQuestions() {
+  try { return JSON.parse(localStorage.getItem(Q_KEY)) || []; } catch(e) { return []; }
+}
+function saveQuestions(qs) {
+  localStorage.setItem(Q_KEY, JSON.stringify(qs));
+  touchSavedLabel();
+  scheduleDrivePush();
+}
+function touchSavedLabel() {
+  document.getElementById('lastSavedLabel').textContent = 'Sparat ' + new Date().toLocaleTimeString('sv-SE', {hour:'2-digit', minute:'2-digit'});
+}
+function uid() { return Date.now().toString(36) + Math.random().toString(36).slice(2,7); }
+
+let leads = loadLeads();
+let questions = loadQuestions();
+
+// ---------- Google Drive-synk ----------
+const GOOGLE_CLIENT_ID = '827512342225-28oeo7n0sf04isql0su3tssuj75mbs8b.apps.googleusercontent.com';
+const DRIVE_SCOPE = 'https://www.googleapis.com/auth/drive.file';
+const DRIVE_FILE_NAME = 'telexia-pipeline-data.json';
+let accessToken = null;
+let driveFileId = null;
+let tokenClient = null;
+let driveSyncTimer = null;
+
+function setDriveStatus(text, isErr) {
+  const el = document.getElementById('driveStatus');
+  if (!el) return;
+  el.textContent = text || '';
+  el.style.color = isErr ? '#fca5a5' : '#9ca3af';
+}
+
+function initGoogleAuth() {
+  if (!window.google || !google.accounts || !google.accounts.oauth2) {
+    setTimeout(initGoogleAuth, 300);
+    return;
+  }
+  tokenClient = google.accounts.oauth2.initTokenClient({
+    client_id: GOOGLE_CLIENT_ID,
+    scope: DRIVE_SCOPE,
+    callback: async (resp) => {
+      if (resp.error) {
+        setDriveStatus('Inloggning misslyckades', true);
+        return;
+      }
+      accessToken = resp.access_token;
+      localStorage.setItem('telexia_drive_signed_in', '1');
+      await onSignedIn();
+    },
+  });
+  // Försök tyst inloggning om vi varit inloggade tidigare i denna webläsare
+  if (localStorage.getItem('telexia_drive_signed_in') === '1') {
+    setDriveStatus('Loggar in...');
+    try { tokenClient.requestAccessToken({ prompt: '' }); } catch (e) { setDriveStatus(''); }
+  }
+}
+
+async function driveFetch(url, options) {
+  options = options || {};
+  options.headers = Object.assign({}, options.headers, { Authorization: 'Bearer ' + accessToken });
+  let res = await fetch(url, options);
+  if (res.status === 401 && tokenClient) {
+    await new Promise(resolve => {
+      tokenClient.callback = (resp) => {
+        if (!resp.error) accessToken = resp.access_token;
+        resolve();
+      };
+      tokenClient.requestAccessToken({ prompt: '' });
+    });
+    options.headers.Authorization = 'Bearer ' + accessToken;
+    res = await fetch(url, options);
+  }
+  return res;
+}
+
+async function findOrCreateDriveFile() {
+  const q = encodeURIComponent("name='" + DRIVE_FILE_NAME + "' and trashed=false");
+  const listRes = await driveFetch('https://www.googleapis.com/drive/v3/files?q=' + q + '&fields=files(id,name)&spaces=drive');
+  const listData = await listRes.json();
+  if (listData.files && listData.files.length > 0) {
+    driveFileId = listData.files[0].id;
+    return 'existing';
+  }
+  const seed = JSON.stringify({ leads, questions });
+  const metadata = { name: DRIVE_FILE_NAME, mimeType: 'application/json' };
+  const form = new FormData();
+  form.append('metadata', new Blob([JSON.stringify(metadata)], { type: 'application/json' }));
+  form.append('file', new Blob([seed], { type: 'application/json' }));
+  const createRes = await driveFetch('https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id', {
+    method: 'POST',
+    body: form,
+  });
+  const createData = await createRes.json();
+  driveFileId = createData.id;
+  return 'created';
+}
+
+async function pullFromDrive() {
+  const res = await driveFetch('https://www.googleapis.com/drive/v3/files/' + driveFileId + '?alt=media');
+  if (!res.ok) return null;
+  try { return await res.json(); } catch (e) { return null; }
+}
+
+async function pushToDrive() {
+  if (!accessToken || !driveFileId) return;
+  setDriveStatus('Synkar...');
+  try {
+    const body = JSON.stringify({ leads, questions });
+    await driveFetch('https://www.googleapis.com/upload/drive/v3/files/' + driveFileId + '?uploadType=media', {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body,
+    });
+    setDriveStatus('Synkad ' + new Date().toLocaleTimeString('sv-SE', {hour:'2-digit', minute:'2-digit'}));
+  } catch (e) {
+    setDriveStatus('Synkfel – sparat lokalt', true);
+  }
+}
+
+function scheduleDrivePush() {
+  if (!accessToken) return;
+  clearTimeout(driveSyncTimer);
+  driveSyncTimer = setTimeout(pushToDrive, 1200);
+}
+
+async function onSignedIn() {
+  document.getElementById('driveSignInBtn').style.display = 'none';
+  document.getElementById('driveSignOutBtn').style.display = '';
+  setDriveStatus('Ansluter till Google Drive...');
+  try {
+    const result = await findOrCreateDriveFile();
+    if (result === 'existing') {
+      const remote = await pullFromDrive();
+      if (remote) {
+        leads = migrateLeads(remote.leads || []);
+        questions = remote.questions || [];
+        localStorage.setItem(LEADS_KEY, JSON.stringify(leads));
+        localStorage.setItem(Q_KEY, JSON.stringify(questions));
+        renderBoard();
+        renderStats();
+        renderQuestions();
+      }
+    }
+    setDriveStatus('Synkad med Google Drive');
+  } catch (e) {
+    setDriveStatus('Kunde inte ansluta till Drive', true);
+  }
+}
+
+document.getElementById('driveSignInBtn').addEventListener('click', () => {
+  if (!tokenClient) return;
+  tokenClient.requestAccessToken({ prompt: 'consent' });
+});
+
+document.getElementById('driveSignOutBtn').addEventListener('click', () => {
+  accessToken = null;
+  driveFileId = null;
+  localStorage.removeItem('telexia_drive_signed_in');
+  document.getElementById('driveSignInBtn').style.display = '';
+  document.getElementById('driveSignOutBtn').style.display = 'none';
+  setDriveStatus('Utloggad – sparar lokalt');
+});
+let searchTerm = '';
+let qSearchTerm = '';
+let currentLogEntries = []; // working copy while a lead modal is open
+
+function isOverdue(lead) {
+  if (!lead.nextDate) return false;
+  if (lead.stage === 'signed' || lead.stage === 'lost') return false;
+  return lead.nextDate < todayStr();
+}
+
+function renderStats() {
+  const row = document.getElementById('statsRow');
+  const overdueCount = leads.filter(isOverdue).length;
+  let html = '';
+  STAGES.forEach(s => {
+    const count = leads.filter(l => l.stage === s.key).length;
+    html += `<div class="stat-pill"><b>${count}</b>${s.name}</div>`;
+  });
+  html += `<div class="stat-pill overdue"><b>${overdueCount}</b>försenad uppföljning</div>`;
+  row.innerHTML = html;
+}
+
+function renderBoard() {
+  const board = document.getElementById('board');
+  board.innerHTML = '';
+  STAGES.forEach(stage => {
+    const col = document.createElement('div');
+    col.className = 'column';
+    col.dataset.stage = stage.key;
+
+    const stageLeads = leads.filter(l => l.stage === stage.key && matchesSearch(l));
+
+    col.innerHTML = `<div class="column-head"><span class="name">${stage.name}</span><span class="count">${stageLeads.length}</span></div>`;
+
+    if (stageLeads.length === 0) {
+      const hint = document.createElement('div');
+      hint.className = 'empty-hint';
+      hint.textContent = 'Inga kunder här';
+      col.appendChild(hint);
+    }
+
+    stageLeads.forEach(lead => {
+      const card = document.createElement('div');
+      card.className = 'card' + (isOverdue(lead) ? ' overdue' : '');
+      card.draggable = true;
+      card.dataset.id = lead.id;
+      const logCount = (lead.log || []).length;
+      const weight = (lead.weight === undefined || lead.weight === null || lead.weight === '') ? 100 : Number(lead.weight);
+      const weightedVarde = lead.varde ? Math.round(Number(lead.varde) * weight / 100) : null;
+      card.innerHTML = `
+        <div class="kund">${escapeHtml(lead.kund || 'Namnlös kund')}</div>
+        ${lead.kontakt ? `<div class="kontakt">${escapeHtml(lead.kontakt)}${lead.telefon ? ` · <a href="tel:${escapeHtml(lead.telefon)}" class="card-link" onclick="event.stopPropagation()">${escapeHtml(lead.telefon)}</a>` : ''}</div>` : ''}
+        ${lead.adress ? `<div class="kontakt"><a href="${mapsUrl(lead.adress)}" target="_blank" rel="noopener" class="card-link" onclick="event.stopPropagation()">📍 ${escapeHtml(lead.adress)}</a></div>` : ''}
+        ${lead.next ? `<div class="next">${escapeHtml(lead.next)}</div>` : ''}
+        ${lead.nextDate ? `<div class="date${isOverdue(lead) ? ' overdue' : ''}">${lead.nextDate}</div>` : ''}
+        ${lead.varde ? `<div class="varde">${Number(lead.varde).toLocaleString('sv-SE')} kr &nbsp;·&nbsp; ${weight}% → ${weightedVarde.toLocaleString('sv-SE')} kr</div>` : ''}
+        ${logCount ? `<div class="logbadge">${logCount} logganteckning${logCount > 1 ? 'ar' : ''}</div>` : ''}
+      `;
+      card.addEventListener('click', () => openLeadModal(lead.id));
+      card.addEventListener('dragstart', e => {
+        e.dataTransfer.setData('text/plain', lead.id);
+      });
+      col.appendChild(card);
+    });
+
+    col.addEventListener('dragover', e => { e.preventDefault(); col.classList.add('dragover'); });
+    col.addEventListener('dragleave', () => col.classList.remove('dragover'));
+    col.addEventListener('drop', e => {
+      e.preventDefault();
+      col.classList.remove('dragover');
+      const id = e.dataTransfer.getData('text/plain');
+      const lead = leads.find(l => l.id === id);
+      if (lead) {
+        lead.stage = stage.key;
+        saveLeads(leads);
+        renderBoard();
+        renderStats();
+      }
+    });
+
+    board.appendChild(col);
+  });
+}
+
+function matchesSearch(lead) {
+  if (!searchTerm) return true;
+  const t = searchTerm.toLowerCase();
+  return (lead.kund || '').toLowerCase().includes(t) || (lead.kontakt || '').toLowerCase().includes(t);
+}
+
+function escapeHtml(str) {
+  const div = document.createElement('div');
+  div.textContent = str == null ? '' : str;
+  return div.innerHTML;
+}
+
+// ---------- AI + paste helpers ----------
+function extractAiText(result) {
+  if (result == null) return '';
+  if (typeof result === 'string') return result;
+  if (typeof result.text === 'string') return result.text;
+  if (typeof result.content === 'string') return result.content;
+  if (Array.isArray(result.content)) {
+    return result.content.map(c => (c && typeof c.text === 'string') ? c.text : '').join('\n').trim();
+  }
+  if (typeof result.message === 'string') return result.message;
+  if (typeof result.output === 'string') return result.output;
+  if (typeof result.result === 'string') return result.result;
+  if (typeof result.response === 'string') return result.response;
+  // Unknown shape — fall back to a readable dump instead of "[object Object]"
+  try { return JSON.stringify(result); } catch (e) { return String(result); }
+}
+
+async function askAi(prompt, dataArr) {
+  if (!window.cowork || typeof window.cowork.askClaude !== 'function') {
+    throw new Error('AI-tolkning är inte tillgänglig i denna vy.');
+  }
+  const result = await window.cowork.askClaude(prompt, dataArr);
+  return extractAiText(result);
+}
+
+function readFileAsDataUrl(file, cb) {
+  const reader = new FileReader();
+  reader.onload = () => cb(reader.result);
+  reader.readAsDataURL(file);
+}
+
+function setupPasteZone(zoneEl, fileBtn, fileInput, onImage) {
+  zoneEl.addEventListener('paste', e => {
+    e.preventDefault();
+    const items = (e.clipboardData || window.clipboardData).items || [];
+    let found = false;
+    for (const item of items) {
+      if (item.type && item.type.indexOf('image') !== -1) {
+        const file = item.getAsFile();
+        readFileAsDataUrl(file, onImage);
+        found = true;
+        break;
+      }
+    }
+    if (!found) {
+      zoneEl.textContent = zoneEl.dataset.placeholder;
+    }
+  });
+  zoneEl.addEventListener('keydown', e => {
+    // prevent typing text into the contenteditable zone
+    if (!(e.ctrlKey || e.metaKey)) e.preventDefault();
+  });
+  fileBtn.addEventListener('click', () => fileInput.click());
+  fileInput.addEventListener('change', e => {
+    const file = e.target.files[0];
+    if (file) readFileAsDataUrl(file, onImage);
+    fileInput.value = '';
+  });
+}
+
+function showImageInZone(zoneEl, dataUrl) {
+  zoneEl.classList.add('has-image');
+  zoneEl.innerHTML = '';
+  const img = document.createElement('img');
+  img.src = dataUrl;
+  zoneEl.appendChild(img);
+}
+function resetZone(zoneEl) {
+  zoneEl.classList.remove('has-image');
+  zoneEl.textContent = zoneEl.dataset.placeholder;
+}
+
+function openLightbox(src) {
+  document.getElementById('lightboxImg').src = src;
+  document.getElementById('lightboxBackdrop').classList.add('open');
+}
+document.getElementById('lightboxBackdrop').addEventListener('click', () => {
+  document.getElementById('lightboxBackdrop').classList.remove('open');
+});
+
+// ---------- Lead log rendering ----------
+function renderLeadLog() {
+  const list = document.getElementById('leadLogList');
+  if (currentLogEntries.length === 0) {
+    list.innerHTML = '<div class="log-empty">Inga anteckningar ännu</div>';
+    return;
+  }
+  list.innerHTML = '';
+  currentLogEntries.slice().reverse().forEach(entry => {
+    const div = document.createElement('div');
+    div.className = 'log-entry';
+    let body = '';
+    if (entry.type === 'image') {
+      body += `<img data-src="${entry.content}" class="log-img">`;
+      if (entry.aiText) body += `<div class="ai-tag">AI-tolkning:</div><div class="txt">${escapeHtml(entry.aiText)}</div>`;
+      else if (entry.aiPending) body += `<div class="ai-tag">Tolkar bild...</div>`;
+      else if (entry.aiError) body += `<div class="ai-tag" style="color:#fca5a5">${escapeHtml(entry.aiError)}</div>`;
+    } else {
+      body += `<div class="txt">${escapeHtml(entry.content)}</div>`;
+    }
+    div.innerHTML = `<div class="ts">${entry.ts}</div>${body}`;
+    const img = div.querySelector('.log-img');
+    if (img) img.addEventListener('click', () => openLightbox(entry.content));
+    list.appendChild(div);
+  });
+}
+
+function addImageLogEntry(dataUrl) {
+  // Note: automatic AI-reading of screenshots turned out to be unreliable
+  // (the in-page AI helper can't actually read pasted images), so screenshots
+  // are just saved as-is. Add a text note alongside if something needs to be
+  // remembered from the image.
+  const entry = { id: uid(), type: 'image', content: dataUrl, ts: nowLabel() };
+  currentLogEntries.push(entry);
+  renderLeadLog();
+  resetZone(document.getElementById('leadPasteZone'));
+  const statusEl = document.getElementById('leadAiStatus');
+  statusEl.textContent = 'Skärmdump sparad.';
+  statusEl.className = 'ai-status';
+}
+
+document.getElementById('leadLogAddBtn').addEventListener('click', () => {
+  const input = document.getElementById('leadLogText');
+  const text = input.value.trim();
+  if (!text) return;
+  currentLogEntries.push({ id: uid(), type: 'text', content: text, ts: nowLabel() });
+  input.value = '';
+  renderLeadLog();
+});
+document.getElementById('leadLogText').addEventListener('keydown', e => {
+  if (e.key === 'Enter') { e.preventDefault(); document.getElementById('leadLogAddBtn').click(); }
+});
+
+setupPasteZone(
+  document.getElementById('leadPasteZone'),
+  document.getElementById('leadPasteFileBtn'),
+  document.getElementById('leadPasteFileInput'),
+  dataUrl => addImageLogEntry(dataUrl)
+);
+
+// ---------- Lead modal ----------
+function updateLeadAdressLink() {
+  const val = document.getElementById('leadAdress').value.trim();
+  const hint = document.getElementById('leadAdressMapHint');
+  const link = document.getElementById('leadAdressMapLink');
+  if (val) {
+    link.href = mapsUrl(val);
+    hint.style.display = 'block';
+  } else {
+    hint.style.display = 'none';
+  }
+}
+function updateLeadWeightedHint() {
+  const varde = Number(document.getElementById('leadVarde').value) || 0;
+  const weight = Number(document.getElementById('leadWeight').value);
+  const hint = document.getElementById('leadWeightedHint');
+  if (varde > 0) {
+    hint.textContent = `Viktat värde: ${Math.round(varde * weight / 100).toLocaleString('sv-SE')} kr (${weight}% av ${varde.toLocaleString('sv-SE')} kr)`;
+  } else {
+    hint.textContent = '';
+  }
+}
+document.getElementById('leadAdress').addEventListener('input', updateLeadAdressLink);
+document.getElementById('leadVarde').addEventListener('input', updateLeadWeightedHint);
+document.getElementById('leadWeight').addEventListener('change', updateLeadWeightedHint);
+
+function openLeadModal(id, prefill) {
+  const backdrop = document.getElementById('leadModalBackdrop');
+  const isEdit = !!id;
+  document.getElementById('leadModalTitle').textContent = isEdit ? 'Redigera kund' : 'Ny kund';
+  document.getElementById('leadDeleteBtn').style.display = isEdit ? 'inline-block' : 'none';
+  document.getElementById('leadAiStatus').textContent = '';
+  resetZone(document.getElementById('leadPasteZone'));
+
+  if (isEdit) {
+    const lead = leads.find(l => l.id === id);
+    document.getElementById('leadId').value = lead.id;
+    document.getElementById('leadKund').value = lead.kund || '';
+    document.getElementById('leadKontakt').value = lead.kontakt || '';
+    document.getElementById('leadEmail').value = lead.email || '';
+    document.getElementById('leadTelefon').value = lead.telefon || '';
+    document.getElementById('leadAdress').value = lead.adress || '';
+    document.getElementById('leadVarde').value = lead.varde || '';
+    document.getElementById('leadWeight').value = (lead.weight === undefined || lead.weight === null || lead.weight === '') ? '100' : String(lead.weight);
+    document.getElementById('leadStage').value = lead.stage || 'booked';
+    document.getElementById('leadNext').value = lead.next || '';
+    document.getElementById('leadNextDate').value = lead.nextDate || '';
+    currentLogEntries = (lead.log || []).slice();
+  } else {
+    document.getElementById('leadId').value = '';
+    document.getElementById('leadKund').value = (prefill && prefill.kund) || '';
+    document.getElementById('leadKontakt').value = (prefill && prefill.kontakt) || '';
+    document.getElementById('leadEmail').value = (prefill && prefill.email) || '';
+    document.getElementById('leadTelefon').value = '';
+    document.getElementById('leadAdress').value = '';
+    document.getElementById('leadVarde').value = '';
+    document.getElementById('leadWeight').value = '50';
+    document.getElementById('leadStage').value = 'booked';
+    document.getElementById('leadNext').value = '';
+    document.getElementById('leadNextDate').value = '';
+    currentLogEntries = (prefill && prefill.log) ? prefill.log.slice() : [];
+  }
+  updateLeadAdressLink();
+  updateLeadWeightedHint();
+  renderLeadLog();
+  backdrop.classList.add('open');
+}
+function closeLeadModal() {
+  document.getElementById('leadModalBackdrop').classList.remove('open');
+  currentLogEntries = [];
+}
+
+document.getElementById('addLeadBtn').addEventListener('click', () => openLeadModal(null));
+document.getElementById('leadCancelBtn').addEventListener('click', closeLeadModal);
+document.getElementById('leadModalBackdrop').addEventListener('click', e => {
+  if (e.target.id === 'leadModalBackdrop') closeLeadModal();
+});
+
+document.getElementById('leadSaveBtn').addEventListener('click', () => {
+  const id = document.getElementById('leadId').value;
+  const data = {
+    kund: document.getElementById('leadKund').value.trim(),
+    kontakt: document.getElementById('leadKontakt').value.trim(),
+    email: document.getElementById('leadEmail').value.trim(),
+    telefon: document.getElementById('leadTelefon').value.trim(),
+    adress: document.getElementById('leadAdress').value.trim(),
+    varde: document.getElementById('leadVarde').value,
+    weight: Number(document.getElementById('leadWeight').value),
+    stage: document.getElementById('leadStage').value,
+    next: document.getElementById('leadNext').value.trim(),
+    nextDate: document.getElementById('leadNextDate').value,
+    log: currentLogEntries.slice(),
+  };
+  if (!data.kund) { alert('Ange kundnamn'); return; }
+
+  if (id) {
+    const lead = leads.find(l => l.id === id);
+    Object.assign(lead, data);
+  } else {
+    leads.push(Object.assign({ id: uid() }, data));
+  }
+  saveLeads(leads);
+  renderBoard();
+  renderStats();
+  closeLeadModal();
+});
+
+document.getElementById('leadDeleteBtn').addEventListener('click', () => {
+  const id = document.getElementById('leadId').value;
+  if (!id) return;
+  if (!confirm('Ta bort denna kund från pipelinen?')) return;
+  leads = leads.filter(l => l.id !== id);
+  saveLeads(leads);
+  renderBoard();
+  renderStats();
+  closeLeadModal();
+});
+
+document.getElementById('searchInput').addEventListener('input', e => {
+  searchTerm = e.target.value;
+  renderBoard();
+});
+
+document.getElementById('exportLeadsBtn').addEventListener('click', () => {
+  const flat = leads.map(l => Object.assign({}, l, {
+    log: (l.log || []).map(e => `[${e.ts}] ${e.type === 'image' ? (e.aiText || 'skärmdump') : e.content}`).join(' | ')
+  }));
+  exportCsv(flat, ['kund','kontakt','telefon','email','adress','varde','weight','stage','next','nextDate','log'], 'telexia-pipeline.csv');
+});
+
+// ---------- New customer from screenshot ----------
+// Note: automatic AI-extraction of kund/kontakt/email from the screenshot was
+// tried but turned out unreliable (the in-page AI helper can't reliably read
+// pasted images). So this flow now just attaches the screenshot to a new
+// customer card and lets you fill in the fields yourself in the modal that
+// opens next — quicker than it sounds since the screenshot stays visible
+// in the log for reference while you type.
+let shotDataUrl = null;
+setupPasteZone(
+  document.getElementById('shotPasteZone'),
+  document.getElementById('shotPasteFileBtn'),
+  document.getElementById('shotPasteFileInput'),
+  dataUrl => {
+    shotDataUrl = dataUrl;
+    showImageInZone(document.getElementById('shotPasteZone'), dataUrl);
+    document.getElementById('shotCreateBtn').disabled = false;
+    document.getElementById('shotAiStatus').innerHTML = '';
+  }
+);
+
+function resetShotModal() {
+  shotDataUrl = null;
+  document.getElementById('shotCreateBtn').disabled = true;
+  document.getElementById('shotAiStatus').innerHTML = '';
+  resetZone(document.getElementById('shotPasteZone'));
+}
+
+document.getElementById('addLeadFromImageBtn').addEventListener('click', () => {
+  resetShotModal();
+  document.getElementById('shotModalBackdrop').classList.add('open');
+});
+document.getElementById('shotCancelBtn').addEventListener('click', () => {
+  document.getElementById('shotModalBackdrop').classList.remove('open');
+});
+document.getElementById('shotModalBackdrop').addEventListener('click', e => {
+  if (e.target.id === 'shotModalBackdrop') document.getElementById('shotModalBackdrop').classList.remove('open');
+});
+
+document.getElementById('shotCreateBtn').addEventListener('click', () => {
+  if (!shotDataUrl) return;
+  const prefill = { log: [{ id: uid(), type: 'image', content: shotDataUrl, ts: nowLabel() }] };
+  document.getElementById('shotModalBackdrop').classList.remove('open');
+  openLeadModal(null, prefill);
+  resetShotModal();
+});
+
+// ---------- Questions tab ----------
+function renderQuestions() {
+  const body = document.getElementById('questionsBody');
+  body.innerHTML = '';
+  const filtered = questions.filter(q => {
+    if (!qSearchTerm) return true;
+    const t = qSearchTerm.toLowerCase();
+    return (q.kund || '').toLowerCase().includes(t) || (q.fraga || '').toLowerCase().includes(t);
+  });
+  if (filtered.length === 0) {
+    body.innerHTML = '<tr><td colspan="6" style="color:#6b7280;text-align:center;padding:20px">Inga frågor ännu</td></tr>';
+    return;
+  }
+  filtered.forEach(q => {
+    const tr = document.createElement('tr');
+    const statusClass = q.status === 'ny' ? 'q-status-ny' : (q.status === 'pagar' ? 'q-status-pagar' : 'q-status-lost');
+    const statusLabel = q.status === 'ny' ? 'Ny' : (q.status === 'pagar' ? 'Pågår' : 'Löst');
+    tr.innerHTML = `
+      <td>${escapeHtml(q.kund || '')}</td>
+      <td>${escapeHtml(q.fraga || '')}</td>
+      <td class="${statusClass}">${statusLabel}</td>
+      <td>${q.datum || ''}</td>
+      <td>${escapeHtml(q.anteckning || '')}</td>
+      <td class="row-actions"><button data-id="${q.id}" class="editQBtn">Redigera</button></td>
+    `;
+    tr.querySelector('.editQBtn').addEventListener('click', () => openQModal(q.id));
+    body.appendChild(tr);
+  });
+}
+
+function openQModal(id) {
+  const backdrop = document.getElementById('qModalBackdrop');
+  const isEdit = !!id;
+  document.getElementById('qModalTitle').textContent = isEdit ? 'Redigera fråga' : 'Ny fråga';
+  document.getElementById('qDeleteBtn').style.display = isEdit ? 'inline-block' : 'none';
+  if (isEdit) {
+    const q = questions.find(x => x.id === id);
+    document.getElementById('qId').value = q.id;
+    document.getElementById('qKund').value = q.kund || '';
+    document.getElementById('qFraga').value = q.fraga || '';
+    document.getElementById('qStatus').value = q.status || 'ny';
+    document.getElementById('qDatum').value = q.datum || todayStr();
+    document.getElementById('qAnteckning').value = q.anteckning || '';
+  } else {
+    document.getElementById('qId').value = '';
+    document.getElementById('qKund').value = '';
+    document.getElementById('qFraga').value = '';
+    document.getElementById('qStatus').value = 'ny';
+    document.getElementById('qDatum').value = todayStr();
+    document.getElementById('qAnteckning').value = '';
+  }
+  backdrop.classList.add('open');
+}
+function closeQModal() {
+  document.getElementById('qModalBackdrop').classList.remove('open');
+}
+
+document.getElementById('addQuestionBtn').addEventListener('click', () => openQModal(null));
+document.getElementById('qCancelBtn').addEventListener('click', closeQModal);
+document.getElementById('qModalBackdrop').addEventListener('click', e => {
+  if (e.target.id === 'qModalBackdrop') closeQModal();
+});
+
+document.getElementById('qSaveBtn').addEventListener('click', () => {
+  const id = document.getElementById('qId').value;
+  const data = {
+    kund: document.getElementById('qKund').value.trim(),
+    fraga: document.getElementById('qFraga').value.trim(),
+    status: document.getElementById('qStatus').value,
+    datum: document.getElementById('qDatum').value,
+    anteckning: document.getElementById('qAnteckning').value.trim(),
+  };
+  if (!data.fraga) { alert('Ange frågan'); return; }
+  if (id) {
+    const q = questions.find(x => x.id === id);
+    Object.assign(q, data);
+  } else {
+    questions.push(Object.assign({ id: uid() }, data));
+  }
+  saveQuestions(questions);
+  renderQuestions();
+  closeQModal();
+});
+
+document.getElementById('qDeleteBtn').addEventListener('click', () => {
+  const id = document.getElementById('qId').value;
+  if (!id) return;
+  if (!confirm('Ta bort denna fråga?')) return;
+  questions = questions.filter(x => x.id !== id);
+  saveQuestions(questions);
+  renderQuestions();
+  closeQModal();
+});
+
+document.getElementById('qSearchInput').addEventListener('input', e => {
+  qSearchTerm = e.target.value;
+  renderQuestions();
+});
+
+document.getElementById('exportQuestionsBtn').addEventListener('click', () => {
+  exportCsv(questions, ['kund','fraga','status','datum','anteckning'], 'telexia-produktfragor.csv');
+});
+
+function exportCsv(rows, cols, filename) {
+  const header = cols.join(';');
+  const lines = rows.map(r => cols.map(c => '"' + String(r[c] || '').replace(/"/g,'""') + '"').join(';'));
+  const csv = [header].concat(lines).join('\n');
+  const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
+// ---------- Tabs ----------
+document.querySelectorAll('.tab-btn').forEach(btn => {
+  btn.addEventListener('click', () => {
+    document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+    const tab = btn.dataset.tab;
+    document.getElementById('pipelineView').style.display = tab === 'pipeline' ? 'block' : 'none';
+    document.getElementById('questionsView').style.display = tab === 'questions' ? 'block' : 'none';
+  });
+});
+
+// ---------- Init ----------
+renderBoard();
+renderStats();
+renderQuestions();
+touchSavedLabel();
+initGoogleAuth();
+</script>
+</body>
+</html>
