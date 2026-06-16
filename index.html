@@ -133,6 +133,40 @@
   .paste-row { display: flex; gap: 8px; align-items: center; margin-top: 6px; }
   .ai-status { font-size: 11px; color: #93c5fd; }
   .ai-status.err { color: #fca5a5; }
+
+  .auth-gate { display: flex; align-items: center; justify-content: center; min-height: 70vh; padding: 20px; }
+  .auth-gate-box { text-align: center; max-width: 380px; }
+  .auth-gate-title { font-size: 18px; font-weight: 600; color: #f3f4f6; margin-bottom: 8px; }
+  .auth-gate-text { font-size: 13px; color: #9ca3af; margin-bottom: 18px; line-height: 1.5; }
+
+  .kpi-row { display: flex; gap: 10px; padding: 0 20px 12px; flex-wrap: wrap; }
+  .kpi-card { background: #161922; border: 1px solid #262b36; border-radius: 8px; padding: 10px 14px; min-width: 170px; flex: 1 1 170px; }
+  .kpi-card .kpi-label { font-size: 11px; color: #9ca3af; margin-bottom: 4px; display:flex; align-items:center; justify-content:space-between; gap:6px; }
+  .kpi-card .kpi-value { font-size: 18px; font-weight: 700; color: #f3f4f6; }
+  .kpi-card select.kpi-month { font-size: 11px; padding: 2px 4px; border-radius: 5px; border: 1px solid #2a2e37; background: #1a1d27; color: #cbd5e1; }
+  .kpi-card.signed .kpi-value { color: #34d399; }
+  .kpi-card.lost .kpi-value { color: #f87171; }
+
+  .stage-row { display: flex; gap: 6px; align-items: center; margin-bottom: 6px; }
+  .stage-row input[type="text"] { flex: 1; padding: 6px 8px; border: 1px solid #2a2e37; border-radius: 6px; font-size: 13px; background: #1a1d27; color: #e5e7eb; }
+  .stage-row select { padding: 6px 6px; border: 1px solid #2a2e37; border-radius: 6px; font-size: 12px; background: #1a1d27; color: #e5e7eb; }
+  .stage-row button { font-size: 12px; padding: 4px 7px; border-radius: 5px; border: 1px solid #2a2e37; background: #1a1d27; color: #d1d5db; cursor: pointer; }
+  .stage-row button:disabled { opacity: 0.3; cursor: not-allowed; }
+  .stage-row button.danger { color: #f87171; border-color: #7f1d1d; }
+
+  @media (max-width: 720px) {
+    .topbar { flex-wrap: wrap; gap: 8px; padding: 12px 14px; }
+    .tabs { padding: 0 14px; overflow-x: auto; }
+    .toolbar { padding: 10px 14px; }
+    .toolbar input[type="text"] { min-width: 0; flex: 1 1 100%; }
+    .kpi-row, .stats-row { padding: 0 14px 10px; }
+    .kpi-card { min-width: 140px; }
+    .board { padding: 0 14px 20px; }
+    .column { flex: 0 0 78vw; }
+    .modal { width: 94vw; padding: 14px; }
+    .field-row { flex-direction: column; gap: 0; }
+    .btn, .btn.secondary, .btn.ghost { padding: 9px 14px; }
+  }
 </style>
 </head>
 <body>
@@ -145,11 +179,20 @@
   <div style="display:flex;align-items:center;gap:10px;">
     <div id="lastSavedLabel" class="sub"></div>
     <div id="driveStatus" class="sub"></div>
-    <button class="btn secondary" id="driveSignInBtn">Logga in med Google</button>
     <button class="btn ghost" id="driveSignOutBtn" style="display:none">Logga ut</button>
   </div>
 </div>
 
+<div id="authGate" class="auth-gate">
+  <div class="auth-gate-box">
+    <div class="auth-gate-title">Logga in för att se din pipeline</div>
+    <div class="auth-gate-text">Pipeline och kunddata synkas via din Google Drive. Logga in med Google för att komma åt verktyget.</div>
+    <button class="btn" id="authGateSignInBtn">Logga in med Google</button>
+    <div id="authGateStatus" class="sub" style="margin-top:10px"></div>
+  </div>
+</div>
+
+<div id="appContent" style="display:none">
 <div class="tabs">
   <button class="tab-btn active" data-tab="pipeline">Pipeline</button>
   <button class="tab-btn" data-tab="questions">Produktspecialist-frågor</button>
@@ -160,8 +203,10 @@
     <input type="text" id="searchInput" placeholder="Sök kund eller kontaktperson...">
     <button class="btn" id="addLeadBtn">+ Ny kund</button>
     <button class="btn secondary" id="addLeadFromImageBtn">+ Ny kund från skärmdump</button>
+    <button class="btn ghost" id="manageStagesBtn">Hantera kategorier</button>
     <button class="btn ghost" id="exportLeadsBtn">Exportera CSV</button>
   </div>
+  <div class="kpi-row" id="kpiRow"></div>
   <div class="stats-row" id="statsRow"></div>
   <div class="board" id="board"></div>
 </div>
@@ -180,6 +225,7 @@
       <tbody id="questionsBody"></tbody>
     </table>
   </div>
+</div>
 </div>
 
 <!-- Lead create/edit modal -->
@@ -216,20 +262,15 @@
     <div class="hint" id="leadWeightedHint"></div>
     <div class="field">
       <label>Steg i pipeline</label>
-      <select id="leadStage">
-        <option value="booked">Möte bokat</option>
-        <option value="held">Möte hållet</option>
-        <option value="followup">Uppföljning skickad</option>
-        <option value="proposal">Avtalsförslag skickat</option>
-        <option value="proposal_followup">Uppföljning av avtalsförslag</option>
-        <option value="langbank">Långbänk</option>
-        <option value="signed">Signerat</option>
-        <option value="lost">Förlorad</option>
-      </select>
+      <select id="leadStage"></select>
     </div>
     <div class="field-row">
       <div class="field"><label>Nästa steg</label><input type="text" id="leadNext" placeholder="t.ex. ring kund om avtalsförslag"></div>
       <div class="field"><label>Nästa steg – datum</label><input type="date" id="leadNextDate"></div>
+    </div>
+    <div class="field-row">
+      <div class="field" id="leadSignedDateField" style="display:none"><label>Signeringsdatum</label><input type="date" id="leadSignedDate"></div>
+      <div class="field" id="leadLostDateField" style="display:none"><label>Förlorad-datum</label><input type="date" id="leadLostDate"></div>
     </div>
 
     <div class="section-title">Logg / anteckningar</div>
@@ -304,22 +345,66 @@
   </div>
 </div>
 
+<!-- Stage manager modal -->
+<div class="modal-backdrop" id="stageModalBackdrop">
+  <div class="modal">
+    <h2>Hantera kategorier</h2>
+    <div class="hint">Lägg till, ta bort, döp om och ändra ordning på pipelinens kategorier. "KPI-typ" styr vilka kategorier som räknas som signerat/förlorat i KPI-rutorna.</div>
+    <div id="stageRows"></div>
+    <button class="btn ghost" id="stageAddBtn" style="margin-top:6px">+ Lägg till kategori</button>
+    <div class="modal-actions">
+      <div class="left">
+        <button class="btn ghost" id="stageCancelBtn">Avbryt</button>
+      </div>
+      <button class="btn" id="stageSaveBtn">Spara</button>
+    </div>
+  </div>
+</div>
+
 <!-- Lightbox -->
 <div class="modal-backdrop" id="lightboxBackdrop" style="align-items:center;padding-top:0">
   <img id="lightboxImg" style="max-width:90vw;max-height:90vh;border-radius:8px">
 </div>
 
 <script>
-const STAGES = [
-  { key: 'booked', name: 'Möte bokat' },
-  { key: 'held', name: 'Möte hållet' },
-  { key: 'followup', name: 'Uppföljning skickad' },
-  { key: 'proposal', name: 'Avtalsförslag skickat' },
-  { key: 'proposal_followup', name: 'Uppföljning av avtalsförslag' },
-  { key: 'langbank', name: 'Långbänk' },
-  { key: 'signed', name: 'Signerat' },
-  { key: 'lost', name: 'Förlorad' },
+const STAGES_KEY = 'telexia_pipeline_stages_v1';
+const DEFAULT_STAGES = [
+  { key: 'booked', name: 'Möte bokat', kind: 'normal' },
+  { key: 'held', name: 'Möte hållet', kind: 'normal' },
+  { key: 'followup', name: 'Uppföljning', kind: 'normal' },
+  { key: 'proposal', name: 'Avtalsförslag skickat', kind: 'normal' },
+  { key: 'proposal_followup', name: 'Uppföljning av avtalsförslag', kind: 'normal' },
+  { key: 'langbank', name: 'Långbänk', kind: 'normal' },
+  { key: 'signed', name: 'Signerat', kind: 'won' },
+  { key: 'lost', name: 'Förlorad', kind: 'lost' },
 ];
+function loadStages() {
+  try {
+    const s = JSON.parse(localStorage.getItem(STAGES_KEY));
+    if (Array.isArray(s) && s.length) {
+      s.forEach(st => { if (!st.kind) st.kind = 'normal'; });
+      return s;
+    }
+  } catch(e) {}
+  return DEFAULT_STAGES.map(s => Object.assign({}, s));
+}
+function saveStages(s) {
+  localStorage.setItem(STAGES_KEY, JSON.stringify(s));
+  touchSavedLabel();
+  scheduleDrivePush();
+}
+let STAGES = loadStages();
+
+function getStageByKey(key) { return STAGES.find(s => s.key === key); }
+function stageKind(key) { const s = getStageByKey(key); return s ? s.kind : 'normal'; }
+
+function populateStageSelect() {
+  const sel = document.getElementById('leadStage');
+  if (!sel) return;
+  const current = sel.value;
+  sel.innerHTML = STAGES.map(s => `<option value="${s.key}">${escapeHtml(s.name)}</option>`).join('');
+  if (current && getStageByKey(current)) sel.value = current;
+}
 
 function mapsUrl(address) {
   return 'https://www.google.com/maps/search/?api=1&query=' + encodeURIComponent(address);
@@ -424,6 +509,20 @@ function tryHandleAuthRedirect() {
   return false;
 }
 
+function showAuthGate(statusText, isErr) {
+  document.getElementById('authGate').style.display = 'flex';
+  document.getElementById('appContent').style.display = 'none';
+  document.getElementById('driveSignOutBtn').style.display = 'none';
+  const gs = document.getElementById('authGateStatus');
+  gs.textContent = statusText || '';
+  gs.style.color = isErr ? '#fca5a5' : '#9ca3af';
+}
+function showAppContent() {
+  document.getElementById('authGate').style.display = 'none';
+  document.getElementById('appContent').style.display = 'block';
+  document.getElementById('driveSignOutBtn').style.display = '';
+}
+
 function initGoogleAuth() {
   const handled = tryHandleAuthRedirect();
   if (handled) return;
@@ -432,8 +531,10 @@ function initGoogleAuth() {
   sessionStorage.removeItem('telexia_silent_attempt');
   if (signedInFlag && !justAttempted) {
     sessionStorage.setItem('telexia_silent_attempt', '1');
-    setDriveStatus('Loggar in...');
+    showAuthGate('Loggar in...');
     startSignIn('none');
+  } else {
+    showAuthGate();
   }
 }
 
@@ -443,9 +544,8 @@ async function driveFetch(url, options) {
   const res = await fetch(url, options);
   if (res.status === 401) {
     accessToken = null;
-    document.getElementById('driveSignInBtn').style.display = '';
-    document.getElementById('driveSignOutBtn').style.display = 'none';
-    setDriveStatus('Sessionen har gått ut – logga in igen', true);
+    localStorage.removeItem('telexia_drive_signed_in');
+    showAuthGate('Sessionen har gått ut – logga in igen', true);
   }
   return res;
 }
@@ -458,7 +558,7 @@ async function findOrCreateDriveFile() {
     driveFileId = listData.files[0].id;
     return 'existing';
   }
-  const seed = JSON.stringify({ leads, questions });
+  const seed = JSON.stringify({ leads, questions, stages: STAGES });
   const metadata = { name: DRIVE_FILE_NAME, mimeType: 'application/json' };
   const form = new FormData();
   form.append('metadata', new Blob([JSON.stringify(metadata)], { type: 'application/json' }));
@@ -482,7 +582,7 @@ async function pushToDrive() {
   if (!accessToken || !driveFileId) return;
   setDriveStatus('Synkar...');
   try {
-    const body = JSON.stringify({ leads, questions });
+    const body = JSON.stringify({ leads, questions, stages: STAGES });
     const res = await driveFetch('https://www.googleapis.com/upload/drive/v3/files/' + driveFileId + '?uploadType=media', {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
@@ -503,8 +603,7 @@ function scheduleDrivePush() {
 }
 
 async function onSignedIn() {
-  document.getElementById('driveSignInBtn').style.display = 'none';
-  document.getElementById('driveSignOutBtn').style.display = '';
+  showAppContent();
   setDriveStatus('Ansluter till Google Drive...');
   try {
     const result = await findOrCreateDriveFile();
@@ -513,10 +612,16 @@ async function onSignedIn() {
       if (remote) {
         leads = migrateLeads(remote.leads || []);
         questions = remote.questions || [];
+        if (Array.isArray(remote.stages) && remote.stages.length) {
+          remote.stages.forEach(st => { if (!st.kind) st.kind = 'normal'; });
+          STAGES = remote.stages;
+          saveStages(STAGES);
+        }
         localStorage.setItem(LEADS_KEY, JSON.stringify(leads));
         localStorage.setItem(Q_KEY, JSON.stringify(questions));
+        populateStageSelect();
         renderBoard();
-        renderStats();
+        renderStats(); renderKpis();
         renderQuestions();
       }
     }
@@ -526,7 +631,7 @@ async function onSignedIn() {
   }
 }
 
-document.getElementById('driveSignInBtn').addEventListener('click', () => {
+document.getElementById('authGateSignInBtn').addEventListener('click', () => {
   startSignIn();
 });
 
@@ -535,9 +640,7 @@ document.getElementById('driveSignOutBtn').addEventListener('click', () => {
   driveFileId = null;
   localStorage.removeItem('telexia_drive_signed_in');
   sessionStorage.removeItem('telexia_silent_attempt');
-  document.getElementById('driveSignInBtn').style.display = '';
-  document.getElementById('driveSignOutBtn').style.display = 'none';
-  setDriveStatus('Utloggad – sparar lokalt');
+  showAuthGate('Utloggad – sparar lokalt');
 });
 let searchTerm = '';
 let qSearchTerm = '';
@@ -547,6 +650,77 @@ function isOverdue(lead) {
   if (!lead.nextDate) return false;
   if (lead.stage === 'signed' || lead.stage === 'lost') return false;
   return lead.nextDate < todayStr();
+}
+
+let signedKpiMonth = todayStr().slice(0,7);
+let lostKpiMonth = todayStr().slice(0,7);
+
+function monthLabel(ym) {
+  const [y,m] = ym.split('-');
+  const d = new Date(Number(y), Number(m)-1, 1);
+  return d.toLocaleDateString('sv-SE', { month: 'long', year: 'numeric' });
+}
+
+function monthOptionsFor(dates, currentSel) {
+  const set = new Set(dates.filter(Boolean).map(d => d.slice(0,7)));
+  set.add(currentSel);
+  set.add(todayStr().slice(0,7));
+  return Array.from(set).sort().reverse();
+}
+
+function sumVarde(arr) {
+  return arr.reduce((sum, l) => sum + (Number(l.varde) || 0), 0);
+}
+function sumWeighted(arr) {
+  return arr.reduce((sum, l) => {
+    const w = (l.weight === undefined || l.weight === null || l.weight === '') ? 100 : Number(l.weight);
+    return sum + Math.round((Number(l.varde) || 0) * w / 100);
+  }, 0);
+}
+function fmtKr(n) { return Math.round(n).toLocaleString('sv-SE') + ' kr'; }
+
+function renderKpis() {
+  const row = document.getElementById('kpiRow');
+  if (!row) return;
+  const lostLeads = leads.filter(l => stageKind(l.stage) === 'lost');
+  const wonLeads = leads.filter(l => stageKind(l.stage) === 'won');
+  const activeLeads = leads.filter(l => stageKind(l.stage) === 'normal');
+
+  const totalVarde = sumVarde(leads.filter(l => stageKind(l.stage) !== 'lost'));
+  const weightedVarde = sumWeighted(activeLeads);
+
+  const signedMonthOpts = monthOptionsFor(wonLeads.map(l => l.signedDate), signedKpiMonth);
+  const signedSum = sumVarde(wonLeads.filter(l => l.signedDate && l.signedDate.slice(0,7) === signedKpiMonth));
+
+  const lostMonthOpts = monthOptionsFor(lostLeads.map(l => l.lostDate), lostKpiMonth);
+  const lostSum = sumVarde(lostLeads.filter(l => l.lostDate && l.lostDate.slice(0,7) === lostKpiMonth));
+
+  row.innerHTML = `
+    <div class="kpi-card">
+      <div class="kpi-label">Totalt ordervärde</div>
+      <div class="kpi-value">${fmtKr(totalVarde)}</div>
+    </div>
+    <div class="kpi-card">
+      <div class="kpi-label">Viktat ordervärde</div>
+      <div class="kpi-value">${fmtKr(weightedVarde)}</div>
+    </div>
+    <div class="kpi-card signed">
+      <div class="kpi-label"><span>Signerat</span><select class="kpi-month" id="signedKpiMonthSel">${signedMonthOpts.map(m => `<option value="${m}"${m===signedKpiMonth?' selected':''}>${monthLabel(m)}</option>`).join('')}</select></div>
+      <div class="kpi-value">${fmtKr(signedSum)}</div>
+    </div>
+    <div class="kpi-card lost">
+      <div class="kpi-label"><span>Förlorat</span><select class="kpi-month" id="lostKpiMonthSel">${lostMonthOpts.map(m => `<option value="${m}"${m===lostKpiMonth?' selected':''}>${monthLabel(m)}</option>`).join('')}</select></div>
+      <div class="kpi-value">${fmtKr(lostSum)}</div>
+    </div>
+  `;
+  document.getElementById('signedKpiMonthSel').addEventListener('change', e => {
+    signedKpiMonth = e.target.value;
+    renderKpis();
+  });
+  document.getElementById('lostKpiMonthSel').addEventListener('change', e => {
+    lostKpiMonth = e.target.value;
+    renderKpis();
+  });
 }
 
 function renderStats() {
@@ -613,9 +787,10 @@ function renderBoard() {
       const lead = leads.find(l => l.id === id);
       if (lead) {
         lead.stage = stage.key;
+        if (stage.kind === 'lost' && !lead.lostDate) lead.lostDate = todayStr();
         saveLeads(leads);
         renderBoard();
-        renderStats();
+        renderStats(); renderKpis();
       }
     });
 
@@ -801,6 +976,17 @@ document.getElementById('leadAdress').addEventListener('input', updateLeadAdress
 document.getElementById('leadVarde').addEventListener('input', updateLeadWeightedHint);
 document.getElementById('leadWeight').addEventListener('change', updateLeadWeightedHint);
 
+function updateLeadStageDateFields() {
+  const kind = stageKind(document.getElementById('leadStage').value);
+  document.getElementById('leadSignedDateField').style.display = kind === 'won' ? 'block' : 'none';
+  document.getElementById('leadLostDateField').style.display = kind === 'lost' ? 'block' : 'none';
+  if (kind === 'lost') {
+    const lostInput = document.getElementById('leadLostDate');
+    if (!lostInput.value) lostInput.value = todayStr();
+  }
+}
+document.getElementById('leadStage').addEventListener('change', updateLeadStageDateFields);
+
 function openLeadModal(id, prefill) {
   const backdrop = document.getElementById('leadModalBackdrop');
   const isEdit = !!id;
@@ -808,6 +994,8 @@ function openLeadModal(id, prefill) {
   document.getElementById('leadDeleteBtn').style.display = isEdit ? 'inline-block' : 'none';
   document.getElementById('leadAiStatus').textContent = '';
   resetZone(document.getElementById('leadPasteZone'));
+  populateStageSelect();
+  const defaultStageKey = STAGES[0] ? STAGES[0].key : 'booked';
 
   if (isEdit) {
     const lead = leads.find(l => l.id === id);
@@ -819,9 +1007,11 @@ function openLeadModal(id, prefill) {
     document.getElementById('leadAdress').value = lead.adress || '';
     document.getElementById('leadVarde').value = lead.varde || '';
     document.getElementById('leadWeight').value = (lead.weight === undefined || lead.weight === null || lead.weight === '') ? '100' : String(lead.weight);
-    document.getElementById('leadStage').value = lead.stage || 'booked';
+    document.getElementById('leadStage').value = lead.stage || defaultStageKey;
     document.getElementById('leadNext').value = lead.next || '';
     document.getElementById('leadNextDate').value = lead.nextDate || '';
+    document.getElementById('leadSignedDate').value = lead.signedDate || '';
+    document.getElementById('leadLostDate').value = lead.lostDate || '';
     currentLogEntries = (lead.log || []).slice();
   } else {
     document.getElementById('leadId').value = '';
@@ -832,13 +1022,16 @@ function openLeadModal(id, prefill) {
     document.getElementById('leadAdress').value = '';
     document.getElementById('leadVarde').value = '';
     document.getElementById('leadWeight').value = '50';
-    document.getElementById('leadStage').value = 'booked';
+    document.getElementById('leadStage').value = defaultStageKey;
     document.getElementById('leadNext').value = '';
     document.getElementById('leadNextDate').value = '';
+    document.getElementById('leadSignedDate').value = '';
+    document.getElementById('leadLostDate').value = '';
     currentLogEntries = (prefill && prefill.log) ? prefill.log.slice() : [];
   }
   updateLeadAdressLink();
   updateLeadWeightedHint();
+  updateLeadStageDateFields();
   renderLeadLog();
   backdrop.classList.add('open');
 }
@@ -866,8 +1059,11 @@ document.getElementById('leadSaveBtn').addEventListener('click', () => {
     stage: document.getElementById('leadStage').value,
     next: document.getElementById('leadNext').value.trim(),
     nextDate: document.getElementById('leadNextDate').value,
+    signedDate: document.getElementById('leadSignedDate').value,
+    lostDate: document.getElementById('leadLostDate').value,
     log: currentLogEntries.slice(),
   };
+  if (stageKind(data.stage) === 'lost' && !data.lostDate) data.lostDate = todayStr();
   if (!data.kund) { alert('Ange kundnamn'); return; }
 
   if (id) {
@@ -878,7 +1074,7 @@ document.getElementById('leadSaveBtn').addEventListener('click', () => {
   }
   saveLeads(leads);
   renderBoard();
-  renderStats();
+  renderStats(); renderKpis();
   closeLeadModal();
 });
 
@@ -889,7 +1085,7 @@ document.getElementById('leadDeleteBtn').addEventListener('click', () => {
   leads = leads.filter(l => l.id !== id);
   saveLeads(leads);
   renderBoard();
-  renderStats();
+  renderStats(); renderKpis();
   closeLeadModal();
 });
 
@@ -902,7 +1098,85 @@ document.getElementById('exportLeadsBtn').addEventListener('click', () => {
   const flat = leads.map(l => Object.assign({}, l, {
     log: (l.log || []).map(e => `[${e.ts}] ${e.type === 'image' ? (e.aiText || 'skärmdump') : e.content}`).join(' | ')
   }));
-  exportCsv(flat, ['kund','kontakt','telefon','email','adress','varde','weight','stage','next','nextDate','log'], 'telexia-pipeline.csv');
+  exportCsv(flat, ['kund','kontakt','telefon','email','adress','varde','weight','stage','next','nextDate','signedDate','lostDate','log'], 'telexia-pipeline.csv');
+});
+
+// ---------- Stage manager ----------
+let stageWorkingCopy = [];
+
+function renderStageRows() {
+  const wrap = document.getElementById('stageRows');
+  wrap.innerHTML = '';
+  stageWorkingCopy.forEach((s, idx) => {
+    const row = document.createElement('div');
+    row.className = 'stage-row';
+    row.innerHTML = `
+      <input type="text" data-idx="${idx}" class="stageNameInput" value="${escapeHtml(s.name)}">
+      <select data-idx="${idx}" class="stageKindSelect">
+        <option value="normal"${s.kind==='normal'?' selected':''}>Normal</option>
+        <option value="won"${s.kind==='won'?' selected':''}>Signerat (KPI)</option>
+        <option value="lost"${s.kind==='lost'?' selected':''}>Förlorat (KPI)</option>
+      </select>
+      <button type="button" data-idx="${idx}" class="stageUpBtn" title="Flytta upp" ${idx===0?'disabled':''}>↑</button>
+      <button type="button" data-idx="${idx}" class="stageDownBtn" title="Flytta ner" ${idx===stageWorkingCopy.length-1?'disabled':''}>↓</button>
+      <button type="button" data-idx="${idx}" class="stageDelBtn danger" title="Ta bort" ${stageWorkingCopy.length<=1?'disabled':''}>Ta bort</button>
+    `;
+    wrap.appendChild(row);
+  });
+  wrap.querySelectorAll('.stageNameInput').forEach(el => el.addEventListener('input', e => {
+    stageWorkingCopy[Number(e.target.dataset.idx)].name = e.target.value;
+  }));
+  wrap.querySelectorAll('.stageKindSelect').forEach(el => el.addEventListener('change', e => {
+    stageWorkingCopy[Number(e.target.dataset.idx)].kind = e.target.value;
+  }));
+  wrap.querySelectorAll('.stageUpBtn').forEach(el => el.addEventListener('click', e => {
+    const i = Number(e.target.dataset.idx);
+    if (i > 0) { [stageWorkingCopy[i-1], stageWorkingCopy[i]] = [stageWorkingCopy[i], stageWorkingCopy[i-1]]; renderStageRows(); }
+  }));
+  wrap.querySelectorAll('.stageDownBtn').forEach(el => el.addEventListener('click', e => {
+    const i = Number(e.target.dataset.idx);
+    if (i < stageWorkingCopy.length-1) { [stageWorkingCopy[i+1], stageWorkingCopy[i]] = [stageWorkingCopy[i], stageWorkingCopy[i+1]]; renderStageRows(); }
+  }));
+  wrap.querySelectorAll('.stageDelBtn').forEach(el => el.addEventListener('click', e => {
+    const i = Number(e.target.dataset.idx);
+    if (stageWorkingCopy.length <= 1) return;
+    const removed = stageWorkingCopy[i];
+    const count = leads.filter(l => l.stage === removed.key).length;
+    if (count > 0) {
+      if (!confirm(`${count} kund(er) ligger i "${removed.name}". De flyttas till "${stageWorkingCopy[i===0?1:0].name}" om du tar bort kategorin. Fortsätt?`)) return;
+    }
+    stageWorkingCopy.splice(i, 1);
+    renderStageRows();
+  }));
+}
+
+document.getElementById('manageStagesBtn').addEventListener('click', () => {
+  stageWorkingCopy = STAGES.map(s => Object.assign({}, s));
+  renderStageRows();
+  document.getElementById('stageModalBackdrop').classList.add('open');
+});
+document.getElementById('stageCancelBtn').addEventListener('click', () => {
+  document.getElementById('stageModalBackdrop').classList.remove('open');
+});
+document.getElementById('stageModalBackdrop').addEventListener('click', e => {
+  if (e.target.id === 'stageModalBackdrop') document.getElementById('stageModalBackdrop').classList.remove('open');
+});
+document.getElementById('stageAddBtn').addEventListener('click', () => {
+  stageWorkingCopy.push({ key: uid(), name: 'Ny kategori', kind: 'normal' });
+  renderStageRows();
+});
+document.getElementById('stageSaveBtn').addEventListener('click', () => {
+  const cleaned = stageWorkingCopy.map(s => Object.assign({}, s, { name: s.name.trim() || 'Namnlös' }));
+  const keptKeys = new Set(cleaned.map(s => s.key));
+  const fallbackKey = cleaned[0].key;
+  leads.forEach(l => { if (!keptKeys.has(l.stage)) l.stage = fallbackKey; });
+  STAGES = cleaned;
+  saveStages(STAGES);
+  saveLeads(leads);
+  populateStageSelect();
+  renderBoard();
+  renderStats(); renderKpis();
+  document.getElementById('stageModalBackdrop').classList.remove('open');
 });
 
 // ---------- New customer from screenshot ----------
@@ -1079,8 +1353,9 @@ document.querySelectorAll('.tab-btn').forEach(btn => {
 });
 
 // ---------- Init ----------
+populateStageSelect();
 renderBoard();
-renderStats();
+renderStats(); renderKpis();
 renderQuestions();
 touchSavedLabel();
 initGoogleAuth();
