@@ -211,6 +211,41 @@
   .agenda-done-btn:hover { border-color: #34d399; color: #34d399; }
   .agenda-item.is-done .agenda-done-btn { border-color: #34d399; color: #34d399; }
 
+  /* Process edit modal — clearer visual border per request */
+  .modal.modal-blue { border: 2px solid #3b82f6; box-shadow: 0 0 0 1px rgba(59,130,246,0.25), 0 8px 24px rgba(0,0,0,0.5); }
+  /* Quick-add customer modal stacks on top of the process modal */
+  #custQuickModalBackdrop { z-index: 60; }
+
+  .registry-toolbar { display: flex; gap: 8px; padding: 12px 20px; }
+  .registry-toolbar input[type="text"] { flex: 1; }
+  .registry-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 10px; padding: 0 20px 24px; }
+  .kund-card {
+    background: #1d212b; border-radius: 8px; padding: 12px; border: 1px solid #2a2e37; cursor: pointer;
+    transition: border-color 0.12s, box-shadow 0.12s;
+  }
+  .kund-card:hover { border-color: #3b82f6; box-shadow: 0 0 0 1px #3b82f6; }
+  .kund-card .knamn { font-size: 14px; font-weight: 600; color: #f3f4f6; }
+  .kund-card .kinfo { font-size: 11px; color: #9ca3af; margin-top: 4px; }
+  .kund-card .kcount { font-size: 11px; color: #93c5fd; margin-top: 6px; }
+
+  .contact-row, .event-row {
+    display: flex; gap: 6px; align-items: center; margin-bottom: 6px; background: #11141b;
+    border: 1px solid #20242f; border-radius: 8px; padding: 6px;
+  }
+  .contact-row input, .event-row input[type="text"] { flex: 1 1 auto; min-width: 0; }
+  .event-row input[type="date"] { flex: 0 0 130px; }
+  .event-row label.event-done { display: flex; align-items: center; gap: 4px; font-size: 11px; color: #9ca3af; flex-shrink: 0; white-space: nowrap; }
+  .contact-row button, .event-row button { flex-shrink: 0; font-size: 12px; padding: 4px 7px; border-radius: 5px; border: 1px solid #2a2e37; background: #1a1d27; color: #f87171; cursor: pointer; }
+
+  .process-list-item {
+    display: flex; justify-content: space-between; align-items: center; gap: 8px; padding: 8px 10px;
+    background: #1d212b; border: 1px solid #2a2e37; border-radius: 8px; margin-bottom: 6px; cursor: pointer;
+  }
+  .process-list-item:hover { border-color: #3b82f6; }
+  .process-list-item .pname { font-size: 12px; color: #e5e7eb; }
+  .process-list-item .pmeta { font-size: 11px; color: #9ca3af; }
+  .process-list-item.is-closed { opacity: 0.6; }
+
   @media (max-width: 720px) {
     .topbar { flex-wrap: wrap; gap: 8px; padding: 12px 14px; }
     .topbar h1 { font-size: 17px; }
@@ -280,6 +315,7 @@
 <div id="appContent" style="display:none">
 <div class="tabs">
   <button class="tab-btn active" data-tab="pipeline">Pipeline</button>
+  <button class="tab-btn" data-tab="registry">Kundregister</button>
   <button class="tab-btn" data-tab="activity">Aktivitet</button>
   <button class="tab-btn" data-tab="questions">Produktspecialist-frågor</button>
 </div>
@@ -287,8 +323,8 @@
 <div id="pipelineView">
   <div class="toolbar">
     <input type="text" id="searchInput" placeholder="Sök kund eller kontaktperson...">
-    <button class="btn" id="addLeadBtn">+ Ny kund</button>
-    <button class="btn secondary" id="addLeadFromImageBtn">+ Ny kund från skärmdump</button>
+    <button class="btn" id="addLeadBtn">+ Ny process</button>
+    <button class="btn secondary" id="addLeadFromImageBtn">+ Ny process från skärmdump</button>
     <button class="btn ghost" id="manageStagesBtn">Hantera kategorier</button>
     <button class="btn ghost" id="manageTagsBtn">Hantera taggar</button>
     <button class="btn ghost" id="exportLeadsBtn">Exportera CSV</button>
@@ -296,6 +332,14 @@
   <div class="kpi-row" id="kpiRow"></div>
   <div class="stats-row" id="statsRow"></div>
   <div class="board" id="board"></div>
+</div>
+
+<div id="registryView" style="display:none">
+  <div class="registry-toolbar">
+    <input type="text" id="registrySearchInput" placeholder="Sök kund...">
+    <button class="btn" id="registryAddBtn">+</button>
+  </div>
+  <div class="registry-grid" id="registryGrid"></div>
 </div>
 
 <div id="activityView" style="display:none">
@@ -324,21 +368,15 @@
 
 <!-- Lead create/edit modal -->
 <div class="modal-backdrop" id="leadModalBackdrop">
-  <div class="modal">
-    <h2 id="leadModalTitle">Ny kund</h2>
+  <div class="modal modal-blue">
+    <h2 id="leadModalTitle">Ny process</h2>
     <input type="hidden" id="leadId">
-    <div class="field-row">
-      <div class="field"><label>Kundnamn</label><input type="text" id="leadKund"></div>
-      <div class="field"><label>Kontaktperson</label><input type="text" id="leadKontakt"></div>
-    </div>
-    <div class="field-row">
-      <div class="field"><label>E-post</label><input type="text" id="leadEmail"></div>
-      <div class="field"><label>Telefonnummer (kontaktperson)</label><input type="text" id="leadTelefon"></div>
-    </div>
     <div class="field">
-      <label>Adress</label>
-      <input type="text" id="leadAdress" placeholder="Gata, postnummer, ort">
-      <div class="hint" id="leadAdressMapHint" style="display:none;margin-top:4px"><a id="leadAdressMapLink" href="#" target="_blank" rel="noopener" style="color:#60a5fa">Öppna i Google Maps ↗</a></div>
+      <label>Kund</label>
+      <div style="display:flex;gap:6px">
+        <select id="leadKundSelect" style="flex:1"></select>
+        <button type="button" class="btn ghost" id="leadKundAddBtn" style="flex-shrink:0">+ Ny kund</button>
+      </div>
     </div>
     <div class="field-row">
       <div class="field"><label>Värde (kr)</label><input type="number" id="leadVarde"></div>
@@ -362,9 +400,10 @@
       <label>Taggar</label>
       <div class="tag-picker" id="leadTagsPicker"></div>
     </div>
-    <div class="field-row">
-      <div class="field"><label>Nästa steg</label><input type="text" id="leadNext" placeholder="t.ex. ring kund om avtalsförslag"></div>
-      <div class="field"><label>Nästa steg – datum</label><input type="date" id="leadNextDate"></div>
+    <div class="field">
+      <label>Händelser</label>
+      <div id="leadEventsList"></div>
+      <button type="button" class="btn ghost" id="leadEventAddBtn">+ Lägg till händelse</button>
     </div>
     <div class="field-row">
       <div class="field" id="leadSignedDateField" style="display:none"><label>Signeringsdatum</label><input type="date" id="leadSignedDate"></div>
@@ -390,6 +429,62 @@
         <button class="btn ghost" id="leadDeleteBtn" style="display:none;color:#f87171;border-color:#7f1d1d">Ta bort</button>
       </div>
       <button class="btn" id="leadSaveBtn">Spara</button>
+    </div>
+  </div>
+</div>
+
+<!-- Customer detail modal -->
+<div class="modal-backdrop" id="customerModalBackdrop">
+  <div class="modal">
+    <h2 id="customerModalTitle">Kund</h2>
+    <input type="hidden" id="customerId">
+    <div class="field"><label>Kundnamn</label><input type="text" id="customerNamn"></div>
+    <div class="field"><label>Adress</label><input type="text" id="customerAdress" placeholder="Gata, postnummer, ort"></div>
+    <div class="field">
+      <label>Kontaktpersoner</label>
+      <div id="customerContactsList"></div>
+      <button type="button" class="btn ghost" id="customerContactAddBtn">+ Lägg till kontaktperson</button>
+    </div>
+
+    <div class="section-title">Anteckningar</div>
+    <div class="log-list" id="customerLogList"></div>
+    <div class="log-add-row">
+      <input type="text" id="customerLogText" placeholder="Skriv en anteckning...">
+      <button class="btn ghost" id="customerLogAddBtn">Lägg till</button>
+    </div>
+    <div class="paste-zone" id="customerPasteZone" contenteditable="true" tabindex="0" data-placeholder="Klicka här och klistra in en skärmdump (Ctrl+V)">Klicka här och klistra in en skärmdump (Ctrl+V)</div>
+    <div class="paste-row">
+      <button class="btn ghost" id="customerPasteFileBtn">Välj fil istället</button>
+      <input type="file" id="customerPasteFileInput" accept="image/*" style="display:none">
+    </div>
+
+    <div class="section-title">Processer</div>
+    <div id="customerProcessList"></div>
+
+    <div class="modal-actions">
+      <div class="left">
+        <button class="btn ghost" id="customerCancelBtn">Avbryt</button>
+        <button class="btn ghost" id="customerDeleteBtn" style="display:none;color:#f87171;border-color:#7f1d1d">Ta bort</button>
+      </div>
+      <button class="btn" id="customerSaveBtn">Spara</button>
+    </div>
+  </div>
+</div>
+
+<!-- Quick-add customer modal (stacks on top of process modal or opens from registry) -->
+<div class="modal-backdrop" id="custQuickModalBackdrop">
+  <div class="modal">
+    <h2>Ny kund</h2>
+    <div class="field"><label>Kundnamn</label><input type="text" id="custQuickNamn"></div>
+    <div class="field"><label>Adress</label><input type="text" id="custQuickAdress"></div>
+    <div class="field-row">
+      <div class="field"><label>Kontaktperson</label><input type="text" id="custQuickKontakt"></div>
+      <div class="field"><label>Telefon</label><input type="text" id="custQuickTelefon"></div>
+    </div>
+    <div class="field"><label>E-post</label><input type="text" id="custQuickEmail"></div>
+    <div class="modal-actions">
+      <div class="left"><button class="btn ghost" id="custQuickCancelBtn">Avbryt</button></div>
+      <button class="btn" id="custQuickSaveBtn">Skapa kund</button>
     </div>
   </div>
 </div>
@@ -571,13 +666,75 @@ function migrateLeads(data) {
     if (l.weight === undefined || l.weight === null || l.weight === '') l.weight = 100;
     if (!Array.isArray(l.tags)) l.tags = [];
     if (l.nextDone === undefined || l.nextDone === null) l.nextDone = false;
+    // migrate legacy single next-step (next/nextDate/nextDone) to an events array
+    if (!Array.isArray(l.events)) {
+      l.events = [];
+      if (l.next || l.nextDate) {
+        l.events.push({ id: uid(), text: l.next || '', datum: l.nextDate || '', utford: !!l.nextDone });
+      }
+    }
+    delete l.next;
+    delete l.nextDate;
+    delete l.nextDone;
   });
   return data;
 }
 function loadLeads() {
   let data;
   try { data = JSON.parse(localStorage.getItem(LEADS_KEY)) || []; } catch(e) { data = []; }
-  return migrateLeads(data);
+  data = migrateLeads(data);
+  localStorage.setItem(LEADS_KEY, JSON.stringify(data));
+  return data;
+}
+
+// ---------- Kunder (kundregister) ----------
+const CUSTOMERS_KEY = 'telexia_pipeline_customers_v1';
+function loadCustomersRaw() {
+  try {
+    const c = JSON.parse(localStorage.getItem(CUSTOMERS_KEY));
+    if (Array.isArray(c)) return c;
+  } catch(e) {}
+  return null;
+}
+function getCustomerById(id) { return customers.find(c => c.id === id); }
+function customerProcessCount(id) { return leads.filter(l => l.kundId === id).length; }
+// Splitter ut kund/kontakt-fält som tidigare låg inbäddade på varje lead till egna
+// Kund-poster i registret, och kopplar processen via kundId. Körs vid varje load
+// men är no-op per lead så fort kundId finns.
+function migrateToCustomers(leadsData, customersData) {
+  customersData = customersData || [];
+  leadsData.forEach(l => {
+    if (l.kundId) return;
+    const kund = {
+      id: uid(),
+      namn: l.kund || '',
+      adress: l.adress || '',
+      kontakter: [{ id: uid(), namn: l.kontakt || '', telefon: l.telefon || '', email: l.email || '', roll: '' }],
+      log: []
+    };
+    customersData.push(kund);
+    l.kundId = kund.id;
+    delete l.kund;
+    delete l.kontakt;
+    delete l.email;
+    delete l.telefon;
+    delete l.adress;
+  });
+  return customersData;
+}
+function loadCustomers() {
+  let c = loadCustomersRaw();
+  if (c === null) c = [];
+  c.forEach(k => { if (!Array.isArray(k.kontakter)) k.kontakter = []; if (!Array.isArray(k.log)) k.log = []; });
+  c = migrateToCustomers(leads, c);
+  localStorage.setItem(CUSTOMERS_KEY, JSON.stringify(c));
+  localStorage.setItem(LEADS_KEY, JSON.stringify(leads));
+  return c;
+}
+function saveCustomers(c) {
+  localStorage.setItem(CUSTOMERS_KEY, JSON.stringify(c));
+  touchSavedLabel();
+  scheduleDrivePush();
 }
 function saveLeads(data) {
   localStorage.setItem(LEADS_KEY, JSON.stringify(data));
@@ -599,6 +756,7 @@ function uid() { return Date.now().toString(36) + Math.random().toString(36).sli
 
 let leads = loadLeads();
 let questions = loadQuestions();
+let customers = loadCustomers();
 
 // ---------- Google Drive-synk (omdirigeringsbaserad — fungerar utan popup, även på mobil) ----------
 const GOOGLE_CLIENT_ID = '827512342225-28oeo7n0sf04isql0su3tssuj75mbs8b.apps.googleusercontent.com';
@@ -699,7 +857,7 @@ async function findOrCreateDriveFile() {
     driveFileId = listData.files[0].id;
     return 'existing';
   }
-  const seed = JSON.stringify({ leads, questions, stages: STAGES, tags: TAGS });
+  const seed = JSON.stringify({ leads, questions, customers, stages: STAGES, tags: TAGS });
   const metadata = { name: DRIVE_FILE_NAME, mimeType: 'application/json' };
   const form = new FormData();
   form.append('metadata', new Blob([JSON.stringify(metadata)], { type: 'application/json' }));
@@ -723,7 +881,7 @@ async function pushToDrive() {
   if (!accessToken || !driveFileId) return;
   setDriveStatus('Synkar...');
   try {
-    const body = JSON.stringify({ leads, questions, stages: STAGES, tags: TAGS });
+    const body = JSON.stringify({ leads, questions, customers, stages: STAGES, tags: TAGS });
     const res = await driveFetch('https://www.googleapis.com/upload/drive/v3/files/' + driveFileId + '?uploadType=media', {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
@@ -753,6 +911,8 @@ async function onSignedIn() {
       if (remote) {
         leads = migrateLeads(remote.leads || []);
         questions = remote.questions || [];
+        customers = Array.isArray(remote.customers) ? remote.customers : [];
+        customers = migrateToCustomers(leads, customers);
         if (Array.isArray(remote.stages) && remote.stages.length) {
           remote.stages.forEach(st => { if (!st.kind) st.kind = 'normal'; });
           STAGES = remote.stages;
@@ -764,10 +924,12 @@ async function onSignedIn() {
         }
         localStorage.setItem(LEADS_KEY, JSON.stringify(leads));
         localStorage.setItem(Q_KEY, JSON.stringify(questions));
+        localStorage.setItem(CUSTOMERS_KEY, JSON.stringify(customers));
         populateStageSelect();
         renderBoard();
         renderStats(); renderKpis();
         renderQuestions();
+        renderCustomerRegistry();
       }
     }
     setDriveStatus('Synkad med Google Drive');
@@ -791,6 +953,11 @@ let searchTerm = '';
 let qSearchTerm = '';
 let currentLogEntries = []; // working copy while a lead modal is open
 let currentLeadTags = []; // working copy of selected tag ids while a lead modal is open
+let currentLeadEvents = []; // working copy of events ({id,text,datum,utford}) while a lead modal is open
+let currentCustomerLog = []; // working copy while the customer modal is open
+let currentCustomerContacts = []; // working copy while the customer modal is open
+let custQuickAddContext = null; // 'lead' | 'registry' — where the quick-add customer modal was opened from
+let registrySearchTerm = '';
 
 function renderLeadTagsPicker() {
   const wrap = document.getElementById('leadTagsPicker');
@@ -811,10 +978,11 @@ function renderLeadTagsPicker() {
   }));
 }
 
+function openEvents(lead) { return (lead.events || []).filter(ev => !ev.utford); }
 function isOverdue(lead) {
-  if (!lead.nextDate) return false;
-  if (lead.stage === 'signed' || lead.stage === 'lost') return false;
-  return lead.nextDate < todayStr();
+  if (stageKind(lead.stage) === 'won' || stageKind(lead.stage) === 'lost') return false;
+  const today = todayStr();
+  return openEvents(lead).some(ev => ev.datum && ev.datum < today);
 }
 
 let signedKpiMonth = todayStr().slice(0,7);
@@ -928,14 +1096,17 @@ function renderBoard() {
       const weight = (lead.weight === undefined || lead.weight === null || lead.weight === '') ? 100 : Number(lead.weight);
       const weightedVarde = lead.varde ? Math.round(Number(lead.varde) * weight / 100) : null;
       const leadTags = (lead.tags || []).map(id => getTagById(id)).filter(Boolean);
+      const kund = getCustomerById(lead.kundId);
+      const primaryContact = kund && kund.kontakter && kund.kontakter[0];
+      const today = todayStr();
+      const openEvs = openEvents(lead).slice().sort((a,b) => (a.datum||'9999') < (b.datum||'9999') ? -1 : 1);
       card.innerHTML = `
         <div class="card-inner">
           <div class="card-main">
-            <div class="kund">${escapeHtml(lead.kund || 'Namnlös kund')}</div>
-            ${lead.kontakt ? `<div class="kontakt">${escapeHtml(lead.kontakt)}${lead.telefon ? ` · <a href="tel:${escapeHtml(lead.telefon)}" class="card-link" onclick="event.stopPropagation()">${escapeHtml(lead.telefon)}</a>` : ''}</div>` : ''}
-            ${lead.adress ? `<div class="kontakt"><a href="${mapsUrl(lead.adress)}" target="_blank" rel="noopener" class="card-link" onclick="event.stopPropagation()">📍 ${escapeHtml(lead.adress)}</a></div>` : ''}
-            ${lead.next ? `<div class="next">${escapeHtml(lead.next)}</div>` : ''}
-            ${lead.nextDate ? `<div class="date${isOverdue(lead) ? ' overdue' : ''}">${lead.nextDate}</div>` : ''}
+            <div class="kund">${escapeHtml((kund && kund.namn) || 'Namnlös kund')}</div>
+            ${primaryContact && primaryContact.namn ? `<div class="kontakt">${escapeHtml(primaryContact.namn)}${primaryContact.telefon ? ` · <a href="tel:${escapeHtml(primaryContact.telefon)}" class="card-link" onclick="event.stopPropagation()">${escapeHtml(primaryContact.telefon)}</a>` : ''}</div>` : ''}
+            ${kund && kund.adress ? `<div class="kontakt"><a href="${mapsUrl(kund.adress)}" target="_blank" rel="noopener" class="card-link" onclick="event.stopPropagation()">📍 ${escapeHtml(kund.adress)}</a></div>` : ''}
+            ${openEvs.map(ev => `<div class="next">${escapeHtml(ev.text)}${ev.datum ? ` <span class="date${ev.datum < today ? ' overdue' : ''}" style="margin-left:4px">(${ev.datum})</span>` : ''}</div>`).join('')}
             ${lead.varde ? `<div class="varde">${Number(lead.varde).toLocaleString('sv-SE')} kr &nbsp;·&nbsp; ${weight}% → ${weightedVarde.toLocaleString('sv-SE')} kr</div>` : ''}
             ${logCount ? `<div class="logbadge">${logCount} logganteckning${logCount > 1 ? 'ar' : ''}</div>` : ''}
           </div>
@@ -989,56 +1160,68 @@ function renderActivity() {
   const wrap = document.getElementById('agendaWrap');
   if (!wrap) return;
   const today = todayStr();
-  const items = leads
-    .filter(l => l.nextDate && stageKind(l.stage) !== 'won' && stageKind(l.stage) !== 'lost')
-    .sort((a, b) => a.nextDate < b.nextDate ? -1 : a.nextDate > b.nextDate ? 1 : 0);
 
-  if (!items.length) {
-    wrap.innerHTML = '<div class="empty-hint">Inga inplanerade nästa steg.</div>';
+  // Flatten every open (not-utförd) event across all active processes into one agenda row per event.
+  let rows = [];
+  leads.forEach(lead => {
+    if (stageKind(lead.stage) === 'won' || stageKind(lead.stage) === 'lost') return;
+    (lead.events || []).forEach(ev => {
+      if (ev.utford) return;
+      if (!ev.datum) return;
+      rows.push({ lead, ev });
+    });
+  });
+  rows.sort((a, b) => a.ev.datum < b.ev.datum ? -1 : a.ev.datum > b.ev.datum ? 1 : 0);
+
+  if (!rows.length) {
+    wrap.innerHTML = '<div class="empty-hint">Inga inplanerade händelser.</div>';
     return;
   }
 
   let html = '';
   let lastDate = null;
-  items.forEach(lead => {
-    if (lead.nextDate !== lastDate) {
-      lastDate = lead.nextDate;
+  rows.forEach(({ lead, ev }) => {
+    if (ev.datum !== lastDate) {
+      lastDate = ev.datum;
       const overdue = lastDate < today;
       const isToday = lastDate === today;
       html += `<div class="agenda-date${overdue ? ' overdue' : ''}${isToday ? ' is-today' : ''}" data-date="${lastDate}">${formatAgendaDate(lastDate)}</div>`;
     }
+    const kund = getCustomerById(lead.kundId);
+    const primaryContact = kund && kund.kontakter && kund.kontakter[0];
     const leadTags = (lead.tags || []).map(id => getTagById(id)).filter(Boolean);
     const weight = (lead.weight === undefined || lead.weight === null || lead.weight === '') ? 100 : Number(lead.weight);
     const weightedVarde = lead.varde ? Math.round(Number(lead.varde) * weight / 100) : null;
-    const overdueRow = lead.nextDate < today;
-    const done = !!lead.nextDone;
+    const overdueRow = ev.datum < today;
     html += `
-      <div class="agenda-item${overdueRow ? ' overdue' : ''}${done ? ' is-done' : ''}" data-id="${lead.id}">
+      <div class="agenda-item${overdueRow ? ' overdue' : ''}" data-lead-id="${lead.id}" data-event-id="${ev.id}">
         <div class="agenda-item-main">
           <div class="agenda-item-top">
-            <span class="kund">${escapeHtml(lead.kund || 'Namnlös kund')}</span>
+            <span class="kund">${escapeHtml((kund && kund.namn) || 'Namnlös kund')}</span>
             ${leadTags.length ? `<div class="card-tags">${leadTags.map(t => `<span class="tag-chip" style="background:${t.color};color:${tagTextColor(t.color)}">${escapeHtml(t.name)}</span>`).join('')}</div>` : ''}
           </div>
-          ${lead.next ? `<div class="next">${escapeHtml(lead.next)}</div>` : ''}
-          ${lead.kontakt ? `<div class="kontakt">${escapeHtml(lead.kontakt)}${lead.telefon ? ` · <a href="tel:${escapeHtml(lead.telefon)}" class="card-link" onclick="event.stopPropagation()">${escapeHtml(lead.telefon)}</a>` : ''}</div>` : ''}
+          ${ev.text ? `<div class="next">${escapeHtml(ev.text)}</div>` : ''}
+          ${primaryContact && primaryContact.namn ? `<div class="kontakt">${escapeHtml(primaryContact.namn)}${primaryContact.telefon ? ` · <a href="tel:${escapeHtml(primaryContact.telefon)}" class="card-link" onclick="event.stopPropagation()">${escapeHtml(primaryContact.telefon)}</a>` : ''}</div>` : ''}
           ${lead.varde ? `<div class="varde">${Number(lead.varde).toLocaleString('sv-SE')} kr &nbsp;·&nbsp; ${weight}% → ${weightedVarde.toLocaleString('sv-SE')} kr</div>` : ''}
         </div>
-        <button type="button" class="agenda-done-btn" data-id="${lead.id}">${done ? 'Ångra' : 'Utfört'}</button>
+        <button type="button" class="agenda-done-btn" data-lead-id="${lead.id}" data-event-id="${ev.id}">Utfört</button>
       </div>
     `;
   });
   wrap.innerHTML = html;
   wrap.querySelectorAll('.agenda-item').forEach(el => {
-    el.addEventListener('click', () => openLeadModal(el.dataset.id));
+    el.addEventListener('click', () => openLeadModal(el.dataset.leadId));
   });
   wrap.querySelectorAll('.agenda-done-btn').forEach(el => {
     el.addEventListener('click', e => {
       e.stopPropagation();
-      const lead = leads.find(l => l.id === el.dataset.id);
-      if (lead) {
-        lead.nextDone = !lead.nextDone;
+      const lead = leads.find(l => l.id === el.dataset.leadId);
+      const ev = lead && (lead.events || []).find(x => x.id === el.dataset.eventId);
+      if (ev) {
+        ev.utford = true;
         saveLeads(leads);
         renderActivity();
+        renderBoard();
       }
     });
   });
@@ -1054,7 +1237,10 @@ function scrollAgendaToToday() {
 function matchesSearch(lead) {
   if (!searchTerm) return true;
   const t = searchTerm.toLowerCase();
-  return (lead.kund || '').toLowerCase().includes(t) || (lead.kontakt || '').toLowerCase().includes(t);
+  const kund = getCustomerById(lead.kundId);
+  if (!kund) return false;
+  if ((kund.namn || '').toLowerCase().includes(t)) return true;
+  return (kund.kontakter || []).some(k => (k.namn || '').toLowerCase().includes(t));
 }
 
 function escapeHtml(str) {
@@ -1204,17 +1390,49 @@ setupPasteZone(
 );
 
 // ---------- Lead modal ----------
-function updateLeadAdressLink() {
-  const val = document.getElementById('leadAdress').value.trim();
-  const hint = document.getElementById('leadAdressMapHint');
-  const link = document.getElementById('leadAdressMapLink');
-  if (val) {
-    link.href = mapsUrl(val);
-    hint.style.display = 'block';
-  } else {
-    hint.style.display = 'none';
-  }
+function populateKundSelect(selectedId) {
+  const sel = document.getElementById('leadKundSelect');
+  const sorted = customers.slice().sort((a, b) => (a.namn || '').localeCompare(b.namn || '', 'sv'));
+  sel.innerHTML = '<option value="">— Välj kund —</option>' + sorted.map(k => `<option value="${k.id}">${escapeHtml(k.namn || 'Namnlös kund')}</option>`).join('');
+  if (selectedId) sel.value = selectedId;
 }
+
+function renderLeadEvents() {
+  const wrap = document.getElementById('leadEventsList');
+  wrap.innerHTML = '';
+  currentLeadEvents.forEach((ev, idx) => {
+    const row = document.createElement('div');
+    row.className = 'event-row';
+    row.innerHTML = `
+      <input type="text" data-idx="${idx}" class="eventTextInput" placeholder="t.ex. ring kund om avtalsförslag" value="${escapeHtml(ev.text)}">
+      <input type="date" data-idx="${idx}" class="eventDateInput" value="${ev.datum || ''}">
+      <label class="event-done"><input type="checkbox" data-idx="${idx}" class="eventDoneCheck" ${ev.utford ? 'checked' : ''}> Utförd</label>
+      <button type="button" data-idx="${idx}" class="eventDelBtn" title="Ta bort">✕</button>
+    `;
+    wrap.appendChild(row);
+  });
+  wrap.querySelectorAll('.eventTextInput').forEach(el => el.addEventListener('input', e => {
+    currentLeadEvents[Number(e.target.dataset.idx)].text = e.target.value;
+  }));
+  wrap.querySelectorAll('.eventDateInput').forEach(el => el.addEventListener('input', e => {
+    currentLeadEvents[Number(e.target.dataset.idx)].datum = e.target.value;
+  }));
+  wrap.querySelectorAll('.eventDoneCheck').forEach(el => el.addEventListener('change', e => {
+    currentLeadEvents[Number(e.target.dataset.idx)].utford = e.target.checked;
+  }));
+  wrap.querySelectorAll('.eventDelBtn').forEach(el => el.addEventListener('click', e => {
+    currentLeadEvents.splice(Number(e.target.dataset.idx), 1);
+    renderLeadEvents();
+  }));
+}
+document.getElementById('leadEventAddBtn').addEventListener('click', () => {
+  currentLeadEvents.push({ id: uid(), text: '', datum: '', utford: false });
+  renderLeadEvents();
+});
+document.getElementById('leadKundAddBtn').addEventListener('click', () => {
+  openCustQuickAddModal('lead');
+});
+
 function updateLeadWeightedHint() {
   const varde = Number(document.getElementById('leadVarde').value) || 0;
   const weight = Number(document.getElementById('leadWeight').value);
@@ -1225,7 +1443,6 @@ function updateLeadWeightedHint() {
     hint.textContent = '';
   }
 }
-document.getElementById('leadAdress').addEventListener('input', updateLeadAdressLink);
 document.getElementById('leadVarde').addEventListener('input', updateLeadWeightedHint);
 document.getElementById('leadWeight').addEventListener('change', updateLeadWeightedHint);
 
@@ -1243,7 +1460,7 @@ document.getElementById('leadStage').addEventListener('change', updateLeadStageD
 function openLeadModal(id, prefill) {
   const backdrop = document.getElementById('leadModalBackdrop');
   const isEdit = !!id;
-  document.getElementById('leadModalTitle').textContent = isEdit ? 'Redigera kund' : 'Ny kund';
+  document.getElementById('leadModalTitle').textContent = isEdit ? 'Redigera process' : 'Ny process';
   document.getElementById('leadDeleteBtn').style.display = isEdit ? 'inline-block' : 'none';
   document.getElementById('leadAiStatus').textContent = '';
   resetZone(document.getElementById('leadPasteZone'));
@@ -1253,48 +1470,39 @@ function openLeadModal(id, prefill) {
   if (isEdit) {
     const lead = leads.find(l => l.id === id);
     document.getElementById('leadId').value = lead.id;
-    document.getElementById('leadKund').value = lead.kund || '';
-    document.getElementById('leadKontakt').value = lead.kontakt || '';
-    document.getElementById('leadEmail').value = lead.email || '';
-    document.getElementById('leadTelefon').value = lead.telefon || '';
-    document.getElementById('leadAdress').value = lead.adress || '';
+    populateKundSelect(lead.kundId || '');
     document.getElementById('leadVarde').value = lead.varde || '';
     document.getElementById('leadWeight').value = (lead.weight === undefined || lead.weight === null || lead.weight === '') ? '100' : String(lead.weight);
     document.getElementById('leadStage').value = lead.stage || defaultStageKey;
-    document.getElementById('leadNext').value = lead.next || '';
-    document.getElementById('leadNextDate').value = lead.nextDate || '';
     document.getElementById('leadSignedDate').value = lead.signedDate || '';
     document.getElementById('leadLostDate').value = lead.lostDate || '';
     currentLogEntries = (lead.log || []).slice();
     currentLeadTags = (lead.tags || []).slice();
+    currentLeadEvents = (lead.events || []).map(ev => Object.assign({}, ev));
   } else {
     document.getElementById('leadId').value = '';
-    document.getElementById('leadKund').value = (prefill && prefill.kund) || '';
-    document.getElementById('leadKontakt').value = (prefill && prefill.kontakt) || '';
-    document.getElementById('leadEmail').value = (prefill && prefill.email) || '';
-    document.getElementById('leadTelefon').value = '';
-    document.getElementById('leadAdress').value = '';
+    populateKundSelect(prefill && prefill.kundId);
     document.getElementById('leadVarde').value = '';
     document.getElementById('leadWeight').value = '50';
     document.getElementById('leadStage').value = defaultStageKey;
-    document.getElementById('leadNext').value = '';
-    document.getElementById('leadNextDate').value = '';
     document.getElementById('leadSignedDate').value = '';
     document.getElementById('leadLostDate').value = '';
     currentLogEntries = (prefill && prefill.log) ? prefill.log.slice() : [];
     currentLeadTags = [];
+    currentLeadEvents = [];
   }
-  updateLeadAdressLink();
   updateLeadWeightedHint();
   updateLeadStageDateFields();
   renderLeadLog();
   renderLeadTagsPicker();
+  renderLeadEvents();
   backdrop.classList.add('open');
 }
 function closeLeadModal() {
   document.getElementById('leadModalBackdrop').classList.remove('open');
   currentLogEntries = [];
   currentLeadTags = [];
+  currentLeadEvents = [];
 }
 
 document.getElementById('addLeadBtn').addEventListener('click', () => openLeadModal(null));
@@ -1306,30 +1514,24 @@ document.getElementById('leadModalBackdrop').addEventListener('click', e => {
 document.getElementById('leadSaveBtn').addEventListener('click', () => {
   const id = document.getElementById('leadId').value;
   const data = {
-    kund: document.getElementById('leadKund').value.trim(),
-    kontakt: document.getElementById('leadKontakt').value.trim(),
-    email: document.getElementById('leadEmail').value.trim(),
-    telefon: document.getElementById('leadTelefon').value.trim(),
-    adress: document.getElementById('leadAdress').value.trim(),
+    kundId: document.getElementById('leadKundSelect').value,
     varde: document.getElementById('leadVarde').value,
     weight: Number(document.getElementById('leadWeight').value),
     stage: document.getElementById('leadStage').value,
-    next: document.getElementById('leadNext').value.trim(),
-    nextDate: document.getElementById('leadNextDate').value,
+    events: currentLeadEvents.slice(),
     signedDate: document.getElementById('leadSignedDate').value,
     lostDate: document.getElementById('leadLostDate').value,
     log: currentLogEntries.slice(),
     tags: currentLeadTags.slice(),
   };
   if (stageKind(data.stage) === 'lost' && !data.lostDate) data.lostDate = todayStr();
-  if (!data.kund) { alert('Ange kundnamn'); return; }
+  if (!data.kundId) { alert('Välj eller skapa en kund'); return; }
 
   if (id) {
     const lead = leads.find(l => l.id === id);
-    if (lead.next !== data.next || lead.nextDate !== data.nextDate) data.nextDone = false;
     Object.assign(lead, data);
   } else {
-    leads.push(Object.assign({ id: uid(), nextDone: false }, data));
+    leads.push(Object.assign({ id: uid() }, data));
   }
   saveLeads(leads);
   renderBoard();
@@ -1340,7 +1542,7 @@ document.getElementById('leadSaveBtn').addEventListener('click', () => {
 document.getElementById('leadDeleteBtn').addEventListener('click', () => {
   const id = document.getElementById('leadId').value;
   if (!id) return;
-  if (!confirm('Ta bort denna kund från pipelinen?')) return;
+  if (!confirm('Ta bort denna process från pipelinen?')) return;
   leads = leads.filter(l => l.id !== id);
   saveLeads(leads);
   renderBoard();
@@ -1354,10 +1556,274 @@ document.getElementById('searchInput').addEventListener('input', e => {
 });
 
 document.getElementById('exportLeadsBtn').addEventListener('click', () => {
-  const flat = leads.map(l => Object.assign({}, l, {
-    log: (l.log || []).map(e => `[${e.ts}] ${e.type === 'image' ? (e.aiText || 'skärmdump') : e.content}`).join(' | ')
+  const flat = leads.map(l => {
+    const kund = getCustomerById(l.kundId) || {};
+    const primaryContact = (kund.kontakter || [])[0] || {};
+    return {
+      kund: kund.namn || '',
+      kontakt: primaryContact.namn || '',
+      telefon: primaryContact.telefon || '',
+      email: primaryContact.email || '',
+      adress: kund.adress || '',
+      varde: l.varde,
+      weight: l.weight,
+      stage: l.stage,
+      events: (l.events || []).map(ev => `${ev.text || ''} (${ev.datum || ''})${ev.utford ? ' [klar]' : ''}`).join(' | '),
+      signedDate: l.signedDate,
+      lostDate: l.lostDate,
+      log: (l.log || []).map(e => `[${e.ts}] ${e.type === 'image' ? (e.aiText || 'skärmdump') : e.content}`).join(' | ')
+    };
+  });
+  exportCsv(flat, ['kund','kontakt','telefon','email','adress','varde','weight','stage','events','signedDate','lostDate','log'], 'telexia-pipeline.csv');
+});
+
+// ---------- Customer registry ----------
+function renderCustomerRegistry() {
+  const grid = document.getElementById('registryGrid');
+  const term = (registrySearchTerm || '').toLowerCase();
+  let list = customers.slice();
+  if (term) {
+    list = list.filter(k => {
+      const hay = [k.namn, k.adress].concat((k.kontakter || []).map(c => `${c.namn} ${c.telefon} ${c.email}`)).join(' ').toLowerCase();
+      return hay.includes(term);
+    });
+  }
+  list.sort((a, b) => (a.namn || '').localeCompare(b.namn || '', 'sv'));
+  if (list.length === 0) {
+    grid.innerHTML = '<div class="log-empty">Inga kunder ännu</div>';
+    return;
+  }
+  grid.innerHTML = '';
+  list.forEach(k => {
+    const primary = (k.kontakter || [])[0] || {};
+    const total = leads.filter(l => l.kundId === k.id).length;
+    const active = leads.filter(l => l.kundId === k.id && stageKind(l.stage) === 'normal').length;
+    const card = document.createElement('div');
+    card.className = 'kund-card';
+    card.innerHTML = `
+      <div class="knamn">${escapeHtml(k.namn || 'Namnlös kund')}</div>
+      <div class="kinfo">${escapeHtml(primary.namn || '')}${primary.telefon ? ' · ' + escapeHtml(primary.telefon) : ''}</div>
+      <div class="kinfo">${escapeHtml(k.adress || '')}</div>
+      <div class="kcount">${active} aktiva · ${total} totalt</div>
+    `;
+    card.addEventListener('click', () => openCustomerModal(k.id));
+    grid.appendChild(card);
+  });
+}
+
+document.getElementById('registrySearchInput').addEventListener('input', e => {
+  registrySearchTerm = e.target.value;
+  renderCustomerRegistry();
+});
+document.getElementById('registryAddBtn').addEventListener('click', () => {
+  openCustQuickAddModal('registry');
+});
+
+// ---------- Customer detail modal ----------
+function renderCustomerContacts() {
+  const wrap = document.getElementById('customerContactsList');
+  wrap.innerHTML = '';
+  currentCustomerContacts.forEach((c, idx) => {
+    const row = document.createElement('div');
+    row.className = 'contact-row';
+    row.innerHTML = `
+      <input type="text" data-idx="${idx}" data-field="namn" placeholder="Namn" value="${escapeHtml(c.namn || '')}">
+      <input type="text" data-idx="${idx}" data-field="telefon" placeholder="Telefon" value="${escapeHtml(c.telefon || '')}">
+      <input type="text" data-idx="${idx}" data-field="email" placeholder="E-post" value="${escapeHtml(c.email || '')}">
+      <input type="text" data-idx="${idx}" data-field="roll" placeholder="Roll" value="${escapeHtml(c.roll || '')}">
+      <button type="button" data-idx="${idx}" class="contactDelBtn" title="Ta bort">✕</button>
+    `;
+    wrap.appendChild(row);
+  });
+  wrap.querySelectorAll('input').forEach(el => el.addEventListener('input', e => {
+    currentCustomerContacts[Number(e.target.dataset.idx)][e.target.dataset.field] = e.target.value;
   }));
-  exportCsv(flat, ['kund','kontakt','telefon','email','adress','varde','weight','stage','next','nextDate','signedDate','lostDate','log'], 'telexia-pipeline.csv');
+  wrap.querySelectorAll('.contactDelBtn').forEach(el => el.addEventListener('click', e => {
+    currentCustomerContacts.splice(Number(e.target.dataset.idx), 1);
+    renderCustomerContacts();
+  }));
+}
+document.getElementById('customerContactAddBtn').addEventListener('click', () => {
+  currentCustomerContacts.push({ id: uid(), namn: '', telefon: '', email: '', roll: '' });
+  renderCustomerContacts();
+});
+
+function renderCustomerLog() {
+  const list = document.getElementById('customerLogList');
+  if (currentCustomerLog.length === 0) {
+    list.innerHTML = '<div class="log-empty">Inga anteckningar ännu</div>';
+    return;
+  }
+  list.innerHTML = '';
+  currentCustomerLog.slice().reverse().forEach(entry => {
+    const div = document.createElement('div');
+    div.className = 'log-entry';
+    let body = '';
+    if (entry.type === 'image') {
+      body += `<img data-src="${entry.content}" class="log-img">`;
+    } else {
+      body += `<div class="txt">${escapeHtml(entry.content)}</div>`;
+    }
+    div.innerHTML = `<div class="ts">${entry.ts}</div>${body}`;
+    const img = div.querySelector('.log-img');
+    if (img) img.addEventListener('click', () => openLightbox(entry.content));
+    list.appendChild(div);
+  });
+}
+function addCustomerImageLogEntry(dataUrl) {
+  currentCustomerLog.push({ id: uid(), type: 'image', content: dataUrl, ts: nowLabel() });
+  renderCustomerLog();
+  resetZone(document.getElementById('customerPasteZone'));
+}
+document.getElementById('customerLogAddBtn').addEventListener('click', () => {
+  const input = document.getElementById('customerLogText');
+  const text = input.value.trim();
+  if (!text) return;
+  currentCustomerLog.push({ id: uid(), type: 'text', content: text, ts: nowLabel() });
+  input.value = '';
+  renderCustomerLog();
+});
+document.getElementById('customerLogText').addEventListener('keydown', e => {
+  if (e.key === 'Enter') { e.preventDefault(); document.getElementById('customerLogAddBtn').click(); }
+});
+setupPasteZone(
+  document.getElementById('customerPasteZone'),
+  document.getElementById('customerPasteFileBtn'),
+  document.getElementById('customerPasteFileInput'),
+  dataUrl => addCustomerImageLogEntry(dataUrl)
+);
+
+function renderCustomerProcessList(kundId) {
+  const wrap = document.getElementById('customerProcessList');
+  const procs = leads.filter(l => l.kundId === kundId);
+  if (procs.length === 0) {
+    wrap.innerHTML = '<div class="log-empty">Inga processer ännu</div>';
+    return;
+  }
+  wrap.innerHTML = '';
+  procs.forEach(l => {
+    const stage = getStageByKey(l.stage);
+    const closed = stageKind(l.stage) !== 'normal';
+    const item = document.createElement('div');
+    item.className = 'process-list-item' + (closed ? ' is-closed' : '');
+    item.innerHTML = `
+      <div class="pname">${escapeHtml(stage ? stage.name : l.stage)}</div>
+      <div class="pmeta">${l.varde ? Number(l.varde).toLocaleString('sv-SE') + ' kr' : ''}</div>
+    `;
+    item.addEventListener('click', () => {
+      closeCustomerModal();
+      openLeadModal(l.id);
+    });
+    wrap.appendChild(item);
+  });
+}
+
+function openCustomerModal(id) {
+  const backdrop = document.getElementById('customerModalBackdrop');
+  const isEdit = !!id;
+  document.getElementById('customerModalTitle').textContent = isEdit ? 'Redigera kund' : 'Ny kund';
+  document.getElementById('customerDeleteBtn').style.display = isEdit ? 'inline-block' : 'none';
+  resetZone(document.getElementById('customerPasteZone'));
+  if (isEdit) {
+    const k = getCustomerById(id);
+    document.getElementById('customerId').value = k.id;
+    document.getElementById('customerNamn').value = k.namn || '';
+    document.getElementById('customerAdress').value = k.adress || '';
+    currentCustomerContacts = (k.kontakter || []).map(c => Object.assign({}, c));
+    currentCustomerLog = (k.log || []).slice();
+    renderCustomerProcessList(k.id);
+  } else {
+    document.getElementById('customerId').value = '';
+    document.getElementById('customerNamn').value = '';
+    document.getElementById('customerAdress').value = '';
+    currentCustomerContacts = [];
+    currentCustomerLog = [];
+    document.getElementById('customerProcessList').innerHTML = '<div class="log-empty">Inga processer ännu</div>';
+  }
+  renderCustomerContacts();
+  renderCustomerLog();
+  backdrop.classList.add('open');
+}
+function closeCustomerModal() {
+  document.getElementById('customerModalBackdrop').classList.remove('open');
+  currentCustomerContacts = [];
+  currentCustomerLog = [];
+}
+document.getElementById('customerCancelBtn').addEventListener('click', closeCustomerModal);
+document.getElementById('customerModalBackdrop').addEventListener('click', e => {
+  if (e.target.id === 'customerModalBackdrop') closeCustomerModal();
+});
+document.getElementById('customerSaveBtn').addEventListener('click', () => {
+  const id = document.getElementById('customerId').value;
+  const namn = document.getElementById('customerNamn').value.trim();
+  if (!namn) { alert('Ange kundnamn'); return; }
+  const data = {
+    namn,
+    adress: document.getElementById('customerAdress').value.trim(),
+    kontakter: currentCustomerContacts.slice(),
+    log: currentCustomerLog.slice(),
+  };
+  if (id) {
+    Object.assign(getCustomerById(id), data);
+  } else {
+    customers.push(Object.assign({ id: uid() }, data));
+  }
+  saveCustomers(customers);
+  renderCustomerRegistry();
+  closeCustomerModal();
+});
+document.getElementById('customerDeleteBtn').addEventListener('click', () => {
+  const id = document.getElementById('customerId').value;
+  if (!id) return;
+  if (customerProcessCount(id) > 0) { alert('Den här kunden har kopplade processer. Ta bort eller flytta dem först.'); return; }
+  if (!confirm('Ta bort denna kund?')) return;
+  customers = customers.filter(c => c.id !== id);
+  saveCustomers(customers);
+  renderCustomerRegistry();
+  closeCustomerModal();
+});
+
+// ---------- Quick-add customer modal ----------
+function openCustQuickAddModal(context) {
+  custQuickAddContext = context;
+  document.getElementById('custQuickNamn').value = '';
+  document.getElementById('custQuickAdress').value = '';
+  document.getElementById('custQuickKontakt').value = '';
+  document.getElementById('custQuickTelefon').value = '';
+  document.getElementById('custQuickEmail').value = '';
+  document.getElementById('custQuickModalBackdrop').classList.add('open');
+}
+function closeCustQuickAddModal() {
+  document.getElementById('custQuickModalBackdrop').classList.remove('open');
+  custQuickAddContext = null;
+}
+document.getElementById('custQuickCancelBtn').addEventListener('click', closeCustQuickAddModal);
+document.getElementById('custQuickModalBackdrop').addEventListener('click', e => {
+  if (e.target.id === 'custQuickModalBackdrop') closeCustQuickAddModal();
+});
+document.getElementById('custQuickSaveBtn').addEventListener('click', () => {
+  const namn = document.getElementById('custQuickNamn').value.trim();
+  if (!namn) { alert('Ange kundnamn'); return; }
+  const kontaktNamn = document.getElementById('custQuickKontakt').value.trim();
+  const telefon = document.getElementById('custQuickTelefon').value.trim();
+  const email = document.getElementById('custQuickEmail').value.trim();
+  const kontakter = (kontaktNamn || telefon || email) ? [{ id: uid(), namn: kontaktNamn, telefon, email, roll: '' }] : [];
+  const kund = {
+    id: uid(),
+    namn,
+    adress: document.getElementById('custQuickAdress').value.trim(),
+    kontakter,
+    log: [],
+  };
+  customers.push(kund);
+  saveCustomers(customers);
+  const context = custQuickAddContext;
+  closeCustQuickAddModal();
+  if (context === 'lead') {
+    populateKundSelect(kund.id);
+  } else {
+    renderCustomerRegistry();
+  }
 });
 
 // ---------- Stage manager ----------
@@ -1671,9 +2137,11 @@ document.querySelectorAll('.tab-btn').forEach(btn => {
     btn.classList.add('active');
     const tab = btn.dataset.tab;
     document.getElementById('pipelineView').style.display = tab === 'pipeline' ? 'block' : 'none';
+    document.getElementById('registryView').style.display = tab === 'registry' ? 'block' : 'none';
     document.getElementById('activityView').style.display = tab === 'activity' ? 'block' : 'none';
     document.getElementById('questionsView').style.display = tab === 'questions' ? 'block' : 'none';
     if (tab === 'activity') { renderActivity(); scrollAgendaToToday(); }
+    if (tab === 'registry') renderCustomerRegistry();
   });
 });
 
