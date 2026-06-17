@@ -81,6 +81,8 @@
   .card .date.overdue { color: #f87171; font-weight: 600; }
   .card .varde { font-size: 11px; color: #34d399; margin-top: 4px; font-weight: 500; }
   .card .logbadge { font-size: 10px; color: #93c5fd; margin-top: 4px; }
+  .card-inner { display: flex; gap: 8px; justify-content: space-between; }
+  .card-main { flex: 1; min-width: 0; }
   .card a.card-link { color: #60a5fa; text-decoration: none; }
   .card a.card-link:hover { text-decoration: underline; }
   .empty-hint { font-size: 11px; color: #6b7280; text-align: center; padding: 16px 4px; }
@@ -97,8 +99,8 @@
   .table-wrap { padding: 0 20px 24px; }
 
   .modal-backdrop {
-    position: absolute; inset: 0; background: rgba(0,0,0,0.55); display: none; align-items: flex-start; justify-content: center;
-    padding-top: 30px; z-index: 50;
+    position: fixed; inset: 0; background: rgba(0,0,0,0.55); display: none; align-items: flex-start; justify-content: center;
+    padding-top: 30px; z-index: 50; overflow-y: auto;
   }
   .modal-backdrop.open { display: flex; }
   .modal {
@@ -175,8 +177,8 @@
   }
   .tag-chip.selected { opacity: 1; box-shadow: 0 0 0 1.5px rgba(255,255,255,0.25) inset; }
   .tag-empty-hint { font-size: 11px; color: #6b7280; }
-  .card-tags { display: flex; flex-wrap: wrap; gap: 4px; margin-bottom: 5px; }
-  .card-tags .tag-chip { cursor: default; opacity: 1; font-size: 10px; padding: 2px 8px; }
+  .card-tags { display: flex; flex-direction: column; align-items: flex-end; gap: 4px; flex-shrink: 0; }
+  .card-tags .tag-chip { cursor: default; opacity: 1; font-size: 10px; padding: 2px 8px; white-space: nowrap; }
 
   @media (max-width: 720px) {
     .topbar { flex-wrap: wrap; gap: 8px; padding: 12px 14px; }
@@ -879,14 +881,18 @@ function renderBoard() {
       const weightedVarde = lead.varde ? Math.round(Number(lead.varde) * weight / 100) : null;
       const leadTags = (lead.tags || []).map(id => getTagById(id)).filter(Boolean);
       card.innerHTML = `
-        ${leadTags.length ? `<div class="card-tags">${leadTags.map(t => `<span class="tag-chip" style="background:${t.color};color:${tagTextColor(t.color)}">${escapeHtml(t.name)}</span>`).join('')}</div>` : ''}
-        <div class="kund">${escapeHtml(lead.kund || 'Namnlös kund')}</div>
-        ${lead.kontakt ? `<div class="kontakt">${escapeHtml(lead.kontakt)}${lead.telefon ? ` · <a href="tel:${escapeHtml(lead.telefon)}" class="card-link" onclick="event.stopPropagation()">${escapeHtml(lead.telefon)}</a>` : ''}</div>` : ''}
-        ${lead.adress ? `<div class="kontakt"><a href="${mapsUrl(lead.adress)}" target="_blank" rel="noopener" class="card-link" onclick="event.stopPropagation()">📍 ${escapeHtml(lead.adress)}</a></div>` : ''}
-        ${lead.next ? `<div class="next">${escapeHtml(lead.next)}</div>` : ''}
-        ${lead.nextDate ? `<div class="date${isOverdue(lead) ? ' overdue' : ''}">${lead.nextDate}</div>` : ''}
-        ${lead.varde ? `<div class="varde">${Number(lead.varde).toLocaleString('sv-SE')} kr &nbsp;·&nbsp; ${weight}% → ${weightedVarde.toLocaleString('sv-SE')} kr</div>` : ''}
-        ${logCount ? `<div class="logbadge">${logCount} logganteckning${logCount > 1 ? 'ar' : ''}</div>` : ''}
+        <div class="card-inner">
+          <div class="card-main">
+            <div class="kund">${escapeHtml(lead.kund || 'Namnlös kund')}</div>
+            ${lead.kontakt ? `<div class="kontakt">${escapeHtml(lead.kontakt)}${lead.telefon ? ` · <a href="tel:${escapeHtml(lead.telefon)}" class="card-link" onclick="event.stopPropagation()">${escapeHtml(lead.telefon)}</a>` : ''}</div>` : ''}
+            ${lead.adress ? `<div class="kontakt"><a href="${mapsUrl(lead.adress)}" target="_blank" rel="noopener" class="card-link" onclick="event.stopPropagation()">📍 ${escapeHtml(lead.adress)}</a></div>` : ''}
+            ${lead.next ? `<div class="next">${escapeHtml(lead.next)}</div>` : ''}
+            ${lead.nextDate ? `<div class="date${isOverdue(lead) ? ' overdue' : ''}">${lead.nextDate}</div>` : ''}
+            ${lead.varde ? `<div class="varde">${Number(lead.varde).toLocaleString('sv-SE')} kr &nbsp;·&nbsp; ${weight}% → ${weightedVarde.toLocaleString('sv-SE')} kr</div>` : ''}
+            ${logCount ? `<div class="logbadge">${logCount} logganteckning${logCount > 1 ? 'ar' : ''}</div>` : ''}
+          </div>
+          ${leadTags.length ? `<div class="card-tags">${leadTags.map(t => `<span class="tag-chip" style="background:${t.color};color:${tagTextColor(t.color)}">${escapeHtml(t.name)}</span>`).join('')}</div>` : ''}
+        </div>
       `;
       card.addEventListener('click', () => openLeadModal(lead.id));
       card.addEventListener('dragstart', e => {
