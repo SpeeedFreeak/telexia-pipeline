@@ -71,8 +71,9 @@
   .column-head span.count { font-size: 11px; color: #0f1115; background: #6b7280; border-radius: 10px; padding: 1px 7px; }
   .card {
     background: #1d212b; border-radius: 8px; padding: 10px; margin-bottom: 8px; border: 1px solid #2a2e37;
-    cursor: grab; box-shadow: 0 1px 2px rgba(0,0,0,0.3);
+    cursor: grab; box-shadow: 0 1px 2px rgba(0,0,0,0.3); transition: border-color 0.12s, box-shadow 0.12s;
   }
+  .card:hover { border-color: #3b82f6; box-shadow: 0 0 0 1px #3b82f6, 0 1px 2px rgba(0,0,0,0.3); }
   .card.overdue { border-left: 3px solid #f87171; }
   .card .kund { font-size: 13px; font-weight: 600; color: #f3f4f6; }
   .card .kontakt { font-size: 11px; color: #9ca3af; margin-top: 2px; }
@@ -180,6 +181,36 @@
   .card-tags { display: flex; flex-direction: column; align-items: flex-end; gap: 4px; flex-shrink: 0; }
   .card-tags .tag-chip { cursor: default; opacity: 1; font-size: 10px; padding: 2px 8px; white-space: nowrap; }
 
+  .agenda { padding: 4px 20px 24px; max-width: 640px; }
+  .agenda-date {
+    font-size: 12px; font-weight: 700; color: #9ca3af; text-transform: uppercase; letter-spacing: 0.03em;
+    margin: 18px 0 8px; padding-bottom: 4px; border-bottom: 1px solid #20242f; scroll-margin-top: 12px;
+  }
+  .agenda-date:first-child { margin-top: 4px; }
+  .agenda-date.overdue { color: #f87171; border-bottom-color: #7f1d1d; }
+  .agenda-date.is-today { color: #60a5fa; border-bottom-color: #3b82f6; font-size: 13px; }
+  .agenda-item {
+    display: flex; align-items: flex-start; justify-content: space-between; gap: 10px;
+    background: #1d212b; border-radius: 8px; padding: 10px 12px; margin-bottom: 8px; border: 1px solid #2a2e37;
+    cursor: pointer; box-shadow: 0 1px 2px rgba(0,0,0,0.3); transition: border-color 0.12s, box-shadow 0.12s;
+  }
+  .agenda-item:hover { border-color: #3b82f6; box-shadow: 0 0 0 1px #3b82f6, 0 1px 2px rgba(0,0,0,0.3); }
+  .agenda-item.overdue { border-left: 3px solid #f87171; }
+  .agenda-item.is-done { opacity: 0.45; }
+  .agenda-item.is-done .agenda-item-main { text-decoration: line-through; }
+  .agenda-item-main { flex: 1; min-width: 0; }
+  .agenda-item-top { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+  .agenda-item-top .kund { font-size: 13px; font-weight: 600; color: #f3f4f6; }
+  .agenda-item .next { font-size: 12px; color: #cbd5e1; margin-top: 4px; }
+  .agenda-item .kontakt { font-size: 11px; color: #9ca3af; margin-top: 4px; }
+  .agenda-item .varde { font-size: 11px; color: #34d399; margin-top: 4px; font-weight: 500; }
+  .agenda-done-btn {
+    flex-shrink: 0; font-size: 11px; padding: 5px 10px; border-radius: 6px; border: 1px solid #2a2e37;
+    background: #1a1d27; color: #d1d5db; cursor: pointer;
+  }
+  .agenda-done-btn:hover { border-color: #34d399; color: #34d399; }
+  .agenda-item.is-done .agenda-done-btn { border-color: #34d399; color: #34d399; }
+
   @media (max-width: 720px) {
     .topbar { flex-wrap: wrap; gap: 8px; padding: 12px 14px; }
     .topbar h1 { font-size: 17px; }
@@ -203,6 +234,14 @@
     .card .varde { font-size: 13px; }
     .card .logbadge { font-size: 11px; }
     .card-tags .tag-chip { font-size: 11px; padding: 3px 9px; }
+    .agenda { padding: 4px 14px 20px; }
+    .agenda-date { font-size: 13px; margin: 16px 0 8px; }
+    .agenda-date.is-today { font-size: 14px; }
+    .agenda-item { padding: 12px; flex-direction: column; align-items: stretch; gap: 8px; }
+    .agenda-item-top .kund { font-size: 15px; }
+    .agenda-item .next, .agenda-item .kontakt { font-size: 13px; line-height: 1.4; }
+    .agenda-item .varde { font-size: 13px; }
+    .agenda-done-btn { padding: 8px 12px; font-size: 13px; align-self: flex-start; }
     .modal { width: 94vw; padding: 14px; }
     .modal h2 { font-size: 16px; }
     .field-row { flex-direction: column; gap: 0; }
@@ -241,6 +280,7 @@
 <div id="appContent" style="display:none">
 <div class="tabs">
   <button class="tab-btn active" data-tab="pipeline">Pipeline</button>
+  <button class="tab-btn" data-tab="activity">Aktivitet</button>
   <button class="tab-btn" data-tab="questions">Produktspecialist-frågor</button>
 </div>
 
@@ -256,6 +296,13 @@
   <div class="kpi-row" id="kpiRow"></div>
   <div class="stats-row" id="statsRow"></div>
   <div class="board" id="board"></div>
+</div>
+
+<div id="activityView" style="display:none">
+  <div class="toolbar">
+    <div class="hint" style="margin:0">Alla kunder med ett inplanerat nästa steg, i kronologisk ordning. Försenade datum visas högst upp i rött.</div>
+  </div>
+  <div class="agenda" id="agendaWrap"></div>
 </div>
 
 <div id="questionsView" style="display:none">
@@ -523,6 +570,7 @@ function migrateLeads(data) {
     }
     if (l.weight === undefined || l.weight === null || l.weight === '') l.weight = 100;
     if (!Array.isArray(l.tags)) l.tags = [];
+    if (l.nextDone === undefined || l.nextDone === null) l.nextDone = false;
   });
   return data;
 }
@@ -919,6 +967,88 @@ function renderBoard() {
 
     board.appendChild(col);
   });
+
+  renderActivity();
+}
+
+// ---------- Activity / Agenda ----------
+const SV_WEEKDAYS = ['Söndag','Måndag','Tisdag','Onsdag','Torsdag','Fredag','Lördag'];
+const SV_MONTHS = ['januari','februari','mars','april','maj','juni','juli','augusti','september','oktober','november','december'];
+
+function formatAgendaDate(dateStr) {
+  const [y, m, d] = dateStr.split('-').map(Number);
+  const dt = new Date(y, m - 1, d);
+  const today = todayStr();
+  if (dateStr === today) return 'Idag · ' + d + ' ' + SV_MONTHS[m - 1];
+  const tomorrow = new Date(); tomorrow.setDate(tomorrow.getDate() + 1);
+  if (dateStr === tomorrow.toISOString().slice(0,10)) return 'Imorgon · ' + d + ' ' + SV_MONTHS[m - 1];
+  return SV_WEEKDAYS[dt.getDay()] + ' ' + d + ' ' + SV_MONTHS[m - 1];
+}
+
+function renderActivity() {
+  const wrap = document.getElementById('agendaWrap');
+  if (!wrap) return;
+  const today = todayStr();
+  const items = leads
+    .filter(l => l.nextDate && stageKind(l.stage) !== 'won' && stageKind(l.stage) !== 'lost')
+    .sort((a, b) => a.nextDate < b.nextDate ? -1 : a.nextDate > b.nextDate ? 1 : 0);
+
+  if (!items.length) {
+    wrap.innerHTML = '<div class="empty-hint">Inga inplanerade nästa steg.</div>';
+    return;
+  }
+
+  let html = '';
+  let lastDate = null;
+  items.forEach(lead => {
+    if (lead.nextDate !== lastDate) {
+      lastDate = lead.nextDate;
+      const overdue = lastDate < today;
+      const isToday = lastDate === today;
+      html += `<div class="agenda-date${overdue ? ' overdue' : ''}${isToday ? ' is-today' : ''}" data-date="${lastDate}">${formatAgendaDate(lastDate)}</div>`;
+    }
+    const leadTags = (lead.tags || []).map(id => getTagById(id)).filter(Boolean);
+    const weight = (lead.weight === undefined || lead.weight === null || lead.weight === '') ? 100 : Number(lead.weight);
+    const weightedVarde = lead.varde ? Math.round(Number(lead.varde) * weight / 100) : null;
+    const overdueRow = lead.nextDate < today;
+    const done = !!lead.nextDone;
+    html += `
+      <div class="agenda-item${overdueRow ? ' overdue' : ''}${done ? ' is-done' : ''}" data-id="${lead.id}">
+        <div class="agenda-item-main">
+          <div class="agenda-item-top">
+            <span class="kund">${escapeHtml(lead.kund || 'Namnlös kund')}</span>
+            ${leadTags.length ? `<div class="card-tags">${leadTags.map(t => `<span class="tag-chip" style="background:${t.color};color:${tagTextColor(t.color)}">${escapeHtml(t.name)}</span>`).join('')}</div>` : ''}
+          </div>
+          ${lead.next ? `<div class="next">${escapeHtml(lead.next)}</div>` : ''}
+          ${lead.kontakt ? `<div class="kontakt">${escapeHtml(lead.kontakt)}${lead.telefon ? ` · <a href="tel:${escapeHtml(lead.telefon)}" class="card-link" onclick="event.stopPropagation()">${escapeHtml(lead.telefon)}</a>` : ''}</div>` : ''}
+          ${lead.varde ? `<div class="varde">${Number(lead.varde).toLocaleString('sv-SE')} kr &nbsp;·&nbsp; ${weight}% → ${weightedVarde.toLocaleString('sv-SE')} kr</div>` : ''}
+        </div>
+        <button type="button" class="agenda-done-btn" data-id="${lead.id}">${done ? 'Ångra' : 'Utfört'}</button>
+      </div>
+    `;
+  });
+  wrap.innerHTML = html;
+  wrap.querySelectorAll('.agenda-item').forEach(el => {
+    el.addEventListener('click', () => openLeadModal(el.dataset.id));
+  });
+  wrap.querySelectorAll('.agenda-done-btn').forEach(el => {
+    el.addEventListener('click', e => {
+      e.stopPropagation();
+      const lead = leads.find(l => l.id === el.dataset.id);
+      if (lead) {
+        lead.nextDone = !lead.nextDone;
+        saveLeads(leads);
+        renderActivity();
+      }
+    });
+  });
+}
+
+function scrollAgendaToToday() {
+  setTimeout(() => {
+    const el = document.querySelector('.agenda-date.is-today') || document.querySelector('.agenda-date.overdue:last-of-type');
+    if (el) el.scrollIntoView({ block: 'start' });
+  }, 0);
 }
 
 function matchesSearch(lead) {
@@ -1196,9 +1326,10 @@ document.getElementById('leadSaveBtn').addEventListener('click', () => {
 
   if (id) {
     const lead = leads.find(l => l.id === id);
+    if (lead.next !== data.next || lead.nextDate !== data.nextDate) data.nextDone = false;
     Object.assign(lead, data);
   } else {
-    leads.push(Object.assign({ id: uid() }, data));
+    leads.push(Object.assign({ id: uid(), nextDone: false }, data));
   }
   saveLeads(leads);
   renderBoard();
@@ -1540,7 +1671,9 @@ document.querySelectorAll('.tab-btn').forEach(btn => {
     btn.classList.add('active');
     const tab = btn.dataset.tab;
     document.getElementById('pipelineView').style.display = tab === 'pipeline' ? 'block' : 'none';
+    document.getElementById('activityView').style.display = tab === 'activity' ? 'block' : 'none';
     document.getElementById('questionsView').style.display = tab === 'questions' ? 'block' : 'none';
+    if (tab === 'activity') { renderActivity(); scrollAgendaToToday(); }
   });
 });
 
