@@ -236,10 +236,24 @@
     display: flex; gap: 6px; align-items: center; margin-bottom: 6px; background: #11141b;
     border: 1px solid #20242f; border-radius: 8px; padding: 6px;
   }
-  .contact-row input, .event-row input[type="text"] { flex: 1 1 auto; min-width: 0; }
+  .contact-row { flex-wrap: wrap; align-items: stretch; }
+  .contact-row input { flex: 1 1 calc(50% - 3px); width: auto; min-width: 0; }
+  .event-row input[type="text"] { flex: 1 1 auto; min-width: 0; }
   .event-row input[type="date"] { flex: 0 0 130px; }
   .event-row label.event-done { display: flex; align-items: center; gap: 4px; font-size: 11px; color: #9ca3af; flex-shrink: 0; white-space: nowrap; }
   .contact-row button, .event-row button { flex-shrink: 0; font-size: 12px; padding: 4px 7px; border-radius: 5px; border: 1px solid #2a2e37; background: #1a1d27; color: #f87171; cursor: pointer; }
+  .contact-row button { flex: 0 0 auto; margin-left: auto; }
+
+  .kontakt-toggle-btn {
+    display: inline-flex; align-items: center; gap: 6px; background: #1a1d27; border: 1px solid #2a2e37;
+    border-radius: 6px; padding: 7px 11px; font-size: 13px; color: #e5e7eb; cursor: pointer; font-family: inherit;
+  }
+  .kontakt-toggle-btn:hover { border-color: #3b82f6; }
+  .kontakt-toggle-btn .caret { color: #6b7280; font-size: 11px; }
+  .kontakt-details { margin-top: 8px; background: #11141b; border: 1px solid #20242f; border-radius: 8px; padding: 10px; }
+  .kontakt-details select { width: 100%; margin-bottom: 8px; }
+  .kontakt-details .kd-row { font-size: 12px; color: #9ca3af; margin-top: 4px; }
+  .kontakt-details .kd-row b { color: #e5e7eb; font-weight: 500; }
 
   .process-list-item {
     display: flex; justify-content: space-between; align-items: center; gap: 8px; padding: 8px 10px;
@@ -290,9 +304,9 @@
     .log-entry .txt { font-size: 13px; line-height: 1.4; }
     .btn, .btn.secondary, .btn.ghost { padding: 10px 14px; font-size: 14px; }
     table th, table td { font-size: 14px; padding: 11px 12px; }
-    .contact-row { flex-wrap: wrap; align-items: stretch; padding: 10px; }
-    .contact-row input { flex: 1 1 calc(50% - 3px); width: auto; min-width: 0; font-size: 15px; padding: 9px 10px; }
-    .contact-row button { flex: 0 0 auto; margin-left: auto; padding: 7px 12px; font-size: 13px; }
+    .contact-row { padding: 10px; }
+    .contact-row input { font-size: 15px; padding: 9px 10px; }
+    .contact-row button { padding: 7px 12px; font-size: 13px; }
   }
 </style>
 </head>
@@ -384,6 +398,10 @@
         <select id="leadKundSelect" style="flex:1"></select>
         <button type="button" class="btn ghost" id="leadKundAddBtn" style="flex-shrink:0">+ Ny kund</button>
       </div>
+    </div>
+    <div class="field" id="leadKontaktField" style="display:none">
+      <label>Kontaktperson</label>
+      <div id="leadKontaktWidget"></div>
     </div>
     <div class="field-row">
       <div class="field"><label>Värde (kr)</label><input type="number" id="leadVarde"></div>
@@ -961,6 +979,8 @@ let qSearchTerm = '';
 let currentLogEntries = []; // working copy while a lead modal is open
 let currentLeadTags = []; // working copy of selected tag ids while a lead modal is open
 let currentLeadEvents = []; // working copy of events ({id,text,datum,utford}) while a lead modal is open
+let currentLeadKontaktId = ''; // selected contact id while a lead modal is open
+let leadKontaktExpanded = false; // whether the contact detail panel is open
 let currentCustomerLog = []; // working copy while the customer modal is open
 let currentCustomerContacts = []; // working copy while the customer modal is open
 let custQuickAddContext = null; // 'lead' | 'registry' — where the quick-add customer modal was opened from
@@ -1417,6 +1437,52 @@ function populateKundSelect(selectedId) {
   if (selectedId) sel.value = selectedId;
 }
 
+function renderLeadKontaktWidget() {
+  const field = document.getElementById('leadKontaktField');
+  const widget = document.getElementById('leadKontaktWidget');
+  const kundId = document.getElementById('leadKundSelect').value;
+  const kund = getCustomerById(kundId);
+  const contacts = (kund && kund.kontakter) || [];
+  if (!contacts.length) {
+    field.style.display = 'none';
+    widget.innerHTML = '';
+    currentLeadKontaktId = '';
+    return;
+  }
+  field.style.display = 'block';
+  if (!contacts.some(c => c.id === currentLeadKontaktId)) {
+    currentLeadKontaktId = contacts[0].id;
+  }
+  const selected = contacts.find(c => c.id === currentLeadKontaktId);
+  let html = `<button type="button" class="kontakt-toggle-btn" id="leadKontaktToggleBtn">${escapeHtml(selected.namn || 'Namnlös kontakt')} <span class="caret">${leadKontaktExpanded ? '▲' : '▼'}</span></button>`;
+  if (leadKontaktExpanded) {
+    html += '<div class="kontakt-details">';
+    if (contacts.length > 1) {
+      html += `<select id="leadKontaktSelect">${contacts.map(c => `<option value="${c.id}"${c.id === currentLeadKontaktId ? ' selected' : ''}>${escapeHtml(c.namn || 'Namnlös kontakt')}</option>`).join('')}</select>`;
+    }
+    html += `<div class="kd-row"><b>Telefon:</b> ${selected.telefon ? escapeHtml(selected.telefon) : '–'}</div>`;
+    html += `<div class="kd-row"><b>E-post:</b> ${selected.email ? escapeHtml(selected.email) : '–'}</div>`;
+    html += `<div class="kd-row"><b>Roll:</b> ${selected.roll ? escapeHtml(selected.roll) : '–'}</div>`;
+    html += '</div>';
+  }
+  widget.innerHTML = html;
+  document.getElementById('leadKontaktToggleBtn').addEventListener('click', () => {
+    leadKontaktExpanded = !leadKontaktExpanded;
+    renderLeadKontaktWidget();
+  });
+  if (leadKontaktExpanded && contacts.length > 1) {
+    document.getElementById('leadKontaktSelect').addEventListener('change', e => {
+      currentLeadKontaktId = e.target.value;
+      renderLeadKontaktWidget();
+    });
+  }
+}
+document.getElementById('leadKundSelect').addEventListener('change', () => {
+  currentLeadKontaktId = '';
+  leadKontaktExpanded = false;
+  renderLeadKontaktWidget();
+});
+
 function renderLeadEvents() {
   const wrap = document.getElementById('leadEventsList');
   wrap.innerHTML = '';
@@ -1487,6 +1553,7 @@ function openLeadModal(id, prefill) {
   populateStageSelect();
   const defaultStageKey = STAGES[0] ? STAGES[0].key : 'booked';
 
+  leadKontaktExpanded = false;
   if (isEdit) {
     const lead = leads.find(l => l.id === id);
     document.getElementById('leadId').value = lead.id;
@@ -1499,6 +1566,7 @@ function openLeadModal(id, prefill) {
     currentLogEntries = (lead.log || []).slice();
     currentLeadTags = (lead.tags || []).slice();
     currentLeadEvents = (lead.events || []).map(ev => Object.assign({}, ev));
+    currentLeadKontaktId = lead.kontaktId || '';
   } else {
     document.getElementById('leadId').value = '';
     populateKundSelect(prefill && prefill.kundId);
@@ -1510,12 +1578,14 @@ function openLeadModal(id, prefill) {
     currentLogEntries = (prefill && prefill.log) ? prefill.log.slice() : [];
     currentLeadTags = [];
     currentLeadEvents = [];
+    currentLeadKontaktId = (prefill && prefill.kontaktId) || '';
   }
   updateLeadWeightedHint();
   updateLeadStageDateFields();
   renderLeadLog();
   renderLeadTagsPicker();
   renderLeadEvents();
+  renderLeadKontaktWidget();
   backdrop.classList.add('open');
 }
 function closeLeadModal() {
@@ -1523,6 +1593,8 @@ function closeLeadModal() {
   currentLogEntries = [];
   currentLeadTags = [];
   currentLeadEvents = [];
+  currentLeadKontaktId = '';
+  leadKontaktExpanded = false;
 }
 
 document.getElementById('addLeadBtn').addEventListener('click', () => openLeadModal(null));
@@ -1535,6 +1607,7 @@ document.getElementById('leadSaveBtn').addEventListener('click', () => {
   const id = document.getElementById('leadId').value;
   const data = {
     kundId: document.getElementById('leadKundSelect').value,
+    kontaktId: currentLeadKontaktId || '',
     varde: document.getElementById('leadVarde').value,
     weight: Number(document.getElementById('leadWeight').value),
     stage: document.getElementById('leadStage').value,
@@ -1841,6 +1914,9 @@ document.getElementById('custQuickSaveBtn').addEventListener('click', () => {
   closeCustQuickAddModal();
   if (context === 'lead') {
     populateKundSelect(kund.id);
+    currentLeadKontaktId = '';
+    leadKontaktExpanded = false;
+    renderLeadKontaktWidget();
   } else {
     renderCustomerRegistry();
   }
