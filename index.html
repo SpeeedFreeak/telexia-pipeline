@@ -162,18 +162,54 @@
   .stage-row button:disabled { opacity: 0.3; cursor: not-allowed; }
   .stage-row button.danger { color: #f87171; border-color: #7f1d1d; }
 
+  .tag-row { display: flex; gap: 6px; align-items: center; margin-bottom: 6px; }
+  .tag-row input[type="text"] { flex: 1; padding: 6px 8px; border: 1px solid #2a2e37; border-radius: 6px; font-size: 13px; background: #1a1d27; color: #e5e7eb; }
+  .tag-row input[type="color"] { width: 34px; height: 30px; padding: 2px; border: 1px solid #2a2e37; border-radius: 6px; background: #1a1d27; cursor: pointer; }
+  .tag-row button { font-size: 12px; padding: 4px 7px; border-radius: 5px; border: 1px solid #2a2e37; background: #1a1d27; color: #d1d5db; cursor: pointer; }
+  .tag-row button.danger { color: #f87171; border-color: #7f1d1d; }
+
+  .tag-picker { display: flex; flex-wrap: wrap; gap: 6px; }
+  .tag-chip {
+    display: inline-flex; align-items: center; font-size: 11px; font-weight: 600; padding: 3px 9px; border-radius: 12px;
+    cursor: pointer; border: 1.5px solid transparent; opacity: 0.45; user-select: none;
+  }
+  .tag-chip.selected { opacity: 1; box-shadow: 0 0 0 1.5px rgba(255,255,255,0.25) inset; }
+  .tag-empty-hint { font-size: 11px; color: #6b7280; }
+  .card-tags { display: flex; flex-wrap: wrap; gap: 4px; margin-bottom: 5px; }
+  .card-tags .tag-chip { cursor: default; opacity: 1; font-size: 10px; padding: 2px 8px; }
+
   @media (max-width: 720px) {
     .topbar { flex-wrap: wrap; gap: 8px; padding: 12px 14px; }
+    .topbar h1 { font-size: 17px; }
     .tabs { padding: 0 14px; overflow-x: auto; }
+    .tab-btn { font-size: 14px; padding: 11px 14px; }
     .toolbar { padding: 10px 14px; }
-    .toolbar input[type="text"] { min-width: 0; flex: 1 1 100%; }
+    .toolbar input[type="text"] { min-width: 0; flex: 1 1 100%; font-size: 16px; padding: 9px 10px; }
     .kpi-row, .stats-row { padding: 0 14px 10px; }
     .kpi-card { min-width: 140px; }
+    .kpi-card .kpi-label { font-size: 12px; }
+    .kpi-card .kpi-value { font-size: 20px; }
+    .stat-pill { font-size: 13px; padding: 9px 13px; }
+    .stat-pill b { font-size: 15px; }
     .board { padding: 0 14px 20px; flex-direction: column; overflow-x: visible; }
     .column { flex: 1 1 auto; width: 100%; }
+    .column-head span.name { font-size: 13px; }
+    .card { padding: 12px; margin-bottom: 10px; }
+    .card .kund { font-size: 15px; }
+    .card .kontakt, .card .next { font-size: 13px; line-height: 1.4; }
+    .card .date { font-size: 12px; }
+    .card .varde { font-size: 13px; }
+    .card .logbadge { font-size: 11px; }
+    .card-tags .tag-chip { font-size: 11px; padding: 3px 9px; }
     .modal { width: 94vw; padding: 14px; }
+    .modal h2 { font-size: 16px; }
     .field-row { flex-direction: column; gap: 0; }
-    .btn, .btn.secondary, .btn.ghost { padding: 9px 14px; }
+    .field label { font-size: 13px; }
+    .field input, .field select, .field textarea { font-size: 16px; padding: 9px 10px; }
+    .hint { font-size: 12px; line-height: 1.4; }
+    .log-entry .txt { font-size: 13px; line-height: 1.4; }
+    .btn, .btn.secondary, .btn.ghost { padding: 10px 14px; font-size: 14px; }
+    table th, table td { font-size: 14px; padding: 11px 12px; }
   }
 </style>
 </head>
@@ -212,6 +248,7 @@
     <button class="btn" id="addLeadBtn">+ Ny kund</button>
     <button class="btn secondary" id="addLeadFromImageBtn">+ Ny kund från skärmdump</button>
     <button class="btn ghost" id="manageStagesBtn">Hantera kategorier</button>
+    <button class="btn ghost" id="manageTagsBtn">Hantera taggar</button>
     <button class="btn ghost" id="exportLeadsBtn">Exportera CSV</button>
   </div>
   <div class="kpi-row" id="kpiRow"></div>
@@ -271,6 +308,10 @@
     <div class="field">
       <label>Steg i pipeline</label>
       <select id="leadStage"></select>
+    </div>
+    <div class="field">
+      <label>Taggar</label>
+      <div class="tag-picker" id="leadTagsPicker"></div>
     </div>
     <div class="field-row">
       <div class="field"><label>Nästa steg</label><input type="text" id="leadNext" placeholder="t.ex. ring kund om avtalsförslag"></div>
@@ -369,6 +410,22 @@
   </div>
 </div>
 
+<!-- Tag manager modal -->
+<div class="modal-backdrop" id="tagModalBackdrop">
+  <div class="modal">
+    <h2>Hantera taggar</h2>
+    <div class="hint">Skapa taggar, döp dem och välj färg. Taggar visas på kortet i pipeline-vyn.</div>
+    <div id="tagRows"></div>
+    <button class="btn ghost" id="tagAddBtn" style="margin-top:6px">+ Lägg till tagg</button>
+    <div class="modal-actions">
+      <div class="left">
+        <button class="btn ghost" id="tagCancelBtn">Avbryt</button>
+      </div>
+      <button class="btn" id="tagSaveBtn">Spara</button>
+    </div>
+  </div>
+</div>
+
 <!-- Lightbox -->
 <div class="modal-backdrop" id="lightboxBackdrop" style="align-items:center;padding-top:0">
   <img id="lightboxImg" style="max-width:90vw;max-height:90vh;border-radius:8px">
@@ -406,6 +463,31 @@ let STAGES = loadStages();
 function getStageByKey(key) { return STAGES.find(s => s.key === key); }
 function stageKind(key) { const s = getStageByKey(key); return s ? s.kind : 'normal'; }
 
+// ---------- Tags ----------
+const TAGS_KEY = 'telexia_pipeline_tags_v1';
+function loadTags() {
+  try {
+    const t = JSON.parse(localStorage.getItem(TAGS_KEY));
+    if (Array.isArray(t)) return t;
+  } catch(e) {}
+  return [];
+}
+function saveTags(t) {
+  localStorage.setItem(TAGS_KEY, JSON.stringify(t));
+  touchSavedLabel();
+  scheduleDrivePush();
+}
+let TAGS = loadTags();
+function getTagById(id) { return TAGS.find(t => t.id === id); }
+function tagTextColor(hex) {
+  if (!hex) return '#0f1115';
+  const c = hex.replace('#', '');
+  if (c.length !== 6) return '#0f1115';
+  const r = parseInt(c.slice(0,2), 16), g = parseInt(c.slice(2,4), 16), b = parseInt(c.slice(4,6), 16);
+  const luminance = (0.299 * r + 0.587 * g + 0.114 * b) / 255;
+  return luminance > 0.6 ? '#0f1115' : '#f3f4f6';
+}
+
 function populateStageSelect() {
   const sel = document.getElementById('leadStage');
   if (!sel) return;
@@ -438,6 +520,7 @@ function migrateLeads(data) {
       delete l.notes;
     }
     if (l.weight === undefined || l.weight === null || l.weight === '') l.weight = 100;
+    if (!Array.isArray(l.tags)) l.tags = [];
   });
   return data;
 }
@@ -566,7 +649,7 @@ async function findOrCreateDriveFile() {
     driveFileId = listData.files[0].id;
     return 'existing';
   }
-  const seed = JSON.stringify({ leads, questions, stages: STAGES });
+  const seed = JSON.stringify({ leads, questions, stages: STAGES, tags: TAGS });
   const metadata = { name: DRIVE_FILE_NAME, mimeType: 'application/json' };
   const form = new FormData();
   form.append('metadata', new Blob([JSON.stringify(metadata)], { type: 'application/json' }));
@@ -590,7 +673,7 @@ async function pushToDrive() {
   if (!accessToken || !driveFileId) return;
   setDriveStatus('Synkar...');
   try {
-    const body = JSON.stringify({ leads, questions, stages: STAGES });
+    const body = JSON.stringify({ leads, questions, stages: STAGES, tags: TAGS });
     const res = await driveFetch('https://www.googleapis.com/upload/drive/v3/files/' + driveFileId + '?uploadType=media', {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
@@ -625,6 +708,10 @@ async function onSignedIn() {
           STAGES = remote.stages;
           saveStages(STAGES);
         }
+        if (Array.isArray(remote.tags)) {
+          TAGS = remote.tags;
+          saveTags(TAGS);
+        }
         localStorage.setItem(LEADS_KEY, JSON.stringify(leads));
         localStorage.setItem(Q_KEY, JSON.stringify(questions));
         populateStageSelect();
@@ -653,6 +740,26 @@ document.getElementById('driveSignOutBtn').addEventListener('click', () => {
 let searchTerm = '';
 let qSearchTerm = '';
 let currentLogEntries = []; // working copy while a lead modal is open
+let currentLeadTags = []; // working copy of selected tag ids while a lead modal is open
+
+function renderLeadTagsPicker() {
+  const wrap = document.getElementById('leadTagsPicker');
+  if (!wrap) return;
+  if (!TAGS.length) {
+    wrap.innerHTML = '<span class="tag-empty-hint">Inga taggar än – skapa via "Hantera taggar".</span>';
+    return;
+  }
+  wrap.innerHTML = TAGS.map(t => {
+    const selected = currentLeadTags.includes(t.id);
+    return `<span class="tag-chip${selected ? ' selected' : ''}" data-id="${t.id}" style="background:${t.color};color:${tagTextColor(t.color)}">${escapeHtml(t.name)}</span>`;
+  }).join('');
+  wrap.querySelectorAll('.tag-chip').forEach(el => el.addEventListener('click', () => {
+    const id = el.dataset.id;
+    if (currentLeadTags.includes(id)) currentLeadTags = currentLeadTags.filter(x => x !== id);
+    else currentLeadTags.push(id);
+    renderLeadTagsPicker();
+  }));
+}
 
 function isOverdue(lead) {
   if (!lead.nextDate) return false;
@@ -770,7 +877,9 @@ function renderBoard() {
       const logCount = (lead.log || []).length;
       const weight = (lead.weight === undefined || lead.weight === null || lead.weight === '') ? 100 : Number(lead.weight);
       const weightedVarde = lead.varde ? Math.round(Number(lead.varde) * weight / 100) : null;
+      const leadTags = (lead.tags || []).map(id => getTagById(id)).filter(Boolean);
       card.innerHTML = `
+        ${leadTags.length ? `<div class="card-tags">${leadTags.map(t => `<span class="tag-chip" style="background:${t.color};color:${tagTextColor(t.color)}">${escapeHtml(t.name)}</span>`).join('')}</div>` : ''}
         <div class="kund">${escapeHtml(lead.kund || 'Namnlös kund')}</div>
         ${lead.kontakt ? `<div class="kontakt">${escapeHtml(lead.kontakt)}${lead.telefon ? ` · <a href="tel:${escapeHtml(lead.telefon)}" class="card-link" onclick="event.stopPropagation()">${escapeHtml(lead.telefon)}</a>` : ''}</div>` : ''}
         ${lead.adress ? `<div class="kontakt"><a href="${mapsUrl(lead.adress)}" target="_blank" rel="noopener" class="card-link" onclick="event.stopPropagation()">📍 ${escapeHtml(lead.adress)}</a></div>` : ''}
@@ -1021,6 +1130,7 @@ function openLeadModal(id, prefill) {
     document.getElementById('leadSignedDate').value = lead.signedDate || '';
     document.getElementById('leadLostDate').value = lead.lostDate || '';
     currentLogEntries = (lead.log || []).slice();
+    currentLeadTags = (lead.tags || []).slice();
   } else {
     document.getElementById('leadId').value = '';
     document.getElementById('leadKund').value = (prefill && prefill.kund) || '';
@@ -1036,16 +1146,19 @@ function openLeadModal(id, prefill) {
     document.getElementById('leadSignedDate').value = '';
     document.getElementById('leadLostDate').value = '';
     currentLogEntries = (prefill && prefill.log) ? prefill.log.slice() : [];
+    currentLeadTags = [];
   }
   updateLeadAdressLink();
   updateLeadWeightedHint();
   updateLeadStageDateFields();
   renderLeadLog();
+  renderLeadTagsPicker();
   backdrop.classList.add('open');
 }
 function closeLeadModal() {
   document.getElementById('leadModalBackdrop').classList.remove('open');
   currentLogEntries = [];
+  currentLeadTags = [];
 }
 
 document.getElementById('addLeadBtn').addEventListener('click', () => openLeadModal(null));
@@ -1070,6 +1183,7 @@ document.getElementById('leadSaveBtn').addEventListener('click', () => {
     signedDate: document.getElementById('leadSignedDate').value,
     lostDate: document.getElementById('leadLostDate').value,
     log: currentLogEntries.slice(),
+    tags: currentLeadTags.slice(),
   };
   if (stageKind(data.stage) === 'lost' && !data.lostDate) data.lostDate = todayStr();
   if (!data.kund) { alert('Ange kundnamn'); return; }
@@ -1151,7 +1265,8 @@ function renderStageRows() {
     const removed = stageWorkingCopy[i];
     const count = leads.filter(l => l.stage === removed.key).length;
     if (count > 0) {
-      if (!confirm(`${count} kund(er) ligger i "${removed.name}". De flyttas till "${stageWorkingCopy[i===0?1:0].name}" om du tar bort kategorin. Fortsätt?`)) return;
+      alert(`"${removed.name}" innehåller ${count} kund${count > 1 ? 'er' : ''}. Flytta dem till en annan kategori (dra kortet på tavlan eller ändra steg i kundens redigeringsruta) innan du kan ta bort den här kategorin.`);
+      return;
     }
     stageWorkingCopy.splice(i, 1);
     renderStageRows();
@@ -1185,6 +1300,69 @@ document.getElementById('stageSaveBtn').addEventListener('click', () => {
   renderBoard();
   renderStats(); renderKpis();
   document.getElementById('stageModalBackdrop').classList.remove('open');
+});
+
+// ---------- Tag manager ----------
+let tagWorkingCopy = [];
+const TAG_DEFAULT_COLOR = '#3b82f6';
+
+function renderTagRows() {
+  const wrap = document.getElementById('tagRows');
+  wrap.innerHTML = '';
+  if (!tagWorkingCopy.length) {
+    wrap.innerHTML = '<div class="tag-empty-hint" style="padding:4px 0 8px">Inga taggar än.</div>';
+  }
+  tagWorkingCopy.forEach((t, idx) => {
+    const row = document.createElement('div');
+    row.className = 'tag-row';
+    row.innerHTML = `
+      <input type="color" data-idx="${idx}" class="tagColorInput" value="${t.color || TAG_DEFAULT_COLOR}">
+      <input type="text" data-idx="${idx}" class="tagNameInput" value="${escapeHtml(t.name)}">
+      <button type="button" data-idx="${idx}" class="tagDelBtn danger" title="Ta bort">Ta bort</button>
+    `;
+    wrap.appendChild(row);
+  });
+  wrap.querySelectorAll('.tagNameInput').forEach(el => el.addEventListener('input', e => {
+    tagWorkingCopy[Number(e.target.dataset.idx)].name = e.target.value;
+  }));
+  wrap.querySelectorAll('.tagColorInput').forEach(el => el.addEventListener('input', e => {
+    tagWorkingCopy[Number(e.target.dataset.idx)].color = e.target.value;
+  }));
+  wrap.querySelectorAll('.tagDelBtn').forEach(el => el.addEventListener('click', e => {
+    const i = Number(e.target.dataset.idx);
+    const removed = tagWorkingCopy[i];
+    const count = leads.filter(l => (l.tags || []).includes(removed.id)).length;
+    if (count > 0 && !confirm(`${count} kund(er) har taggen "${removed.name}". Ta bort taggen ändå? Den tas då bort från dessa kunder.`)) return;
+    tagWorkingCopy.splice(i, 1);
+    renderTagRows();
+  }));
+}
+
+document.getElementById('manageTagsBtn').addEventListener('click', () => {
+  tagWorkingCopy = TAGS.map(t => Object.assign({}, t));
+  renderTagRows();
+  document.getElementById('tagModalBackdrop').classList.add('open');
+});
+document.getElementById('tagCancelBtn').addEventListener('click', () => {
+  document.getElementById('tagModalBackdrop').classList.remove('open');
+});
+document.getElementById('tagModalBackdrop').addEventListener('click', e => {
+  if (e.target.id === 'tagModalBackdrop') document.getElementById('tagModalBackdrop').classList.remove('open');
+});
+document.getElementById('tagAddBtn').addEventListener('click', () => {
+  tagWorkingCopy.push({ id: uid(), name: 'Ny tagg', color: TAG_DEFAULT_COLOR });
+  renderTagRows();
+});
+document.getElementById('tagSaveBtn').addEventListener('click', () => {
+  const cleaned = tagWorkingCopy.map(t => Object.assign({}, t, { name: t.name.trim() || 'Namnlös tagg' }));
+  const keptIds = new Set(cleaned.map(t => t.id));
+  leads.forEach(l => { if (l.tags) l.tags = l.tags.filter(id => keptIds.has(id)); });
+  TAGS = cleaned;
+  saveTags(TAGS);
+  saveLeads(leads);
+  renderBoard();
+  renderLeadTagsPicker();
+  document.getElementById('tagModalBackdrop').classList.remove('open');
 });
 
 // ---------- New customer from screenshot ----------
