@@ -59,6 +59,10 @@
   }
   .stat-pill b { font-size: 14px; color: #f3f4f6; margin-right: 4px; }
   .stat-pill.overdue { border-color: #7f1d1d; background: rgba(248,113,113,0.08); color: #fca5a5; }
+  .stat-pill.filterable { cursor: pointer; transition: border-color .15s, background .15s, color .15s; }
+  .stat-pill.filterable:hover { border-color: #3b82f6; }
+  .stat-pill.filterable.active { border-color: #3b82f6; background: rgba(59,130,246,0.15); color: #93c5fd; }
+  .stat-pill.filterable.active b { color: #bfdbfe; }
 
   .board { display: flex; gap: 12px; padding: 0 20px 24px; overflow-x: auto; align-items: flex-start; }
   .column {
@@ -286,6 +290,9 @@
     .log-entry .txt { font-size: 13px; line-height: 1.4; }
     .btn, .btn.secondary, .btn.ghost { padding: 10px 14px; font-size: 14px; }
     table th, table td { font-size: 14px; padding: 11px 12px; }
+    .contact-row { flex-wrap: wrap; align-items: stretch; padding: 10px; }
+    .contact-row input { flex: 1 1 100%; width: 100%; font-size: 15px; padding: 9px 10px; }
+    .contact-row button { flex: 0 0 auto; margin-left: auto; padding: 7px 12px; font-size: 13px; }
   }
 </style>
 </head>
@@ -1056,22 +1063,35 @@ function renderKpis() {
   });
 }
 
+let stageFilter = new Set();
+
 function renderStats() {
   const row = document.getElementById('statsRow');
   const overdueCount = leads.filter(isOverdue).length;
   let html = '';
   STAGES.forEach(s => {
     const count = leads.filter(l => l.stage === s.key).length;
-    html += `<div class="stat-pill"><b>${count}</b>${s.name}</div>`;
+    const active = stageFilter.has(s.key);
+    html += `<div class="stat-pill filterable${active ? ' active' : ''}" data-stage="${s.key}"><b>${count}</b>${s.name}</div>`;
   });
   html += `<div class="stat-pill overdue"><b>${overdueCount}</b>försenad uppföljning</div>`;
   row.innerHTML = html;
+  row.querySelectorAll('.stat-pill.filterable').forEach(pill => {
+    pill.addEventListener('click', () => {
+      const key = pill.dataset.stage;
+      if (stageFilter.has(key)) stageFilter.delete(key);
+      else stageFilter.add(key);
+      renderStats();
+      renderBoard();
+    });
+  });
 }
 
 function renderBoard() {
   const board = document.getElementById('board');
   board.innerHTML = '';
-  STAGES.forEach(stage => {
+  const visibleStages = stageFilter.size ? STAGES.filter(s => stageFilter.has(s.key)) : STAGES;
+  visibleStages.forEach(stage => {
     const col = document.createElement('div');
     col.className = 'column';
     col.dataset.stage = stage.key;
