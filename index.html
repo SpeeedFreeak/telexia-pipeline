@@ -1170,6 +1170,7 @@ function renderBoard() {
       if (lead) {
         lead.stage = stage.key;
         if (stage.kind === 'lost' && !lead.lostDate) lead.lostDate = todayStr();
+        if (stage.kind === 'won' && !lead.signedDate) lead.signedDate = todayStr();
         saveLeads(leads);
         renderBoard();
         renderStats(); renderKpis();
@@ -1618,6 +1619,7 @@ document.getElementById('leadSaveBtn').addEventListener('click', () => {
     tags: currentLeadTags.slice(),
   };
   if (stageKind(data.stage) === 'lost' && !data.lostDate) data.lostDate = todayStr();
+  if (stageKind(data.stage) === 'won' && !data.signedDate) data.signedDate = todayStr();
   if (!data.kundId) { alert('Välj eller skapa en kund'); return; }
 
   if (id) {
