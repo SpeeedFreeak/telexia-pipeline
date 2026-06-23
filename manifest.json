@@ -1,6 +1,6 @@
 {
-  "name": "Telexia – Säljpipeline",
-  "short_name": "Telexia",
+  "name": "Pipeline",
+  "short_name": "Pipeline",
   "description": "Säljpipeline & produktspecialist-frågor för Timpunkt",
   "start_url": "./",
   "scope": "./",
