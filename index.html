@@ -158,6 +158,7 @@
   .kpi-card { background: #161922; border: 1px solid #262b36; border-radius: 8px; padding: 10px 14px; min-width: 170px; flex: 1 1 170px; }
   .kpi-card .kpi-label { font-size: 11px; color: #9ca3af; margin-bottom: 4px; display:flex; align-items:center; justify-content:space-between; gap:6px; }
   .kpi-card .kpi-value { font-size: 18px; font-weight: 700; color: #f3f4f6; }
+  .kpi-card .kpi-own { font-size: 11px; color: #8b95a5; margin-top: 2px; }
   .kpi-card select.kpi-month { font-size: 11px; padding: 2px 4px; border-radius: 5px; border: 1px solid #2a2e37; background: #1a1d27; color: #cbd5e1; }
   .kpi-card.signed .kpi-value { color: #34d399; }
   .kpi-card.lost .kpi-value { color: #f87171; }
@@ -413,6 +414,15 @@
           <option value="50" selected>50%</option>
           <option value="75">75%</option>
           <option value="100">100%</option>
+        </select>
+      </div>
+      <div class="field">
+        <label>Delas mellan</label>
+        <select id="leadDelningsantal">
+          <option value="1">1 (ingen delning)</option>
+          <option value="2" selected>2 personer</option>
+          <option value="3">3 personer</option>
+          <option value="4">4 personer</option>
         </select>
       </div>
     </div>
@@ -689,6 +699,7 @@ function migrateLeads(data) {
       delete l.notes;
     }
     if (l.weight === undefined || l.weight === null || l.weight === '') l.weight = 100;
+    if (l.delningsantal === undefined || l.delningsantal === null || l.delningsantal === '') l.delningsantal = 2;
     if (!Array.isArray(l.tags)) l.tags = [];
     if (l.nextDone === undefined || l.nextDone === null) l.nextDone = false;
     // migrate legacy single next-step (next/nextDate/nextDone) to an events array
@@ -1037,6 +1048,18 @@ function sumWeighted(arr) {
     return sum + Math.round((Number(l.varde) || 0) * w / 100);
   }, 0);
 }
+function getDelningsantal(l) {
+  return (l.delningsantal === undefined || l.delningsantal === null || l.delningsantal === '') ? 2 : (Number(l.delningsantal) || 1);
+}
+function sumOwnShare(arr) {
+  return arr.reduce((sum, l) => sum + Math.round((Number(l.varde) || 0) / getDelningsantal(l)), 0);
+}
+function sumWeightedOwnShare(arr) {
+  return arr.reduce((sum, l) => {
+    const w = (l.weight === undefined || l.weight === null || l.weight === '') ? 100 : Number(l.weight);
+    return sum + Math.round((Number(l.varde) || 0) * w / 100 / getDelningsantal(l));
+  }, 0);
+}
 function fmtKr(n) { return Math.round(n).toLocaleString('sv-SE') + ' kr'; }
 
 function renderKpis() {
@@ -1048,29 +1071,39 @@ function renderKpis() {
 
   const totalVarde = sumVarde(leads.filter(l => stageKind(l.stage) !== 'lost'));
   const weightedVarde = sumWeighted(activeLeads);
+  const totalEget = sumOwnShare(leads.filter(l => stageKind(l.stage) !== 'lost'));
+  const weightedEget = sumWeightedOwnShare(activeLeads);
 
   const signedMonthOpts = monthOptionsFor(wonLeads.map(l => l.signedDate), signedKpiMonth);
-  const signedSum = sumVarde(wonLeads.filter(l => l.signedDate && l.signedDate.slice(0,7) === signedKpiMonth));
+  const signedLeadsInMonth = wonLeads.filter(l => l.signedDate && l.signedDate.slice(0,7) === signedKpiMonth);
+  const signedSum = sumVarde(signedLeadsInMonth);
+  const signedEget = sumOwnShare(signedLeadsInMonth);
 
   const lostMonthOpts = monthOptionsFor(lostLeads.map(l => l.lostDate), lostKpiMonth);
-  const lostSum = sumVarde(lostLeads.filter(l => l.lostDate && l.lostDate.slice(0,7) === lostKpiMonth));
+  const lostLeadsInMonth = lostLeads.filter(l => l.lostDate && l.lostDate.slice(0,7) === lostKpiMonth);
+  const lostSum = sumVarde(lostLeadsInMonth);
+  const lostEget = sumOwnShare(lostLeadsInMonth);
 
   row.innerHTML = `
     <div class="kpi-card">
       <div class="kpi-label">Totalt ordervärde</div>
       <div class="kpi-value">${fmtKr(totalVarde)}</div>
+      <div class="kpi-own">Eget: ${fmtKr(totalEget)}</div>
     </div>
     <div class="kpi-card">
       <div class="kpi-label">Viktat ordervärde</div>
       <div class="kpi-value">${fmtKr(weightedVarde)}</div>
+      <div class="kpi-own">Eget: ${fmtKr(weightedEget)}</div>
     </div>
     <div class="kpi-card signed">
       <div class="kpi-label"><span>Signerat</span><select class="kpi-month" id="signedKpiMonthSel">${signedMonthOpts.map(m => `<option value="${m}"${m===signedKpiMonth?' selected':''}>${monthLabel(m)}</option>`).join('')}</select></div>
       <div class="kpi-value">${fmtKr(signedSum)}</div>
+      <div class="kpi-own">Eget: ${fmtKr(signedEget)}</div>
     </div>
     <div class="kpi-card lost">
       <div class="kpi-label"><span>Förlorat</span><select class="kpi-month" id="lostKpiMonthSel">${lostMonthOpts.map(m => `<option value="${m}"${m===lostKpiMonth?' selected':''}>${monthLabel(m)}</option>`).join('')}</select></div>
       <div class="kpi-value">${fmtKr(lostSum)}</div>
+      <div class="kpi-own">Eget: ${fmtKr(lostEget)}</div>
     </div>
   `;
   document.getElementById('signedKpiMonthSel').addEventListener('change', e => {
@@ -1523,15 +1556,18 @@ document.getElementById('leadKundAddBtn').addEventListener('click', () => {
 function updateLeadWeightedHint() {
   const varde = Number(document.getElementById('leadVarde').value) || 0;
   const weight = Number(document.getElementById('leadWeight').value);
+  const delningsantal = Number(document.getElementById('leadDelningsantal').value) || 1;
   const hint = document.getElementById('leadWeightedHint');
   if (varde > 0) {
-    hint.textContent = `Viktat värde: ${Math.round(varde * weight / 100).toLocaleString('sv-SE')} kr (${weight}% av ${varde.toLocaleString('sv-SE')} kr)`;
+    const ownShare = Math.round(varde / delningsantal);
+    hint.textContent = `Viktat värde: ${Math.round(varde * weight / 100).toLocaleString('sv-SE')} kr (${weight}% av ${varde.toLocaleString('sv-SE')} kr) · Eget: ${ownShare.toLocaleString('sv-SE')} kr (delat på ${delningsantal})`;
   } else {
     hint.textContent = '';
   }
 }
 document.getElementById('leadVarde').addEventListener('input', updateLeadWeightedHint);
 document.getElementById('leadWeight').addEventListener('change', updateLeadWeightedHint);
+document.getElementById('leadDelningsantal').addEventListener('change', updateLeadWeightedHint);
 
 function updateLeadStageDateFields() {
   const kind = stageKind(document.getElementById('leadStage').value);
@@ -1561,6 +1597,7 @@ function openLeadModal(id, prefill) {
     populateKundSelect(lead.kundId || '');
     document.getElementById('leadVarde').value = lead.varde || '';
     document.getElementById('leadWeight').value = (lead.weight === undefined || lead.weight === null || lead.weight === '') ? '100' : String(lead.weight);
+    document.getElementById('leadDelningsantal').value = (lead.delningsantal === undefined || lead.delningsantal === null || lead.delningsantal === '') ? '2' : String(lead.delningsantal);
     document.getElementById('leadStage').value = lead.stage || defaultStageKey;
     document.getElementById('leadSignedDate').value = lead.signedDate || '';
     document.getElementById('leadLostDate').value = lead.lostDate || '';
@@ -1573,6 +1610,7 @@ function openLeadModal(id, prefill) {
     populateKundSelect(prefill && prefill.kundId);
     document.getElementById('leadVarde').value = '';
     document.getElementById('leadWeight').value = '50';
+    document.getElementById('leadDelningsantal').value = '2';
     document.getElementById('leadStage').value = defaultStageKey;
     document.getElementById('leadSignedDate').value = '';
     document.getElementById('leadLostDate').value = '';
@@ -1611,6 +1649,7 @@ document.getElementById('leadSaveBtn').addEventListener('click', () => {
     kontaktId: currentLeadKontaktId || '',
     varde: document.getElementById('leadVarde').value,
     weight: Number(document.getElementById('leadWeight').value),
+    delningsantal: Number(document.getElementById('leadDelningsantal').value) || 1,
     stage: document.getElementById('leadStage').value,
     events: currentLeadEvents.slice(),
     signedDate: document.getElementById('leadSignedDate').value,
@@ -1662,6 +1701,7 @@ document.getElementById('exportLeadsBtn').addEventListener('click', () => {
       adress: kund.adress || '',
       varde: l.varde,
       weight: l.weight,
+      delningsantal: l.delningsantal,
       stage: l.stage,
       events: (l.events || []).map(ev => `${ev.text || ''} (${ev.datum || ''})${ev.utford ? ' [klar]' : ''}`).join(' | '),
       signedDate: l.signedDate,
