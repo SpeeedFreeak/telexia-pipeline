@@ -30,6 +30,7 @@
   }
   .topbar h1 { font-size: 18px; font-weight: 600; margin: 0; color: #f3f4f6; }
   .topbar .sub { font-size: 12px; color: #9ca3af; margin-top: 2px; }
+  .brand-logo { display: block; height: 52px; width: auto; }
   .tabs { display: flex; gap: 4px; padding: 0 20px; background: #161922; border-bottom: 1px solid #262b36; }
   .tab-btn {
     border: none; background: none; padding: 10px 14px; font-size: 13px; font-weight: 500;
@@ -268,6 +269,7 @@
   @media (max-width: 720px) {
     .topbar { flex-wrap: wrap; gap: 8px; padding: 12px 14px; }
     .topbar h1 { font-size: 17px; }
+    .brand-logo { height: 42px; }
     .tabs { padding: 0 14px; overflow-x: auto; }
     .tab-btn { font-size: 14px; padding: 11px 14px; }
     .toolbar { padding: 10px 14px; }
@@ -315,7 +317,7 @@
 
 <div class="topbar">
   <div>
-    <h1>Telexia – Säljpipeline &amp; produktspecialist</h1>
+    <img src="logo.png" alt="Pipeline by Redneck Engineering" class="brand-logo">
     <div class="sub">Timpunkt · arbetsordersystem</div>
   </div>
   <div style="display:flex;align-items:center;gap:10px;">
