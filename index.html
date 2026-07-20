@@ -2494,7 +2494,12 @@ function parseOcrText(text) {
     .replace(/\s*[@＠©]\s*/g, '@')                    // mellanslag runt @, © misläst som @
     .replace(/[（(]at[)）]/gi, '@')                    // "(at)"
     .replace(/,(?=[a-z]{2,4}\b)/gi, '.');             // komma före toppdomän → punkt
-  const emailM = emailText.match(/[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}/);
+  let emailM = emailText.match(/[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}/);
+  if (!emailM) {
+    // '@' misläses ofta som Q/O/&/# m.fl. — återskapa när en känd toppdomän följer
+    const m2 = emailText.match(/\b([a-zA-Z0-9._%+\-]+?)[QO&£€#(](?:\s*)([a-zA-Z0-9\-]+(?:\.[a-zA-Z0-9\-]+)*\.(?:se|com|net|org|nu|eu|io|dk|no|fi|de))\b/);
+    if (m2) emailM = [m2[1] + '@' + m2[2]];
+  }
   if (emailM) out.email = emailM[0];
 
   const orgnrM = text.match(/\b(\d{6})\s?[-–]\s?(\d{4})\b/);
