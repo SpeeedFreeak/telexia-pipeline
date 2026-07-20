@@ -31,6 +31,26 @@
   .topbar h1 { font-size: 18px; font-weight: 600; margin: 0; color: #f3f4f6; }
   .topbar .sub { font-size: 12px; color: #9ca3af; margin-top: 2px; }
   .brand-logo { display: block; height: 52px; width: auto; }
+  .topbar-left { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
+  .pl-switcher { display: flex; align-items: center; gap: 7px; }
+  .pl-switcher select {
+    padding: 7px 9px; border: 1px solid #2a2e37; border-radius: 6px; font-size: 13px;
+    background: #1a1d27; color: #e5e7eb; max-width: 180px;
+  }
+  .pl-switcher .btn { padding: 6px 10px; }
+  .pl-dot { width: 10px; height: 10px; border-radius: 50%; display: inline-block; flex-shrink: 0; }
+  .pl-badge {
+    display: inline-flex; align-items: center; gap: 5px; font-size: 10px; font-weight: 600;
+    padding: 2px 8px; border-radius: 10px; background: #1a1d27; border: 1px solid #2a2e37; color: #cbd5e1; white-space: nowrap;
+  }
+  .pl-badge .pl-dot { width: 7px; height: 7px; }
+  .pl-filter-row { display: flex; gap: 8px; flex-wrap: wrap; padding: 0 20px 12px; }
+  .pl-chip {
+    display: inline-flex; align-items: center; gap: 6px; font-size: 12px; font-weight: 500; padding: 5px 11px;
+    border-radius: 14px; background: #161922; border: 1px solid #262b36; color: #6b7280; cursor: pointer; user-select: none;
+  }
+  .pl-chip.active { color: #e5e7eb; background: #1d212b; }
+  .tag-row label.tag-global { display: flex; align-items: center; gap: 4px; font-size: 11px; color: #9ca3af; white-space: nowrap; }
   .tabs { display: flex; gap: 4px; padding: 0 20px; background: #161922; border-bottom: 1px solid #262b36; }
   .tab-btn {
     border: none; background: none; padding: 10px 14px; font-size: 13px; font-weight: 500;
@@ -270,6 +290,9 @@
     .topbar { flex-wrap: wrap; gap: 8px; padding: 12px 14px; }
     .topbar h1 { font-size: 17px; }
     .brand-logo { height: 42px; }
+    .topbar-left { gap: 10px; }
+    .pl-switcher select { max-width: 150px; font-size: 14px; }
+    .pl-filter-row { padding: 0 14px 10px; }
     .tabs { padding: 0 14px; overflow-x: auto; }
     .tab-btn { font-size: 14px; padding: 11px 14px; }
     .toolbar { padding: 10px 14px; }
@@ -316,8 +339,13 @@
 <body>
 
 <div class="topbar">
-  <div>
+  <div class="topbar-left">
     <img src="logo.png" alt="Pipeline by Redneck Engineering" class="brand-logo">
+    <div class="pl-switcher" id="pipelineSwitcherWrap" style="display:none">
+      <span class="pl-dot" id="pipelineDot"></span>
+      <select id="pipelineSelect"></select>
+      <button class="btn ghost" id="managePipelinesBtn" title="Hantera pipelines">&#9881;</button>
+    </div>
   </div>
   <div style="display:flex;align-items:center;gap:10px;">
     <div id="lastSavedLabel" class="sub"></div>
@@ -362,11 +390,13 @@
     <input type="text" id="registrySearchInput" placeholder="Sök kund...">
     <button class="btn" id="registryAddBtn">+</button>
   </div>
+  <div class="pl-filter-row" id="registryPipelineChips" style="display:none"></div>
   <div class="registry-grid" id="registryGrid"></div>
 </div>
 
 <div id="activityView" style="display:none">
-  <div class="toolbar">
+  <div class="toolbar" style="flex-direction:column;align-items:stretch;gap:8px">
+    <div class="pl-filter-row" id="activityPipelineChips" style="padding:0;display:none"></div>
     <div class="hint" style="margin:0">Alla kunder med ett inplanerat nästa steg, i kronologisk ordning. Försenade datum visas högst upp i rött.</div>
   </div>
   <div class="agenda" id="agendaWrap"></div>
@@ -378,10 +408,11 @@
     <button class="btn" id="addQuestionBtn">+ Ny fråga</button>
     <button class="btn ghost" id="exportQuestionsBtn">Exportera CSV</button>
   </div>
+  <div class="pl-filter-row" id="qPipelineChips" style="display:none"></div>
   <div class="table-wrap">
     <table>
       <thead>
-        <tr><th>Kund</th><th>Fråga</th><th>Status</th><th>Datum</th><th>Anteckning</th><th></th></tr>
+        <tr><th>Kund</th><th>Fråga</th><th>Status</th><th>Datum</th><th>Anteckning</th><th id="qPipelineTh" style="display:none">Pipeline</th><th></th></tr>
       </thead>
       <tbody id="questionsBody"></tbody>
     </table>
@@ -550,6 +581,7 @@
   <div class="modal">
     <h2 id="qModalTitle">Ny fråga</h2>
     <input type="hidden" id="qId">
+    <div class="field" id="qPipelineField" style="display:none"><label>Pipeline</label><select id="qPipeline"></select></div>
     <div class="field"><label>Kund</label><input type="text" id="qKund"></div>
     <div class="field"><label>Fråga</label><textarea id="qFraga"></textarea></div>
     <div class="field-row">
@@ -602,6 +634,20 @@
         <button class="btn ghost" id="tagCancelBtn">Avbryt</button>
       </div>
       <button class="btn" id="tagSaveBtn">Spara</button>
+    </div>
+  </div>
+</div>
+
+<!-- Pipeline manager modal -->
+<div class="modal-backdrop" id="plModalBackdrop">
+  <div class="modal">
+    <h2>Hantera pipelines</h2>
+    <div class="hint">Kör flera pipelines parallellt. Varje pipeline har egna kategorier, processer, taggar och frågor — kundregistret delas. Färgen används för att märka aktiviteter, kunder och frågor.</div>
+    <div id="plRows"></div>
+    <button class="btn ghost" id="plAddBtn" style="margin-top:6px">+ Ny pipeline</button>
+    <div class="modal-actions">
+      <div class="left"><button class="btn ghost" id="plCancelBtn">Avbryt</button></div>
+      <button class="btn" id="plSaveBtn">Spara</button>
     </div>
   </div>
 </div>
@@ -668,12 +714,13 @@ function tagTextColor(hex) {
   return luminance > 0.6 ? '#0f1115' : '#f3f4f6';
 }
 
-function populateStageSelect() {
+function populateStageSelect(plId) {
   const sel = document.getElementById('leadStage');
   if (!sel) return;
   const current = sel.value;
-  sel.innerHTML = STAGES.map(s => `<option value="${s.key}">${escapeHtml(s.name)}</option>`).join('');
-  if (current && getStageByKey(current)) sel.value = current;
+  const stages = STAGES.filter(s => s.pipelineId === (plId || activePipelineId));
+  sel.innerHTML = stages.map(s => `<option value="${s.key}">${escapeHtml(s.name)}</option>`).join('');
+  if (current && stages.some(s => s.key === current)) sel.value = current;
 }
 
 function mapsUrl(address) {
@@ -795,6 +842,111 @@ let leads = loadLeads();
 let questions = loadQuestions();
 let customers = loadCustomers();
 
+// ---------- Pipelines (flera parallella) ----------
+// OBS: lagringsnycklarna behåller "telexia_"-prefixet medvetet — byts de
+// hittar appen inte befintlig data.
+const PIPELINES_KEY = 'telexia_pipeline_pipelines_v1';
+const ACTIVE_PIPELINE_KEY = 'telexia_pipeline_active_v1';
+const ACTIVITY_HIDDEN_PIPELINES_KEY = 'telexia_activity_hidden_pipelines_v1';
+const PIPELINE_COLORS = ['#3b82f6','#a855f7','#f59e0b','#10b981','#ef4444','#06b6d4','#ec4899','#84cc16'];
+
+function loadPipelines() {
+  try {
+    const p = JSON.parse(localStorage.getItem(PIPELINES_KEY));
+    if (Array.isArray(p) && p.length) return p;
+  } catch(e) {}
+  return [];
+}
+function savePipelines(p) {
+  localStorage.setItem(PIPELINES_KEY, JSON.stringify(p));
+  touchSavedLabel();
+  scheduleDrivePush();
+}
+let PIPELINES = loadPipelines();
+
+// Idempotent migrering: skapar en default-pipeline vid behov och stämplar
+// pipelineId på befintliga kategorier, processer, taggar och frågor.
+function migratePipelines() {
+  if (!PIPELINES.length) {
+    PIPELINES = [{ id: uid(), name: 'Timpunkt', color: PIPELINE_COLORS[0] }];
+  }
+  const defId = PIPELINES[0].id;
+  STAGES.forEach(s => { if (!s.pipelineId) s.pipelineId = defId; });
+  TAGS.forEach(t => {
+    if (t.global === undefined) t.global = false;
+    if (!t.pipelineId && !t.global) t.pipelineId = defId;
+  });
+  leads.forEach(l => { if (!l.pipelineId) l.pipelineId = defId; });
+  questions.forEach(q => { if (!q.pipelineId) q.pipelineId = defId; });
+}
+function persistAllPipelineData() {
+  localStorage.setItem(PIPELINES_KEY, JSON.stringify(PIPELINES));
+  localStorage.setItem(STAGES_KEY, JSON.stringify(STAGES));
+  localStorage.setItem(TAGS_KEY, JSON.stringify(TAGS));
+  localStorage.setItem(LEADS_KEY, JSON.stringify(leads));
+  localStorage.setItem(Q_KEY, JSON.stringify(questions));
+}
+migratePipelines();
+persistAllPipelineData();
+
+let activePipelineId = localStorage.getItem(ACTIVE_PIPELINE_KEY) || '';
+if (!PIPELINES.some(p => p.id === activePipelineId)) activePipelineId = PIPELINES[0].id;
+
+function getPipelineById(id) { return PIPELINES.find(p => p.id === id); }
+function activePipeline() { return getPipelineById(activePipelineId) || PIPELINES[0]; }
+function activeStages() { return STAGES.filter(s => s.pipelineId === activePipelineId); }
+function activeLeads() { return leads.filter(l => l.pipelineId === activePipelineId); }
+function visibleTagsFor(plId) { return TAGS.filter(t => t.global || t.pipelineId === plId); }
+function customerPipelineIds(kundId) {
+  const ids = [];
+  leads.forEach(l => { if (l.kundId === kundId && l.pipelineId && !ids.includes(l.pipelineId)) ids.push(l.pipelineId); });
+  return ids;
+}
+function plBadge(plId) {
+  const p = getPipelineById(plId);
+  if (!p) return '';
+  return `<span class="pl-badge"><span class="pl-dot" style="background:${p.color}"></span>${escapeHtml(p.name)}</span>`;
+}
+function seedStagesFor(plId) {
+  return DEFAULT_STAGES.map(s => ({ key: uid(), name: s.name, kind: s.kind, pipelineId: plId }));
+}
+function loadHiddenActivityPipelines() {
+  try {
+    const a = JSON.parse(localStorage.getItem(ACTIVITY_HIDDEN_PIPELINES_KEY));
+    if (Array.isArray(a)) return new Set(a);
+  } catch(e) {}
+  return new Set();
+}
+let hiddenActivityPipelines = loadHiddenActivityPipelines();
+let registryPipelineFilter = new Set();
+let qPipelineFilter = new Set();
+
+function setActivePipeline(id) {
+  if (!getPipelineById(id)) return;
+  activePipelineId = id;
+  localStorage.setItem(ACTIVE_PIPELINE_KEY, id);
+  stageFilter.clear();
+  populateStageSelect();
+  renderPipelineSwitcher();
+  renderBoard();
+  renderStats(); renderKpis();
+  renderQuestions();
+  renderCustomerRegistry();
+}
+
+// Generisk chips-rad för pipeline-filter (Aktivitet, Kundregister, Frågor).
+// Visas bara när det finns fler än en pipeline.
+function renderPlChips(el, isOnFn, onToggle) {
+  if (!el) return;
+  if (PIPELINES.length <= 1) { el.style.display = 'none'; el.innerHTML = ''; return; }
+  el.style.display = 'flex';
+  el.innerHTML = PIPELINES.map(p => {
+    const on = isOnFn(p.id);
+    return `<span class="pl-chip${on ? ' active' : ''}" data-id="${p.id}"${on ? ` style="border-color:${p.color}"` : ''}><span class="pl-dot" style="background:${p.color}${on ? '' : ';opacity:.35'}"></span>${escapeHtml(p.name)}</span>`;
+  }).join('');
+  el.querySelectorAll('.pl-chip').forEach(c => c.addEventListener('click', () => onToggle(c.dataset.id)));
+}
+
 // ---------- Google Drive-synk (omdirigeringsbaserad — fungerar utan popup, även på mobil) ----------
 const GOOGLE_CLIENT_ID = '827512342225-28oeo7n0sf04isql0su3tssuj75mbs8b.apps.googleusercontent.com';
 const DRIVE_SCOPE = 'https://www.googleapis.com/auth/drive.file';
@@ -849,6 +1001,7 @@ function showAuthGate(statusText, isErr) {
   document.getElementById('authGate').style.display = 'flex';
   document.getElementById('appContent').style.display = 'none';
   document.getElementById('driveSignOutBtn').style.display = 'none';
+  document.getElementById('pipelineSwitcherWrap').style.display = 'none';
   const gs = document.getElementById('authGateStatus');
   gs.textContent = statusText || '';
   gs.style.color = isErr ? '#fca5a5' : '#9ca3af';
@@ -857,6 +1010,8 @@ function showAppContent() {
   document.getElementById('authGate').style.display = 'none';
   document.getElementById('appContent').style.display = 'block';
   document.getElementById('driveSignOutBtn').style.display = '';
+  document.getElementById('pipelineSwitcherWrap').style.display = 'flex';
+  renderPipelineSwitcher();
 }
 
 function initGoogleAuth() {
@@ -894,7 +1049,7 @@ async function findOrCreateDriveFile() {
     driveFileId = listData.files[0].id;
     return 'existing';
   }
-  const seed = JSON.stringify({ leads, questions, customers, stages: STAGES, tags: TAGS });
+  const seed = JSON.stringify({ leads, questions, customers, stages: STAGES, tags: TAGS, pipelines: PIPELINES });
   const metadata = { name: DRIVE_FILE_NAME, mimeType: 'application/json' };
   const form = new FormData();
   form.append('metadata', new Blob([JSON.stringify(metadata)], { type: 'application/json' }));
@@ -918,7 +1073,7 @@ async function pushToDrive() {
   if (!accessToken || !driveFileId) return;
   setDriveStatus('Synkar...');
   try {
-    const body = JSON.stringify({ leads, questions, customers, stages: STAGES, tags: TAGS });
+    const body = JSON.stringify({ leads, questions, customers, stages: STAGES, tags: TAGS, pipelines: PIPELINES });
     const res = await driveFetch('https://www.googleapis.com/upload/drive/v3/files/' + driveFileId + '?uploadType=media', {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
@@ -959,9 +1114,17 @@ async function onSignedIn() {
           TAGS = remote.tags;
           saveTags(TAGS);
         }
-        localStorage.setItem(LEADS_KEY, JSON.stringify(leads));
-        localStorage.setItem(Q_KEY, JSON.stringify(questions));
+        if (Array.isArray(remote.pipelines) && remote.pipelines.length) {
+          PIPELINES = remote.pipelines;
+        }
+        migratePipelines();
+        persistAllPipelineData();
+        if (!PIPELINES.some(p => p.id === activePipelineId)) {
+          activePipelineId = PIPELINES[0].id;
+          localStorage.setItem(ACTIVE_PIPELINE_KEY, activePipelineId);
+        }
         localStorage.setItem(CUSTOMERS_KEY, JSON.stringify(customers));
+        renderPipelineSwitcher();
         populateStageSelect();
         renderBoard();
         renderStats(); renderKpis();
@@ -995,17 +1158,19 @@ let currentLeadKontaktId = ''; // selected contact id while a lead modal is open
 let leadKontaktExpanded = false; // whether the contact detail panel is open
 let currentCustomerLog = []; // working copy while the customer modal is open
 let currentCustomerContacts = []; // working copy while the customer modal is open
+let currentLeadPipelineId = ''; // pipeline context while a lead modal is open
 let custQuickAddContext = null; // 'lead' | 'registry' — where the quick-add customer modal was opened from
 let registrySearchTerm = '';
 
 function renderLeadTagsPicker() {
   const wrap = document.getElementById('leadTagsPicker');
   if (!wrap) return;
-  if (!TAGS.length) {
+  const tagsAvail = visibleTagsFor(currentLeadPipelineId || activePipelineId);
+  if (!tagsAvail.length) {
     wrap.innerHTML = '<span class="tag-empty-hint">Inga taggar än – skapa via "Hantera taggar".</span>';
     return;
   }
-  wrap.innerHTML = TAGS.map(t => {
+  wrap.innerHTML = tagsAvail.map(t => {
     const selected = currentLeadTags.includes(t.id);
     return `<span class="tag-chip${selected ? ' selected' : ''}" data-id="${t.id}" style="background:${t.color};color:${tagTextColor(t.color)}">${escapeHtml(t.name)}</span>`;
   }).join('');
@@ -1066,14 +1231,15 @@ function fmtKr(n) { return Math.round(n).toLocaleString('sv-SE') + ' kr'; }
 function renderKpis() {
   const row = document.getElementById('kpiRow');
   if (!row) return;
-  const lostLeads = leads.filter(l => stageKind(l.stage) === 'lost');
-  const wonLeads = leads.filter(l => stageKind(l.stage) === 'won');
-  const activeLeads = leads.filter(l => stageKind(l.stage) === 'normal');
+  const aleads = activeLeads();
+  const lostLeads = aleads.filter(l => stageKind(l.stage) === 'lost');
+  const wonLeads = aleads.filter(l => stageKind(l.stage) === 'won');
+  const runningLeads = aleads.filter(l => stageKind(l.stage) === 'normal');
 
-  const totalVarde = sumVarde(leads.filter(l => stageKind(l.stage) !== 'lost'));
-  const weightedVarde = sumWeighted(activeLeads);
-  const totalEget = sumOwnShare(leads.filter(l => stageKind(l.stage) !== 'lost'));
-  const weightedEget = sumWeightedOwnShare(activeLeads);
+  const totalVarde = sumVarde(aleads.filter(l => stageKind(l.stage) !== 'lost'));
+  const weightedVarde = sumWeighted(runningLeads);
+  const totalEget = sumOwnShare(aleads.filter(l => stageKind(l.stage) !== 'lost'));
+  const weightedEget = sumWeightedOwnShare(runningLeads);
 
   const signedMonthOpts = monthOptionsFor(wonLeads.map(l => l.signedDate), signedKpiMonth);
   const signedLeadsInMonth = wonLeads.filter(l => l.signedDate && l.signedDate.slice(0,7) === signedKpiMonth);
@@ -1121,10 +1287,11 @@ let stageFilter = new Set();
 
 function renderStats() {
   const row = document.getElementById('statsRow');
-  const overdueCount = leads.filter(isOverdue).length;
+  const aleads = activeLeads();
+  const overdueCount = aleads.filter(isOverdue).length;
   let html = '';
-  STAGES.forEach(s => {
-    const count = leads.filter(l => l.stage === s.key).length;
+  activeStages().forEach(s => {
+    const count = aleads.filter(l => l.stage === s.key).length;
     const active = stageFilter.has(s.key);
     html += `<div class="stat-pill filterable${active ? ' active' : ''}" data-stage="${s.key}"><b>${count}</b>${s.name}</div>`;
   });
@@ -1144,13 +1311,14 @@ function renderStats() {
 function renderBoard() {
   const board = document.getElementById('board');
   board.innerHTML = '';
-  const visibleStages = stageFilter.size ? STAGES.filter(s => stageFilter.has(s.key)) : STAGES;
+  const plStages = activeStages();
+  const visibleStages = stageFilter.size ? plStages.filter(s => stageFilter.has(s.key)) : plStages;
   visibleStages.forEach(stage => {
     const col = document.createElement('div');
     col.className = 'column';
     col.dataset.stage = stage.key;
 
-    const stageLeads = leads.filter(l => l.stage === stage.key && matchesSearch(l));
+    const stageLeads = leads.filter(l => l.pipelineId === activePipelineId && l.stage === stage.key && matchesSearch(l));
 
     col.innerHTML = `<div class="column-head"><span class="name">${stage.name}</span><span class="count">${stageLeads.length}</span></div>`;
 
@@ -1236,9 +1404,17 @@ function renderActivity() {
   if (!wrap) return;
   const today = todayStr();
 
+  renderPlChips(document.getElementById('activityPipelineChips'), id => !hiddenActivityPipelines.has(id), id => {
+    if (hiddenActivityPipelines.has(id)) hiddenActivityPipelines.delete(id);
+    else hiddenActivityPipelines.add(id);
+    localStorage.setItem(ACTIVITY_HIDDEN_PIPELINES_KEY, JSON.stringify(Array.from(hiddenActivityPipelines)));
+    renderActivity();
+  });
+
   // Flatten every open (not-utförd) event across all active processes into one agenda row per event.
   let rows = [];
   leads.forEach(lead => {
+    if (hiddenActivityPipelines.has(lead.pipelineId)) return;
     if (stageKind(lead.stage) === 'won' || stageKind(lead.stage) === 'lost') return;
     (lead.events || []).forEach(ev => {
       if (ev.utford) return;
@@ -1272,7 +1448,7 @@ function renderActivity() {
       <div class="agenda-item${overdueRow ? ' overdue' : ''}" data-lead-id="${lead.id}" data-event-id="${ev.id}">
         <div class="agenda-item-main">
           <div class="agenda-item-top">
-            <span class="kund">${escapeHtml((kund && kund.namn) || 'Namnlös kund')}</span>
+            <span style="display:inline-flex;align-items:center;gap:8px;flex-wrap:wrap"><span class="kund">${escapeHtml((kund && kund.namn) || 'Namnlös kund')}</span>${PIPELINES.length > 1 ? plBadge(lead.pipelineId) : ''}</span>
             ${leadTags.length ? `<div class="card-tags">${leadTags.map(t => `<span class="tag-chip" style="background:${t.color};color:${tagTextColor(t.color)}">${escapeHtml(t.name)}</span>`).join('')}</div>` : ''}
           </div>
           ${ev.text ? `<div class="next">${escapeHtml(ev.text)}</div>` : ''}
@@ -1588,12 +1764,19 @@ function openLeadModal(id, prefill) {
   document.getElementById('leadDeleteBtn').style.display = isEdit ? 'inline-block' : 'none';
   document.getElementById('leadAiStatus').textContent = '';
   resetZone(document.getElementById('leadPasteZone'));
-  populateStageSelect();
-  const defaultStageKey = STAGES[0] ? STAGES[0].key : 'booked';
+  const editLead = isEdit ? leads.find(l => l.id === id) : null;
+  currentLeadPipelineId = (editLead && editLead.pipelineId) || activePipelineId;
+  if (PIPELINES.length > 1) {
+    const pl = getPipelineById(currentLeadPipelineId);
+    if (pl) document.getElementById('leadModalTitle').textContent += ' · ' + pl.name;
+  }
+  populateStageSelect(currentLeadPipelineId);
+  const plStages = STAGES.filter(s => s.pipelineId === currentLeadPipelineId);
+  const defaultStageKey = plStages[0] ? plStages[0].key : '';
 
   leadKontaktExpanded = false;
   if (isEdit) {
-    const lead = leads.find(l => l.id === id);
+    const lead = editLead;
     document.getElementById('leadId').value = lead.id;
     populateKundSelect(lead.kundId || '');
     document.getElementById('leadVarde').value = lead.varde || '';
@@ -1634,6 +1817,7 @@ function closeLeadModal() {
   currentLeadTags = [];
   currentLeadEvents = [];
   currentLeadKontaktId = '';
+  currentLeadPipelineId = '';
   leadKontaktExpanded = false;
 }
 
@@ -1646,6 +1830,7 @@ document.getElementById('leadModalBackdrop').addEventListener('click', e => {
 document.getElementById('leadSaveBtn').addEventListener('click', () => {
   const id = document.getElementById('leadId').value;
   const data = {
+    pipelineId: currentLeadPipelineId || activePipelineId,
     kundId: document.getElementById('leadKundSelect').value,
     kontaktId: currentLeadKontaktId || '',
     varde: document.getElementById('leadVarde').value,
@@ -1691,7 +1876,7 @@ document.getElementById('searchInput').addEventListener('input', e => {
 });
 
 document.getElementById('exportLeadsBtn').addEventListener('click', () => {
-  const flat = leads.map(l => {
+  const flat = activeLeads().map(l => {
     const kund = getCustomerById(l.kundId) || {};
     const primaryContact = (kund.kontakter || [])[0] || {};
     return {
@@ -1716,8 +1901,15 @@ document.getElementById('exportLeadsBtn').addEventListener('click', () => {
 // ---------- Customer registry ----------
 function renderCustomerRegistry() {
   const grid = document.getElementById('registryGrid');
+  renderPlChips(document.getElementById('registryPipelineChips'), id => registryPipelineFilter.has(id), id => {
+    if (registryPipelineFilter.has(id)) registryPipelineFilter.delete(id); else registryPipelineFilter.add(id);
+    renderCustomerRegistry();
+  });
   const term = (registrySearchTerm || '').toLowerCase();
   let list = customers.slice();
+  if (registryPipelineFilter.size) {
+    list = list.filter(k => customerPipelineIds(k.id).some(pid => registryPipelineFilter.has(pid)));
+  }
   if (term) {
     list = list.filter(k => {
       const hay = [k.namn, k.adress].concat((k.kontakter || []).map(c => `${c.namn} ${c.telefon} ${c.email}`)).join(' ').toLowerCase();
@@ -1736,11 +1928,13 @@ function renderCustomerRegistry() {
     const active = leads.filter(l => l.kundId === k.id && stageKind(l.stage) === 'normal').length;
     const card = document.createElement('div');
     card.className = 'kund-card';
+    const plIds = customerPipelineIds(k.id);
     card.innerHTML = `
       <div class="knamn">${escapeHtml(k.namn || 'Namnlös kund')}</div>
       <div class="kinfo">${escapeHtml(primary.namn || '')}${primary.telefon ? ' · ' + escapeHtml(primary.telefon) : ''}</div>
       <div class="kinfo">${escapeHtml(k.adress || '')}</div>
       <div class="kcount">${active} aktiva · ${total} totalt</div>
+      ${PIPELINES.length > 1 && plIds.length ? `<div style="display:flex;flex-wrap:wrap;gap:4px;margin-top:7px">${plIds.map(plBadge).join('')}</div>` : ''}
     `;
     card.addEventListener('click', () => openCustomerModal(k.id));
     grid.appendChild(card);
@@ -1843,7 +2037,7 @@ function renderCustomerProcessList(kundId) {
     const item = document.createElement('div');
     item.className = 'process-list-item' + (closed ? ' is-closed' : '');
     item.innerHTML = `
-      <div class="pname">${escapeHtml(stage ? stage.name : l.stage)}</div>
+      <div class="pname" style="display:flex;align-items:center;gap:7px;flex-wrap:wrap">${PIPELINES.length > 1 ? plBadge(l.pipelineId) : ''}<span>${escapeHtml(stage ? stage.name : l.stage)}</span></div>
       <div class="pmeta">${l.varde ? Number(l.varde).toLocaleString('sv-SE') + ' kr' : ''}</div>
     `;
     item.addEventListener('click', () => {
@@ -2005,7 +2199,7 @@ function renderStageRows() {
     const i = Number(e.target.dataset.idx);
     if (stageWorkingCopy.length <= 1) return;
     const removed = stageWorkingCopy[i];
-    const count = leads.filter(l => l.stage === removed.key).length;
+    const count = leads.filter(l => l.pipelineId === activePipelineId && l.stage === removed.key).length;
     if (count > 0) {
       alert(`"${removed.name}" innehåller ${count} kund${count > 1 ? 'er' : ''}. Flytta dem till en annan kategori (dra kortet på tavlan eller ändra steg i kundens redigeringsruta) innan du kan ta bort den här kategorin.`);
       return;
@@ -2016,7 +2210,7 @@ function renderStageRows() {
 }
 
 document.getElementById('manageStagesBtn').addEventListener('click', () => {
-  stageWorkingCopy = STAGES.map(s => Object.assign({}, s));
+  stageWorkingCopy = activeStages().map(s => Object.assign({}, s));
   renderStageRows();
   document.getElementById('stageModalBackdrop').classList.add('open');
 });
@@ -2027,15 +2221,15 @@ document.getElementById('stageModalBackdrop').addEventListener('click', e => {
   if (e.target.id === 'stageModalBackdrop') document.getElementById('stageModalBackdrop').classList.remove('open');
 });
 document.getElementById('stageAddBtn').addEventListener('click', () => {
-  stageWorkingCopy.push({ key: uid(), name: 'Ny kategori', kind: 'normal' });
+  stageWorkingCopy.push({ key: uid(), name: 'Ny kategori', kind: 'normal', pipelineId: activePipelineId });
   renderStageRows();
 });
 document.getElementById('stageSaveBtn').addEventListener('click', () => {
-  const cleaned = stageWorkingCopy.map(s => Object.assign({}, s, { name: s.name.trim() || 'Namnlös' }));
+  const cleaned = stageWorkingCopy.map(s => Object.assign({}, s, { name: s.name.trim() || 'Namnlös', pipelineId: activePipelineId }));
   const keptKeys = new Set(cleaned.map(s => s.key));
   const fallbackKey = cleaned[0].key;
-  leads.forEach(l => { if (!keptKeys.has(l.stage)) l.stage = fallbackKey; });
-  STAGES = cleaned;
+  leads.forEach(l => { if (l.pipelineId === activePipelineId && !keptKeys.has(l.stage)) l.stage = fallbackKey; });
+  STAGES = STAGES.filter(s => s.pipelineId !== activePipelineId).concat(cleaned);
   saveStages(STAGES);
   saveLeads(leads);
   populateStageSelect();
@@ -2060,6 +2254,7 @@ function renderTagRows() {
     row.innerHTML = `
       <input type="color" data-idx="${idx}" class="tagColorInput" value="${t.color || TAG_DEFAULT_COLOR}">
       <input type="text" data-idx="${idx}" class="tagNameInput" value="${escapeHtml(t.name)}">
+      <label class="tag-global" title="En global tagg syns i alla pipelines"><input type="checkbox" data-idx="${idx}" class="tagGlobalCheck"${t.global ? ' checked' : ''}> Global</label>
       <button type="button" data-idx="${idx}" class="tagDelBtn danger" title="Ta bort">Ta bort</button>
     `;
     wrap.appendChild(row);
@@ -2069,6 +2264,11 @@ function renderTagRows() {
   }));
   wrap.querySelectorAll('.tagColorInput').forEach(el => el.addEventListener('input', e => {
     tagWorkingCopy[Number(e.target.dataset.idx)].color = e.target.value;
+  }));
+  wrap.querySelectorAll('.tagGlobalCheck').forEach(el => el.addEventListener('change', e => {
+    const t = tagWorkingCopy[Number(e.target.dataset.idx)];
+    t.global = e.target.checked;
+    if (!t.global && !t.pipelineId) t.pipelineId = activePipelineId;
   }));
   wrap.querySelectorAll('.tagDelBtn').forEach(el => el.addEventListener('click', e => {
     const i = Number(e.target.dataset.idx);
@@ -2081,7 +2281,7 @@ function renderTagRows() {
 }
 
 document.getElementById('manageTagsBtn').addEventListener('click', () => {
-  tagWorkingCopy = TAGS.map(t => Object.assign({}, t));
+  tagWorkingCopy = visibleTagsFor(activePipelineId).map(t => Object.assign({}, t));
   renderTagRows();
   document.getElementById('tagModalBackdrop').classList.add('open');
 });
@@ -2092,19 +2292,109 @@ document.getElementById('tagModalBackdrop').addEventListener('click', e => {
   if (e.target.id === 'tagModalBackdrop') document.getElementById('tagModalBackdrop').classList.remove('open');
 });
 document.getElementById('tagAddBtn').addEventListener('click', () => {
-  tagWorkingCopy.push({ id: uid(), name: 'Ny tagg', color: TAG_DEFAULT_COLOR });
+  tagWorkingCopy.push({ id: uid(), name: 'Ny tagg', color: TAG_DEFAULT_COLOR, pipelineId: activePipelineId, global: false });
   renderTagRows();
 });
 document.getElementById('tagSaveBtn').addEventListener('click', () => {
-  const cleaned = tagWorkingCopy.map(t => Object.assign({}, t, { name: t.name.trim() || 'Namnlös tagg' }));
-  const keptIds = new Set(cleaned.map(t => t.id));
+  const cleaned = tagWorkingCopy.map(t => Object.assign({}, t, {
+    name: t.name.trim() || 'Namnlös tagg',
+    pipelineId: t.pipelineId || activePipelineId,
+    global: !!t.global,
+  }));
+  // Byt bara ut de taggar som var synliga i denna pipeline — rör inte andra pipelines taggar
+  const wasVisible = new Set(visibleTagsFor(activePipelineId).map(t => t.id));
+  TAGS = TAGS.filter(t => !wasVisible.has(t.id)).concat(cleaned);
+  const keptIds = new Set(TAGS.map(t => t.id));
   leads.forEach(l => { if (l.tags) l.tags = l.tags.filter(id => keptIds.has(id)); });
-  TAGS = cleaned;
   saveTags(TAGS);
   saveLeads(leads);
   renderBoard();
   renderLeadTagsPicker();
   document.getElementById('tagModalBackdrop').classList.remove('open');
+});
+
+// ---------- Pipeline switcher + manager ----------
+function renderPipelineSwitcher() {
+  const sel = document.getElementById('pipelineSelect');
+  const dot = document.getElementById('pipelineDot');
+  if (!sel) return;
+  sel.innerHTML = PIPELINES.map(p => `<option value="${p.id}"${p.id === activePipelineId ? ' selected' : ''}>${escapeHtml(p.name)}</option>`).join('');
+  const pl = activePipeline();
+  dot.style.background = pl ? pl.color : PIPELINE_COLORS[0];
+}
+document.getElementById('pipelineSelect').addEventListener('change', e => {
+  setActivePipeline(e.target.value);
+});
+
+let plWorkingCopy = [];
+function renderPlRows() {
+  const wrap = document.getElementById('plRows');
+  wrap.innerHTML = '';
+  plWorkingCopy.forEach((p, idx) => {
+    const row = document.createElement('div');
+    row.className = 'tag-row';
+    row.innerHTML = `
+      <input type="color" data-idx="${idx}" class="plColorInput" value="${p.color || PIPELINE_COLORS[0]}">
+      <input type="text" data-idx="${idx}" class="plNameInput" value="${escapeHtml(p.name)}">
+      <button type="button" data-idx="${idx}" class="plDelBtn danger" title="Ta bort" ${plWorkingCopy.length <= 1 ? 'disabled' : ''}>Ta bort</button>
+    `;
+    wrap.appendChild(row);
+  });
+  wrap.querySelectorAll('.plNameInput').forEach(el => el.addEventListener('input', e => {
+    plWorkingCopy[Number(e.target.dataset.idx)].name = e.target.value;
+  }));
+  wrap.querySelectorAll('.plColorInput').forEach(el => el.addEventListener('input', e => {
+    plWorkingCopy[Number(e.target.dataset.idx)].color = e.target.value;
+  }));
+  wrap.querySelectorAll('.plDelBtn').forEach(el => el.addEventListener('click', e => {
+    const i = Number(e.target.dataset.idx);
+    if (plWorkingCopy.length <= 1) return;
+    const p = plWorkingCopy[i];
+    const leadCount = leads.filter(l => l.pipelineId === p.id).length;
+    const qCount = questions.filter(q => q.pipelineId === p.id).length;
+    if (leadCount > 0 || qCount > 0) {
+      alert(`"${p.name}" innehåller ${leadCount} process(er) och ${qCount} fråga/frågor. Flytta eller ta bort dem innan pipelinen kan tas bort.`);
+      return;
+    }
+    plWorkingCopy.splice(i, 1);
+    renderPlRows();
+  }));
+}
+document.getElementById('managePipelinesBtn').addEventListener('click', () => {
+  plWorkingCopy = PIPELINES.map(p => Object.assign({}, p));
+  renderPlRows();
+  document.getElementById('plModalBackdrop').classList.add('open');
+});
+document.getElementById('plCancelBtn').addEventListener('click', () => {
+  document.getElementById('plModalBackdrop').classList.remove('open');
+});
+document.getElementById('plModalBackdrop').addEventListener('click', e => {
+  if (e.target.id === 'plModalBackdrop') document.getElementById('plModalBackdrop').classList.remove('open');
+});
+document.getElementById('plAddBtn').addEventListener('click', () => {
+  const color = PIPELINE_COLORS[plWorkingCopy.length % PIPELINE_COLORS.length];
+  plWorkingCopy.push({ id: uid(), name: 'Ny pipeline', color });
+  renderPlRows();
+});
+document.getElementById('plSaveBtn').addEventListener('click', () => {
+  const cleaned = plWorkingCopy.map(p => Object.assign({}, p, { name: p.name.trim() || 'Namnlös pipeline' }));
+  const oldIds = new Set(PIPELINES.map(p => p.id));
+  const keptIds = new Set(cleaned.map(p => p.id));
+  // Nya pipelines får en egen uppsättning standardkategorier
+  cleaned.forEach(p => {
+    if (!oldIds.has(p.id)) STAGES = STAGES.concat(seedStagesFor(p.id));
+  });
+  // Städa bort kategorier/taggar för borttagna pipelines (de är garanterat tomma)
+  STAGES = STAGES.filter(s => keptIds.has(s.pipelineId));
+  TAGS = TAGS.filter(t => t.global || keptIds.has(t.pipelineId));
+  PIPELINES = cleaned;
+  savePipelines(PIPELINES);
+  saveStages(STAGES);
+  saveTags(TAGS);
+  if (!keptIds.has(activePipelineId)) activePipelineId = PIPELINES[0].id;
+  localStorage.setItem(ACTIVE_PIPELINE_KEY, activePipelineId);
+  document.getElementById('plModalBackdrop').classList.remove('open');
+  setActivePipeline(activePipelineId);
 });
 
 // ---------- New customer from screenshot ----------
@@ -2157,13 +2447,20 @@ document.getElementById('shotCreateBtn').addEventListener('click', () => {
 function renderQuestions() {
   const body = document.getElementById('questionsBody');
   body.innerHTML = '';
+  const showPl = PIPELINES.length > 1;
+  document.getElementById('qPipelineTh').style.display = showPl ? '' : 'none';
+  renderPlChips(document.getElementById('qPipelineChips'), id => qPipelineFilter.has(id), id => {
+    if (qPipelineFilter.has(id)) qPipelineFilter.delete(id); else qPipelineFilter.add(id);
+    renderQuestions();
+  });
   const filtered = questions.filter(q => {
+    if (qPipelineFilter.size && !qPipelineFilter.has(q.pipelineId)) return false;
     if (!qSearchTerm) return true;
     const t = qSearchTerm.toLowerCase();
     return (q.kund || '').toLowerCase().includes(t) || (q.fraga || '').toLowerCase().includes(t);
   });
   if (filtered.length === 0) {
-    body.innerHTML = '<tr><td colspan="6" style="color:#6b7280;text-align:center;padding:20px">Inga frågor ännu</td></tr>';
+    body.innerHTML = `<tr><td colspan="${showPl ? 7 : 6}" style="color:#6b7280;text-align:center;padding:20px">Inga frågor ännu</td></tr>`;
     return;
   }
   filtered.forEach(q => {
@@ -2176,6 +2473,7 @@ function renderQuestions() {
       <td class="${statusClass}">${statusLabel}</td>
       <td>${q.datum || ''}</td>
       <td>${escapeHtml(q.anteckning || '')}</td>
+      ${showPl ? `<td>${plBadge(q.pipelineId)}</td>` : ''}
       <td class="row-actions"><button data-id="${q.id}" class="editQBtn">Redigera</button></td>
     `;
     tr.querySelector('.editQBtn').addEventListener('click', () => openQModal(q.id));
@@ -2188,6 +2486,10 @@ function openQModal(id) {
   const isEdit = !!id;
   document.getElementById('qModalTitle').textContent = isEdit ? 'Redigera fråga' : 'Ny fråga';
   document.getElementById('qDeleteBtn').style.display = isEdit ? 'inline-block' : 'none';
+  const qPlField = document.getElementById('qPipelineField');
+  const qPlSel = document.getElementById('qPipeline');
+  qPlField.style.display = PIPELINES.length > 1 ? 'block' : 'none';
+  qPlSel.innerHTML = PIPELINES.map(p => `<option value="${p.id}">${escapeHtml(p.name)}</option>`).join('');
   if (isEdit) {
     const q = questions.find(x => x.id === id);
     document.getElementById('qId').value = q.id;
@@ -2196,6 +2498,7 @@ function openQModal(id) {
     document.getElementById('qStatus').value = q.status || 'ny';
     document.getElementById('qDatum').value = q.datum || todayStr();
     document.getElementById('qAnteckning').value = q.anteckning || '';
+    qPlSel.value = q.pipelineId || activePipelineId;
   } else {
     document.getElementById('qId').value = '';
     document.getElementById('qKund').value = '';
@@ -2203,6 +2506,7 @@ function openQModal(id) {
     document.getElementById('qStatus').value = 'ny';
     document.getElementById('qDatum').value = todayStr();
     document.getElementById('qAnteckning').value = '';
+    qPlSel.value = activePipelineId;
   }
   backdrop.classList.add('open');
 }
@@ -2219,6 +2523,7 @@ document.getElementById('qModalBackdrop').addEventListener('click', e => {
 document.getElementById('qSaveBtn').addEventListener('click', () => {
   const id = document.getElementById('qId').value;
   const data = {
+    pipelineId: document.getElementById('qPipeline').value || activePipelineId,
     kund: document.getElementById('qKund').value.trim(),
     fraga: document.getElementById('qFraga').value.trim(),
     status: document.getElementById('qStatus').value,
@@ -2253,7 +2558,8 @@ document.getElementById('qSearchInput').addEventListener('input', e => {
 });
 
 document.getElementById('exportQuestionsBtn').addEventListener('click', () => {
-  exportCsv(questions, ['kund','fraga','status','datum','anteckning'], 'telexia-produktfragor.csv');
+  const rows = questions.map(q => Object.assign({}, q, { pipeline: (getPipelineById(q.pipelineId) || {}).name || '' }));
+  exportCsv(rows, ['pipeline','kund','fraga','status','datum','anteckning'], 'produktfragor.csv');
 });
 
 function exportCsv(rows, cols, filename) {
@@ -2286,6 +2592,7 @@ document.querySelectorAll('.tab-btn').forEach(btn => {
 
 // ---------- Init ----------
 populateStageSelect();
+renderPipelineSwitcher();
 renderBoard();
 renderStats(); renderKpis();
 renderQuestions();
