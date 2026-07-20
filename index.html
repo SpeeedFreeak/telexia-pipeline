@@ -542,7 +542,13 @@
 <div class="modal-backdrop" id="custQuickModalBackdrop">
   <div class="modal">
     <h2>Ny kund</h2>
-    <div class="field"><label>Kundnamn</label><input type="text" id="custQuickNamn"></div>
+    <div class="paste-zone" id="custQuickPasteZone" contenteditable="true" tabindex="0" data-placeholder="Frivilligt: klistra in en skärmdump med kunduppgifter (Ctrl+V) så fylls fälten i automatiskt">Frivilligt: klistra in en skärmdump med kunduppgifter (Ctrl+V) så fylls fälten i automatiskt</div>
+    <div class="paste-row">
+      <button class="btn ghost" id="custQuickPasteFileBtn">Välj fil istället</button>
+      <input type="file" id="custQuickPasteFileInput" accept="image/*" style="display:none">
+      <span class="ai-status" id="custQuickOcrStatus"></span>
+    </div>
+    <div class="field" style="margin-top:10px"><label>Kundnamn</label><input type="text" id="custQuickNamn"></div>
     <div class="field"><label>Adress</label><input type="text" id="custQuickAdress"></div>
     <div class="field-row">
       <div class="field"><label>Kontaktperson</label><input type="text" id="custQuickKontakt"></div>
@@ -560,7 +566,7 @@
 <div class="modal-backdrop" id="shotModalBackdrop">
   <div class="modal">
     <h2>Ny kund från skärmdump</h2>
-    <div class="hint">Klistra in en skärmdump med kunduppgifter (t.ex. från mail eller Upsale). Skärmdumpen sparas i kundens logg — fyll i kundnamn, kontaktperson och e-post i nästa steg.</div>
+    <div class="hint">Klistra in en skärmdump med kunduppgifter (t.ex. från mail eller Upsale). Texten läses av automatiskt (OCR, lokalt i din webbläsare) och kundfälten förifylls i nästa steg — skärmdumpen sparas dessutom i processens logg.</div>
     <div class="paste-zone" id="shotPasteZone" contenteditable="true" tabindex="0" data-placeholder="Klicka här och klistra in en skärmdump (Ctrl+V)">Klicka här och klistra in en skärmdump (Ctrl+V)</div>
     <div class="paste-row">
       <button class="btn ghost" id="shotPasteFileBtn">Välj fil istället</button>
@@ -2126,15 +2132,52 @@ document.getElementById('customerDeleteBtn').addEventListener('click', () => {
 });
 
 // ---------- Quick-add customer modal ----------
+let custQuickShotDataUrl = null;
+let custQuickOcrResult = null;
 function openCustQuickAddModal(context) {
   custQuickAddContext = context;
+  custQuickShotDataUrl = null;
+  custQuickOcrResult = null;
   document.getElementById('custQuickNamn').value = '';
   document.getElementById('custQuickAdress').value = '';
   document.getElementById('custQuickKontakt').value = '';
   document.getElementById('custQuickTelefon').value = '';
   document.getElementById('custQuickEmail').value = '';
+  document.getElementById('custQuickOcrStatus').textContent = '';
+  document.getElementById('custQuickOcrStatus').className = 'ai-status';
+  resetZone(document.getElementById('custQuickPasteZone'));
   document.getElementById('custQuickModalBackdrop').classList.add('open');
 }
+
+// OCR-zon i Ny kund-rutan: klistra in skärmdump → fälten fylls i automatiskt.
+setupPasteZone(
+  document.getElementById('custQuickPasteZone'),
+  document.getElementById('custQuickPasteFileBtn'),
+  document.getElementById('custQuickPasteFileInput'),
+  async dataUrl => {
+    custQuickShotDataUrl = dataUrl;
+    showImageInZone(document.getElementById('custQuickPasteZone'), dataUrl);
+    const status = document.getElementById('custQuickOcrStatus');
+    try {
+      const text = await ocrImage(dataUrl, status);
+      const ocr = parseOcrText(text);
+      custQuickOcrResult = ocr;
+      // Fyll bara i fält som är tomma — skriv inte över det du redan skrivit
+      const setIfEmpty = (id, val) => { const el = document.getElementById(id); if (val && !el.value.trim()) el.value = val; };
+      setIfEmpty('custQuickNamn', ocr.namn);
+      setIfEmpty('custQuickAdress', ocr.adress);
+      setIfEmpty('custQuickKontakt', ocr.kontakt);
+      setIfEmpty('custQuickTelefon', ocr.telefon);
+      setIfEmpty('custQuickEmail', ocr.email);
+      const bits = ocrSummary(ocr);
+      status.className = 'ai-status';
+      status.textContent = bits.length ? 'Ifyllt från skärmdumpen — kontrollera och justera vid behov.' + (ocr.orgnr ? ' (Orgnr ' + ocr.orgnr + ' sparas i kundens logg.)' : '') : 'Ingen kundinfo hittades i texten — fyll i fälten manuellt.';
+    } catch (e) {
+      status.className = 'ai-status err';
+      status.textContent = 'OCR misslyckades (' + e.message + ') — fyll i fälten manuellt.';
+    }
+  }
+);
 function closeCustQuickAddModal() {
   document.getElementById('custQuickModalBackdrop').classList.remove('open');
   custQuickAddContext = null;
@@ -2150,12 +2193,15 @@ document.getElementById('custQuickSaveBtn').addEventListener('click', () => {
   const telefon = document.getElementById('custQuickTelefon').value.trim();
   const email = document.getElementById('custQuickEmail').value.trim();
   const kontakter = (kontaktNamn || telefon || email) ? [{ id: uid(), namn: kontaktNamn, telefon, email, roll: '' }] : [];
+  const log = [];
+  if (custQuickShotDataUrl) log.push({ id: uid(), type: 'image', content: custQuickShotDataUrl, ts: nowLabel() });
+  if (custQuickOcrResult && custQuickOcrResult.orgnr) log.push({ id: uid(), type: 'text', content: 'Orgnr (OCR): ' + custQuickOcrResult.orgnr, ts: nowLabel() });
   const kund = {
     id: uid(),
     namn,
     adress: document.getElementById('custQuickAdress').value.trim(),
     kontakter,
-    log: [],
+    log,
   };
   customers.push(kund);
   saveCustomers(customers);
@@ -2409,30 +2455,133 @@ document.getElementById('plSaveBtn').addEventListener('click', () => {
   setActivePipeline(activePipelineId);
 });
 
-// ---------- New customer from screenshot ----------
-// Note: automatic AI-extraction of kund/kontakt/email from the screenshot was
-// tried but turned out unreliable (the in-page AI helper can't reliably read
-// pasted images). So this flow now just attaches the screenshot to a new
-// customer card and lets you fill in the fields yourself in the modal that
-// opens next — quicker than it sounds since the screenshot stays visible
-// in the log for reference while you type.
+// ---------- OCR (Tesseract.js, körs lokalt i webbläsaren) ----------
+// Läser texten ur en skärmdump och plockar ut kundfält med mönsterigenkänning.
+// Biblioteket laddas från CDN först när det behövs (~2 MB första gången).
+let tesseractLoadPromise = null;
+function loadTesseract() {
+  if (window.Tesseract) return Promise.resolve();
+  if (tesseractLoadPromise) return tesseractLoadPromise;
+  tesseractLoadPromise = new Promise((resolve, reject) => {
+    const s = document.createElement('script');
+    s.src = 'https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js';
+    s.onload = resolve;
+    s.onerror = () => { tesseractLoadPromise = null; reject(new Error('kunde inte ladda OCR-biblioteket')); };
+    document.head.appendChild(s);
+  });
+  return tesseractLoadPromise;
+}
+
+async function ocrImage(dataUrl, statusEl) {
+  statusEl.className = 'ai-status';
+  statusEl.textContent = 'Laddar OCR-motorn...';
+  await loadTesseract();
+  statusEl.textContent = 'Läser text ur skärmdumpen...';
+  const res = await Tesseract.recognize(dataUrl, 'swe+eng', {
+    logger: m => {
+      if (m.status === 'recognizing text') statusEl.textContent = 'Läser text... ' + Math.round(m.progress * 100) + '%';
+    }
+  });
+  return (res && res.data && res.data.text) || '';
+}
+
+function parseOcrText(text) {
+  const out = { namn: '', orgnr: '', telefon: '', email: '', adress: '', kontakt: '', raw: text };
+  const lines = text.split('\n').map(l => l.trim()).filter(Boolean);
+
+  const emailM = text.match(/[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}/);
+  if (emailM) out.email = emailM[0];
+
+  const orgnrM = text.match(/\b(\d{6})\s?[-–]\s?(\d{4})\b/);
+  if (orgnrM) out.orgnr = orgnrM[1] + '-' + orgnrM[2];
+
+  // Telefon: svenska format, men inte orgnr
+  const phoneCandidates = text.match(/(?:\+46|0)[\d\s\-()]{7,15}\d/g) || [];
+  for (const c of phoneCandidates) {
+    const digits = c.replace(/\D/g, '');
+    if (out.orgnr && digits === out.orgnr.replace('-', '')) continue;
+    if (digits.length >= 8 && digits.length <= 13) { out.telefon = c.replace(/\s+/g, ' ').trim(); break; }
+  }
+
+  // Adress: gaturad + ev. postnr/ort
+  const streetRe = /\b[A-ZÅÄÖ][a-zåäöé]+(?:gatan|vägen|gränd|gränden|allén|torget|platsen|stigen|backen|leden|plan|gata|väg)\b\s*\d*[A-Za-z]?/;
+  const postRe = /\b(\d{3}\s?\d{2})\s+([A-ZÅÄÖ][A-Za-zåäöÅÄÖ\- ]{1,30})/;
+  const streetLine = lines.find(l => streetRe.test(l));
+  const postM = text.match(postRe);
+  const parts = [];
+  if (streetLine) {
+    const sm = streetLine.match(new RegExp(streetRe.source + '[^,;|]*'));
+    parts.push(sm ? sm[0].trim() : streetLine);
+  }
+  if (postM) parts.push((postM[1].replace(/\s+/g, ' ') + ' ' + postM[2].trim()).trim());
+  out.adress = parts.join(', ');
+
+  const isNoise = l => /@/.test(l) || /\d{5,}/.test(l.replace(/\s/g, '')) || streetRe.test(l) || postRe.test(l);
+
+  // Företagsnamn: rad med bolagsform, annars första "rimliga" raden
+  const bolagsRe = /\b(AB|HB|KB|Aktiebolag|Ekonomisk förening|Handelsbolag|Kommanditbolag)\b/i;
+  const bolagsLine = lines.find(l => bolagsRe.test(l) && l.length < 60);
+  if (bolagsLine) {
+    const m = bolagsLine.match(/^(.*?\b(?:AB|HB|KB|Aktiebolag|Ekonomisk förening|Handelsbolag|Kommanditbolag))\b/i);
+    out.namn = (m ? m[1] : bolagsLine).trim();
+  } else {
+    const cand = lines.find(l => !isNoise(l) && l.length > 2 && l.length < 60);
+    if (cand) out.namn = cand;
+  }
+
+  // Kontaktperson: 2–3 ord med stor bokstav, inga siffror, inte företagsnamnet.
+  // Hanterar även "Namn Efternamn / Roll" och "Namn Efternamn, Roll".
+  const personRe = /^[A-ZÅÄÖ][a-zåäöé]+(?:\s+[A-ZÅÄÖ][a-zåäöé]+){1,2}$/;
+  for (const l of lines) {
+    const cand = l.split(/[\/,|·]/)[0].trim();
+    if (personRe.test(cand) && cand !== out.namn && !bolagsRe.test(cand)) { out.kontakt = cand; break; }
+  }
+
+  return out;
+}
+
+function ocrSummary(p) {
+  const bits = [];
+  if (p.namn) bits.push('Företag: ' + p.namn);
+  if (p.orgnr) bits.push('Orgnr: ' + p.orgnr);
+  if (p.kontakt) bits.push('Kontakt: ' + p.kontakt);
+  if (p.telefon) bits.push('Tel: ' + p.telefon);
+  if (p.email) bits.push('E-post: ' + p.email);
+  if (p.adress) bits.push('Adress: ' + p.adress);
+  return bits;
+}
+
+// ---------- New customer from screenshot (Pipeline-fliken) ----------
 let shotDataUrl = null;
+let shotOcrResult = null;
 setupPasteZone(
   document.getElementById('shotPasteZone'),
   document.getElementById('shotPasteFileBtn'),
   document.getElementById('shotPasteFileInput'),
-  dataUrl => {
+  async dataUrl => {
     shotDataUrl = dataUrl;
+    shotOcrResult = null;
     showImageInZone(document.getElementById('shotPasteZone'), dataUrl);
     document.getElementById('shotCreateBtn').disabled = false;
-    document.getElementById('shotAiStatus').innerHTML = '';
+    const status = document.getElementById('shotAiStatus');
+    try {
+      const text = await ocrImage(dataUrl, status);
+      shotOcrResult = parseOcrText(text);
+      const bits = ocrSummary(shotOcrResult);
+      status.textContent = bits.length ? 'Hittat — ' + bits.join(' · ') : 'Ingen kundinfo hittades i texten — fyll i fälten manuellt i nästa steg.';
+    } catch (e) {
+      status.className = 'ai-status err';
+      status.textContent = 'OCR misslyckades (' + e.message + ') — fyll i fälten manuellt i nästa steg.';
+    }
   }
 );
 
 function resetShotModal() {
   shotDataUrl = null;
+  shotOcrResult = null;
   document.getElementById('shotCreateBtn').disabled = true;
   document.getElementById('shotAiStatus').innerHTML = '';
+  document.getElementById('shotAiStatus').className = 'ai-status';
   resetZone(document.getElementById('shotPasteZone'));
 }
 
@@ -2449,9 +2598,23 @@ document.getElementById('shotModalBackdrop').addEventListener('click', e => {
 
 document.getElementById('shotCreateBtn').addEventListener('click', () => {
   if (!shotDataUrl) return;
-  const prefill = { log: [{ id: uid(), type: 'image', content: shotDataUrl, ts: nowLabel() }] };
+  const log = [{ id: uid(), type: 'image', content: shotDataUrl, ts: nowLabel() }];
+  if (shotOcrResult && shotOcrResult.orgnr) {
+    log.push({ id: uid(), type: 'text', content: 'Orgnr (OCR): ' + shotOcrResult.orgnr, ts: nowLabel() });
+  }
+  const prefill = { log };
+  const ocr = shotOcrResult;
   document.getElementById('shotModalBackdrop').classList.remove('open');
   openLeadModal(null, prefill);
+  // Öppna "Ny kund" ovanpå processmodalen, förifylld med OCR-fälten
+  openCustQuickAddModal('lead');
+  if (ocr) {
+    document.getElementById('custQuickNamn').value = ocr.namn || '';
+    document.getElementById('custQuickAdress').value = ocr.adress || '';
+    document.getElementById('custQuickKontakt').value = ocr.kontakt || '';
+    document.getElementById('custQuickTelefon').value = ocr.telefon || '';
+    document.getElementById('custQuickEmail').value = ocr.email || '';
+  }
   resetShotModal();
 });
 
