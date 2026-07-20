@@ -2489,7 +2489,12 @@ function parseOcrText(text) {
   const out = { namn: '', orgnr: '', telefon: '', email: '', adress: '', kontakt: '', raw: text };
   const lines = text.split('\n').map(l => l.trim()).filter(Boolean);
 
-  const emailM = text.match(/[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}/);
+  // E-post: OCR läser ofta @ och punkter slarvigt — normalisera vanliga fel först
+  const emailText = text
+    .replace(/\s*[@＠©]\s*/g, '@')                    // mellanslag runt @, © misläst som @
+    .replace(/[（(]at[)）]/gi, '@')                    // "(at)"
+    .replace(/,(?=[a-z]{2,4}\b)/gi, '.');             // komma före toppdomän → punkt
+  const emailM = emailText.match(/[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}/);
   if (emailM) out.email = emailM[0];
 
   const orgnrM = text.match(/\b(\d{6})\s?[-–]\s?(\d{4})\b/);
