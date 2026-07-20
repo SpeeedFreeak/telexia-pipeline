@@ -1276,10 +1276,14 @@ function renderKpis() {
   document.getElementById('signedKpiMonthSel').addEventListener('change', e => {
     signedKpiMonth = e.target.value;
     renderKpis();
+    renderStats();
+    renderBoard();
   });
   document.getElementById('lostKpiMonthSel').addEventListener('change', e => {
     lostKpiMonth = e.target.value;
     renderKpis();
+    renderStats();
+    renderBoard();
   });
 }
 
@@ -1291,7 +1295,10 @@ function renderStats() {
   const overdueCount = aleads.filter(isOverdue).length;
   let html = '';
   activeStages().forEach(s => {
-    const count = aleads.filter(l => l.stage === s.key).length;
+    let count;
+    if (s.kind === 'won') count = aleads.filter(l => l.stage === s.key && (!l.signedDate || l.signedDate.slice(0,7) === signedKpiMonth)).length;
+    else if (s.kind === 'lost') count = aleads.filter(l => l.stage === s.key && (!l.lostDate || l.lostDate.slice(0,7) === lostKpiMonth)).length;
+    else count = aleads.filter(l => l.stage === s.key).length;
     const active = stageFilter.has(s.key);
     html += `<div class="stat-pill filterable${active ? ' active' : ''}" data-stage="${s.key}"><b>${count}</b>${s.name}</div>`;
   });
@@ -1318,9 +1325,14 @@ function renderBoard() {
     col.className = 'column';
     col.dataset.stage = stage.key;
 
-    const stageLeads = leads.filter(l => l.pipelineId === activePipelineId && l.stage === stage.key && matchesSearch(l));
+    let stageLeads = leads.filter(l => l.pipelineId === activePipelineId && l.stage === stage.key && matchesSearch(l));
+    // Signerat/Förlorat-kolumnerna speglar månaden som är vald i respektive KPI.
+    // Processer som saknar datum visas alltid så att inget blir osynligt.
+    if (stage.kind === 'won') stageLeads = stageLeads.filter(l => !l.signedDate || l.signedDate.slice(0,7) === signedKpiMonth);
+    if (stage.kind === 'lost') stageLeads = stageLeads.filter(l => !l.lostDate || l.lostDate.slice(0,7) === lostKpiMonth);
+    const monthSuffix = stage.kind === 'won' ? ' · ' + monthLabel(signedKpiMonth) : (stage.kind === 'lost' ? ' · ' + monthLabel(lostKpiMonth) : '');
 
-    col.innerHTML = `<div class="column-head"><span class="name">${stage.name}</span><span class="count">${stageLeads.length}</span></div>`;
+    col.innerHTML = `<div class="column-head"><span class="name">${stage.name}${monthSuffix}</span><span class="count">${stageLeads.length}</span></div>`;
 
     if (stageLeads.length === 0) {
       const hint = document.createElement('div');
