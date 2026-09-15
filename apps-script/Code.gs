@@ -1,0 +1,1243 @@
+/**
+ * Pipeline by Redneck Engineering – bokningsmodul, Apps Script-kärna (Code.gs).
+ *
+ * Milstolpe M2. Specifikation: "[C] Bokningsmodul - specifikation steg 1.md", avsnitt 4 (brevlåda, transport,
+ * endpoints, säkerhet), 5 (tillgänglighet – anropas i Availability.gs) och 9 (säkerhet/GDPR).
+ *
+ * Projektet består av tre filer:
+ *   Code.gs          – denna fil: Script Properties, filhantering, doPost/doGet, autentisering, gränser,
+ *                      reservation, book, kalenderskrivning, notismejl, hello/ping/geocode/release, admin-stubbar.
+ *   Calendar.gs      – readBusy(fran, till), parseIcs, mergeBusy, applyIgnore, buildBusyList(from, to).
+ *   Availability.gs  – computeAvailability(req), dayPlan, placeTravel, geocodeAddress(adress), travelMinutes,
+ *                      swedishHolidays.
+ *
+ * Regler som gäller hela filen (spec 4.1, 4.3, 9):
+ *   - Inga hemligheter i koden. MAPS_API_KEY, ADMIN_KEY och fil-id:n finns bara i Script Properties.
+ *   - Inga Drive-anrop utöver DriveApp.getFileById(<de tre id:na>) + getBlob/setContent/getName/getMimeType/getOwner/isTrashed.
+ *   - Loggning bara via den strukturerade raden i doPost: aldrig indata, koder, nycklar eller kund-/kontaktfält.
+ *   - Alla svar är JSON-kuvert (ContentService) – även vid okontrollerade fel (yttersta try/catch i doPost).
+ *   - Allt som skrivs till kalender/mejl får < och > strippade; mejl är alltid plain text.
+ */
+
+// ============================================================
+// Konstanter
+// ============================================================
+
+const SCRIPT_VERSION = 1;                       // MIN_SCRIPT_VERSION i index.html/bokning.js jämförs mot denna (4.12)
+const TZ = 'Europe/Stockholm';
+const APP_URL = 'https://speeedfreeak.github.io/telexia-pipeline/';   // länk i notismejlet (4.9)
+const MAX_BODY_BYTES = 16384;                   // body kontrolleras före JSON.parse (4.3)
+const LOCK_WAIT_MS = 10000;                     // LockService – timeout → E_LOCK (4.8)
+
+const KOD_RE = /^[A-Za-z0-9_-]{24}$/;           // bokarkod (4.5)
+const CLIENT_BOKNING_ID_RE = /^[0-9a-f-]{36}$/; // idempotensnyckel från bokningssidan (4.4)
+const BOKNING_ID_RE = /^[0-9a-f-]{36}$/;
+const KUND_ID_RE = /^[A-Za-z0-9_-]{1,64}$/;     // extrafalt._kundId (CJ-bokare, A27)
+const EPOST_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+const DATUM_RE = /^\d{4}-\d{2}-\d{2}$/;
+const ISO_START_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2}(\.\d+)?)?(Z|[+-]\d{2}:?\d{2})$/;
+
+// Handlingsgränser (4.5) – skyddar kalendern och CJ, inte bara scriptet. Listas i Inställningar › Script.
+const MAX_RES_PER_KOD = 1;          // nytt reserve släpper föregående reservation
+const MAX_BOOK_PER_KOD_H = 5;       // E_RATE typ 'bokningar'
+const MAX_BOOK_PER_KOD_D = 15;      // dito per dag
+const MAX_BOOK_GLOBAL_D = 40;       // dito globalt per dag (Script Property book_count_<YYYYMMDD>)
+const MAX_GEOCODE_PER_KOD_H = 20;   // E_RATE typ 'geocode' (bara nya adresser räknas, aldrig cache-träffar)
+const MAX_ADRESSER_PER_KOD_D = 20;  // unika adresser per kod och dag, E_RATE typ 'adresser'
+
+// Anropsgränser (4.5) – ungefärliga, CacheService utan lås.
+const RL_PER_MIN = 30;
+const RL_PER_H = 300;
+const RL_BAD_PER_10MIN = 20;        // okända koder: över 20 träffar svarar alla okända koder E_RATE i 10 min
+const RL_ADMIN_PER_MIN = 60;
+const RL_PING_PER_MIN = 60;         // ping är oautentiserat och läser Drive – enkel spärr
+
+// TTL i CacheService (sekunder). Max är 21 600 (6 h).
+const CONFIG_CACHE_S = 600;
+const SETUP_CACHE_S = 600;
+const RES_TTL_S = 300;              // reservation 5 min (4.8)
+const TTL_H_S = 3900;
+const TTL_D_S = 21600;
+const CACHE_MAX_BYTES = 95000;      // CacheService tar max 100 KB per värde – större hoppas över
+
+// Script Properties (4.2)
+const PROP = {
+  ADMIN_KEY: 'ADMIN_KEY',
+  CONFIG_FILE_ID: 'CONFIG_FILE_ID',
+  INBOX_FILE_ID: 'INBOX_FILE_ID',
+  CACHE_FILE_ID: 'CACHE_FILE_ID',
+  MAPS_API_KEY: 'MAPS_API_KEY',
+  MAPS_DAILY_CAP: 'MAPS_DAILY_CAP'
+};
+const MAPS_DAILY_CAP_DEFAULT = 1000;
+
+// Maxlängder (3.5) – samma som bokningssidans maxlength och importens klippning.
+const MAXLEN = { kundnamn: 120, orgnr: 13, adress: 200, kontaktperson: 120, telefon: 30, epost: 120, notering: 2000, kort: 200, fritext: 2000 };
+
+// Statiska feltexter per felkod (4.3). E_VALIDATION-texter ekar aldrig indata.
+const FEL_TEXT = {
+  E_SETUP: 'Bokningsmodulen är inte färdiginstallerad',
+  E_KEY: 'Koden är ogiltig eller avstängd',
+  E_ADMIN: 'Fel adminnyckel',
+  E_RATE: 'För många försök – vänta en stund',
+  E_PAUSED: 'Bokningar är pausade',
+  E_VALIDATION: 'Ogiltiga uppgifter',
+  E_SLOT_TAKEN: 'Tiden hann bli upptagen. Välj en ny tid.',
+  E_RESERVATION_EXPIRED: 'Reservationen har gått ut och tiden är tagen. Välj en ny tid.',
+  E_NOT_FOUND: 'Bokningen finns inte',
+  E_STATE: 'Otillåten ändring',
+  E_CALENDAR: 'Kalendern kunde inte uppdateras – inget har bokats',
+  E_LOCK: 'Tjänsten är upptagen – försök igen',
+  E_INTERNAL: 'Internt fel i tjänsten',
+  E_NOT_IMPLEMENTED: 'Funktionen är inte tillgänglig i den här versionen'
+};
+
+// ============================================================
+// Defaults – ORDAGRANNA kopior av index.html (spec 3.5). Config-filen fylls på med dessa fält för fält
+// så att scriptet tål en äldre eller ofullständig config.
+// ============================================================
+
+const DEFAULT_BOKNINGSFORMULAR = {
+  version: 1,
+  karna: {
+    kundnamn: { synlig: true, obligatorisk: true }, orgnr: { synlig: true, obligatorisk: true },
+    adress: { synlig: true, obligatorisk: false }, kontaktperson: { synlig: true, obligatorisk: true },
+    telefon: { synlig: true, obligatorisk: true }, epost: { synlig: true, obligatorisk: false },
+    notering: { synlig: true, obligatorisk: false }
+  },
+  extrafalt: []
+};
+
+const DEFAULT_BOKNINGSINSTALLNINGAR = {
+  version: 1,
+  adminNyckel: '', brevladaFiler: { config: '', inbox: '', cache: '' },
+  senastSyncTs: '', senastSyncRev: 0, senasteKonfigAndringTs: '',
+  bokningSidaUrl: 'https://redneckengineering.se/bokning',
+  arbetstider: { '1': { start: '08:00', slut: '17:00' }, '2': { start: '08:00', slut: '17:00' }, '3': { start: '08:00', slut: '17:00' },
+                 '4': { start: '08:00', slut: '17:00' }, '5': { start: '08:00', slut: '17:00' }, '6': null, '0': null },
+  lunch: { start: '12:00', slut: '13:00' },
+  basadress: '', basLat: null, basLng: null, restidTillForsta: true, restidEfterSista: true,
+  framforhallningFysiskDagar: 2, framforhallningTeamsDagar: 1, horisontVeckor: 6,
+  startintervallMin: 30, maxFysiskaPerDag: 3, maxEnkelResaMin: 90,
+  schablonRestidMin: 45, marginalMinstMin: 15, marginalProcent: 25,
+  rodaDagar: true, rodaDagarExtra: [], rodaDagarUndantag: [],
+  paus: { aktiv: false, tom: '', meddelande: '' },
+  // Tom tills Anslut-guiden (M3, calendars-list) fyller listan – inga kalender-id:n/e-postadresser i källkoden (publikt repo).
+  kalendrar: [],
+  outlookIcsUrl: '', raknaPreliminaraOutlook: false,
+  telexiaEpost: '', notisEpost: '', kontaktuppgifterIKalender: false,
+  integritetstext: 'Uppgifterna lagras av Redneck Engineering för att genomföra det bokade mötet och raderas ur bokningssystemet 30 dagar efter mötet. Frågor: {notisEpost}',
+  kontaktTextBokare: 'Blev något fel? Mejla CJ på {notisEpost} och ange bokningsnumret {bokningId}.',
+  gallringDagar: 30
+};
+
+function isPlainObject(v) { return !!v && typeof v === 'object' && !Array.isArray(v); }
+function deepClone(v) { return v === undefined ? undefined : JSON.parse(JSON.stringify(v)); }
+// Djup default-fyllning fält för fält: befintliga värden behålls, saknade fält tas från def (idempotent).
+// Rekurserar bara när både sparat värde och default är plain objects – ett sparat null (t.ex. arbetstider['1'] = stängd dag,
+// spec 3.5) eller annan typ lämnas orört.
+function fillDefaults(obj, def) {
+  if (!isPlainObject(obj)) obj = {};
+  Object.keys(def).forEach(k => {
+    if (obj[k] === undefined) obj[k] = deepClone(def[k]);
+    else if (isPlainObject(def[k]) && isPlainObject(obj[k])) fillDefaults(obj[k], def[k]);
+  });
+  return obj;
+}
+
+// ============================================================
+// Orgnr och normalisering – ORDAGRANNA kopior av index.html (spec 3.3)
+// ============================================================
+
+function luhnOk(d) {                  // svenska orgnr/personnummer: 10 siffror, kontrollsiffra sist
+  let s = 0;
+  for (let i = 0; i < d.length; i++) { let n = +d[i]; if ((d.length - i) % 2 === 0) { n *= 2; if (n > 9) n -= 9; } s += n; }
+  return s % 10 === 0;
+}
+function normalizeOrgnr(s) {          // '5560160680', '556016-0680', '165560160680' → '556016-0680'; ogiltigt/fel kontrollsiffra → ''
+  let d = String(s || '').replace(/\D/g, '');
+  if (d.length === 12 && d.startsWith('16')) d = d.slice(2);
+  if (d.length !== 10 || !luhnOk(d)) return '';
+  return d.slice(0, 6) + '-' + d.slice(6);
+}
+function normalizePhone(s) { let d = String(s || '').replace(/\D/g, ''); if (d.startsWith('0046')) d = d.slice(4); if (d.startsWith('46')) d = '0' + d.slice(2); return d; }
+function normalizeEmail(s) { return String(s || '').trim().toLowerCase(); }
+
+// ============================================================
+// Tidshjälp (Europe/Stockholm) – portad från index.html (spec 3.4, 5.9). Samma namn och returformat som i appen.
+// tzParts använder Utilities.formatDate (Apps Scripts garanterade tidszonsformatering) i stället för Intl;
+// utdata är identisk: { datum:'YYYY-MM-DD', tid:'HH:MM' }.
+// ============================================================
+
+const APP_TZ = TZ;
+const SV_WEEKDAYS = ['Söndag','Måndag','Tisdag','Onsdag','Torsdag','Fredag','Lördag'];
+const SV_MONTHS = ['januari','februari','mars','april','maj','juni','juli','augusti','september','oktober','november','december'];
+
+// Memoisering per körning (varje request är en ny V8-kontext): Utilities.formatDate går över Java-bryggan (~1–3 ms)
+// och anropas per slot/dag-segment/ICS-instans. Nycklar: d.getTime() resp. lokal väggtid (offset beror bara på den).
+const TZ_PARTS_CACHE = new Map();
+const TZ_OFFSET_CACHE = new Map();
+function tzParts(d) {
+  // Ogiltigt Date (t.ex. trasig ISO-sträng i en inkorgspost) ger tomma fält i stället för Java-undantag → E_INTERNAL.
+  if (!(d instanceof Date) || isNaN(d.getTime())) return { datum: '', tid: '' };
+  const k = d.getTime();
+  let p = TZ_PARTS_CACHE.get(k);
+  if (!p) {
+    const s = Utilities.formatDate(d, APP_TZ, 'yyyy-MM-dd HH:mm');
+    p = { datum: s.slice(0, 10), tid: s.slice(11, 16) };
+    TZ_PARTS_CACHE.set(k, p);
+  }
+  return { datum: p.datum, tid: p.tid };
+}
+function todayStr() { return tzParts(new Date()).datum; }
+function nowTimeStr() { return tzParts(new Date()).tid; }
+function addDays(dateStr, n) { const d = new Date(dateStr + 'T12:00:00Z'); d.setUTCDate(d.getUTCDate() + n); return d.toISOString().slice(0, 10); }
+function weekdayOf(dateStr) { return new Date(dateStr + 'T12:00:00Z').getUTCDay(); }   // 0 = söndag
+function tzOffsetMinutes(dateStr, tid) {
+  const k = dateStr + 'T' + tid;
+  const hit = TZ_OFFSET_CACHE.get(k);
+  if (hit !== undefined) return hit;
+  const guess = new Date(`${dateStr}T${tid}:00Z`);
+  const p = tzParts(guess);
+  const asUtc = Date.UTC(+p.datum.slice(0,4), +p.datum.slice(5,7)-1, +p.datum.slice(8,10), +p.tid.slice(0,2), +p.tid.slice(3,5));
+  const off = Math.round((asUtc - guess.getTime()) / 60000);
+  TZ_OFFSET_CACHE.set(k, off);
+  return off;
+}
+function toIsoWithOffset(dateStr, tid) {
+  const off = tzOffsetMinutes(dateStr, tid), s = off < 0 ? '-' : '+', a = Math.abs(off);
+  return `${dateStr}T${tid}:00${s}${String(Math.floor(a/60)).padStart(2,'0')}:${String(a%60).padStart(2,'0')}`;
+}
+function fromIso(iso) { return tzParts(new Date(iso)); }
+function longDateLabel(dateStr) {   // 'torsdag 24 september 2026'
+  const d = new Date(dateStr + 'T12:00:00Z');
+  return `${SV_WEEKDAYS[d.getUTCDay()]} ${d.getUTCDate()} ${SV_MONTHS[d.getUTCMonth()]} ${d.getUTCFullYear()}`.toLowerCase();
+}
+function isoWithOffset(d) { return Utilities.formatDate(d, TZ, "yyyy-MM-dd'T'HH:mm:ssXXX"); }   // 5.9
+function nowIso() { return isoWithOffset(new Date()); }
+function tidToMin(tid) { const m = /^(\d{2}):(\d{2})$/.exec(String(tid || '')); return m ? (+m[1]) * 60 + (+m[2]) : NaN; }
+function minToTid(min) { const m = Math.max(0, Math.min(1439, min)); return String(Math.floor(m / 60)).padStart(2, '0') + ':' + String(m % 60).padStart(2, '0'); }
+function daysBetween(a, b) { return Math.round((new Date(b + 'T12:00:00Z').getTime() - new Date(a + 'T12:00:00Z').getTime()) / 86400000); }
+function ymdCompact(dateStr) { return String(dateStr || '').replace(/-/g, ''); }
+function horisontTomDatum(inst) { return addDays(todayStr(), (Number(inst.horisontVeckor) || 6) * 7); }   // = sistaDag i 5.12
+
+// ============================================================
+// Fel och kuvert (4.3)
+// ============================================================
+
+class ApiError extends Error {
+  constructor(code, message, details) {
+    super(message || FEL_TEXT[code] || code);
+    this.name = 'ApiError';
+    this.code = code;
+    this.details = details || {};
+  }
+}
+function apiError(code, message, details) { return new ApiError(code, message, details); }
+function fel(code, message, details) { throw apiError(code, message, details); }
+function valideringsfel(falt) { throw apiError('E_VALIDATION', undefined, { falt: falt }); }
+
+// Tolkar fel från alla filer: ApiError, objekt med code 'E_*' eller Error vars message börjar med 'E_*'.
+function errorCode(err) {
+  if (!err) return '';
+  if (err instanceof ApiError) return err.code;
+  if (typeof err.code === 'string' && /^E_[A-Z_]+$/.test(err.code)) return err.code;
+  const m = /^(E_[A-Z_]+)/.exec(String(err.message || ''));
+  return m ? m[1] : '';
+}
+
+function respond(obj) { return ContentService.createTextOutput(JSON.stringify(obj)).setMimeType(ContentService.MimeType.JSON); }
+function okEnvelope(data, ctx) {
+  return { ok: true, data: data === undefined ? {} : data, scriptVersion: SCRIPT_VERSION, configRev: ctx && ctx.configRev !== undefined ? ctx.configRev : null, serverTime: nowIso() };
+}
+function errEnvelope(code, message, details) {
+  return { ok: false, error: { code: code, message: message || FEL_TEXT[code] || code, details: isPlainObject(details) ? details : {} } };
+}
+
+// ============================================================
+// Inträde: doPost / doGet (4.3). Yttersta try/catch svarar alltid JSON.
+// ============================================================
+
+function doPost(e) {
+  const t0 = Date.now(); let action = '?', bokareId = '';
+  try {
+    if (!e || !e.postData || typeof e.postData.contents !== 'string' || e.postData.contents.length > MAX_BODY_BYTES)
+      return respond(errEnvelope('E_VALIDATION', 'Ogiltig eller för stor förfrågan'));
+    let req = null;
+    try { req = JSON.parse(e.postData.contents); } catch (pe) { req = null; }
+    if (!isPlainObject(req)) return respond(errEnvelope('E_VALIDATION', 'Ogiltig eller för stor förfrågan'));
+    action = String(req.action || '');
+    const out = route(req, ctx => { bokareId = ctx.bokareId || ''; });
+    console.log(JSON.stringify({ action, bokareId, ok: out.ok, code: out.ok ? '' : out.error.code, ms: Date.now() - t0 }));
+    return respond(out);
+  } catch (err) {
+    console.error(JSON.stringify({ action, bokareId, ok: false, code: 'E_INTERNAL', ms: Date.now() - t0, fel: felKlass(err) }));
+    return respond(errEnvelope('E_INTERNAL'));
+  }
+}
+// Klassificering av okontrollerade fel för loggraden (4.3/9: loggen får aldrig innehålla kund-/kontaktfält).
+// Calendar/Drive ekar ibland fältvärden (e-post, filnamn) i felmeddelandet – därför bara namn + en hårt
+// avskalad text (e-postmönster ersatta, bara ord/siffror/:.-, max 80 tecken). Fullständig stack finns i
+// Körningar-vyn i redigeraren (exceptionLogging STACKDRIVER) – ingen extra loggning här.
+function felKlass(err) {
+  const namn = String(err && err.name || 'Error').slice(0, 40);
+  const text = String(err && err.message || '').replace(/\S+@\S+/g, '<epost>').replace(/[^\w\s:.\-<>åäöÅÄÖ]/g, '').replace(/\s+/g, ' ').trim().slice(0, 80);
+  return namn + (text ? ': ' + text : '');
+}
+
+// doGet svarar bara på ?action=ping (4.3) – går genom doPost så att loggraden är gemensam.
+function doGet(e) {
+  const action = e && e.parameter ? String(e.parameter.action || '') : '';
+  if (action !== 'ping') return respond(errEnvelope('E_VALIDATION', 'Okänd åtgärd', { falt: { action: 'Bara ping via GET' } }));
+  return doPost({ postData: { contents: JSON.stringify({ action: 'ping' }) } });
+}
+
+// Routing: kör handlern, översätter kända fel till kuvert. Okända fel bubblar till doPost (E_INTERNAL).
+function route(req, setCtx) {
+  const ctx = { action: String(req.action || ''), bokareId: '', kodKey: '', configRev: null };
+  try {
+    if (Session.getScriptTimeZone() !== TZ) throw new Error('Scriptets tidszon avviker från ' + TZ + ' – sätt den i Projektinställningar');
+    const handler = Object.prototype.hasOwnProperty.call(HANDLERS, ctx.action) ? HANDLERS[ctx.action] : null;
+    if (!handler) return errEnvelope('E_VALIDATION', 'Okänd åtgärd', { falt: { action: 'Okänd åtgärd' } });
+    const data = handler(req, ctx);
+    return okEnvelope(data, ctx);
+  } catch (err) {
+    const code = errorCode(err);
+    if (!code) throw err;
+    return errEnvelope(code, err instanceof ApiError ? err.message : FEL_TEXT[code], err.details);
+  } finally {
+    setCtx(ctx);
+  }
+}
+
+// ============================================================
+// Script Properties (4.2)
+// ============================================================
+
+function getProp(name) { return PropertiesService.getScriptProperties().getProperty(name) || ''; }
+function setProp(name, value) { PropertiesService.getScriptProperties().setProperty(name, String(value)); }
+function deleteProp(name) { PropertiesService.getScriptProperties().deleteProperty(name); }
+
+// De tre fil-id:na. Saknas något → E_SETUP (M3:s setup fyller dem).
+function getFileIds() {
+  const ids = { config: getProp(PROP.CONFIG_FILE_ID), inbox: getProp(PROP.INBOX_FILE_ID), cache: getProp(PROP.CACHE_FILE_ID) };
+  if (!ids.config || !ids.inbox || !ids.cache) fel('E_SETUP', 'Brevlådans filer är inte anslutna');
+  return ids;
+}
+function mapsDailyCap() { const n = parseInt(getProp(PROP.MAPS_DAILY_CAP), 10); return n > 0 ? n : MAPS_DAILY_CAP_DEFAULT; }
+function mapsElementsToday() { return parseInt(getProp('maps_elements_' + ymdCompact(todayStr())), 10) || 0; }
+// Räknar Maps-element mot dagstaket (5.8). Anropas av Availability.gs vid varje Geocoding-/Distance Matrix-anrop.
+function addMapsElements(n) {
+  const key = 'maps_elements_' + ymdCompact(todayStr());
+  const v = (parseInt(getProp(key), 10) || 0) + (Number(n) || 0);
+  setProp(key, v);
+  return v;
+}
+function mapsCapReached() { return mapsElementsToday() >= mapsDailyCap(); }
+
+// ============================================================
+// Filhantering (4.1, 4.2) – exakt de tre fil-id:na, aldrig sök på namn, aldrig skapa/radera.
+// ============================================================
+
+// Verifierar filen enligt 4.2 (cachad 10 min per id). Returnerar File-objektet när det hämtats, annars null.
+function verifyBrevladaFile(id) {
+  const cache = CacheService.getScriptCache(), key = 'setupok:' + id;
+  if (cache.get(key) === '1') return null;
+  let file = null;
+  try { file = DriveApp.getFileById(id); } catch (e) { file = null; }
+  if (!file) fel('E_SETUP', 'Brevlådefilen hittades inte');
+  if (file.isTrashed()) fel('E_SETUP', 'Filen ligger i papperskorgen');
+  if (!/^telexia-bokning-.*\.json$/.test(file.getName())) fel('E_SETUP', 'Brevlådefilen har fel namn');
+  if (file.getMimeType() !== 'application/json') fel('E_SETUP', 'Brevlådefilen har fel filtyp');
+  // Session.getEffectiveUser().getEmail() kräver scopet userinfo.email (appsscript.json). Saknas det svarar
+  // Apps Script med tom sträng (kastar inte) – då ska felet vara självförklarande, inte "annat konto".
+  const mig = Session.getEffectiveUser().getEmail();
+  if (!mig) fel('E_SETUP', 'Scriptet saknar behörighet userinfo.email – lägg till scopet i appsscript.json och godkänn om');
+  const owner = file.getOwner();
+  if (!owner || owner.getEmail() !== mig) fel('E_SETUP', 'Brevlådefilen ägs av ett annat konto');
+  cache.put(key, '1', SETUP_CACHE_S);
+  return file;
+}
+function brevladaFile(id) { return verifyBrevladaFile(id) || DriveApp.getFileById(id); }
+function clearSetupCache() {
+  const c = CacheService.getScriptCache();
+  [PROP.CONFIG_FILE_ID, PROP.INBOX_FILE_ID, PROP.CACHE_FILE_ID].forEach(p => { const id = getProp(p); if (id) c.remove('setupok:' + id); });
+}
+
+function readJsonFile(id) {
+  const text = brevladaFile(id).getBlob().getDataAsString('UTF-8');
+  let obj = null;
+  try { obj = JSON.parse(text); } catch (e) { obj = null; }
+  if (!isPlainObject(obj)) fel('E_SETUP', 'Brevlådefilen innehåller inte giltig JSON');
+  return obj;
+}
+// Skriver filen med gemensamt huvud (4.1): rev+1, updatedAt, updatedBy 'script'. Anroparen håller låset.
+function writeJsonFile(id, obj) {
+  obj.schemaVersion = 1;
+  obj.rev = (Number(obj.rev) || 0) + 1;
+  obj.updatedAt = nowIso();
+  obj.updatedBy = 'script';
+  brevladaFile(id).setContent(JSON.stringify(obj));
+  return obj;
+}
+
+// --- Config (läses av scriptet, skrivs av appen) – CacheService 10 min ---
+// loadConfig(ctx?, opts?) → { rev, bokare[], motestyper[], formular, installningar, ignorerade[], pipelines[] }
+function loadConfig(ctx, opts) {
+  const cache = CacheService.getScriptCache();
+  let cfg = null;
+  if (!(opts && opts.farsk)) {
+    const raw = cache.get('config');
+    if (raw) { try { cfg = JSON.parse(raw); } catch (e) { cfg = null; } }
+  }
+  if (!cfg) {
+    cfg = normalizeConfig(readJsonFile(getFileIds().config));
+    const json = JSON.stringify(cfg);
+    if (byteLength(json) <= CACHE_MAX_BYTES) cache.put('config', json, CONFIG_CACHE_S);
+  }
+  if (ctx) ctx.configRev = cfg.rev;
+  return cfg;
+}
+function clearConfigCache() { CacheService.getScriptCache().remove('config'); }
+function byteLength(s) { return Utilities.newBlob(s).getBytes().length; }
+
+function normalizeConfig(raw) {
+  const cfg = {
+    schemaVersion: raw.schemaVersion || 1,
+    rev: Number(raw.rev) || 0,
+    updatedAt: typeof raw.updatedAt === 'string' ? raw.updatedAt : '',
+    updatedBy: typeof raw.updatedBy === 'string' ? raw.updatedBy : '',
+    bokare: Array.isArray(raw.bokare) ? raw.bokare.filter(isPlainObject) : [],
+    motestyper: Array.isArray(raw.motestyper) ? raw.motestyper.filter(isPlainObject) : [],
+    formular: fillDefaults(isPlainObject(raw.formular) ? raw.formular : {}, DEFAULT_BOKNINGSFORMULAR),
+    installningar: fillDefaults(isPlainObject(raw.installningar) ? raw.installningar : {}, DEFAULT_BOKNINGSINSTALLNINGAR),
+    ignorerade: Array.isArray(raw.ignorerade) ? raw.ignorerade.filter(isPlainObject) : [],
+    pipelines: Array.isArray(raw.pipelines) ? raw.pipelines.filter(isPlainObject) : []
+  };
+  if (!Array.isArray(cfg.formular.extrafalt)) cfg.formular.extrafalt = [];
+  if (!Array.isArray(cfg.installningar.kalendrar)) cfg.installningar.kalendrar = [];
+  if (!isPlainObject(cfg.installningar.paus)) cfg.installningar.paus = deepClone(DEFAULT_BOKNINGSINSTALLNINGAR.paus);
+  // Fält som aldrig ska finnas här (lämnar aldrig appen) nollas för säkerhets skull.
+  cfg.installningar.adminNyckel = '';
+  cfg.installningar.brevladaFiler = { config: '', inbox: '', cache: '' };
+  return cfg;
+}
+
+// --- Inkorg (skrivs bara av scriptet, alltid under lås) ---
+function readInbox() {
+  const inbox = readJsonFile(getFileIds().inbox);
+  if (!Array.isArray(inbox.bokningar)) inbox.bokningar = [];
+  inbox.bokningar = inbox.bokningar.filter(isPlainObject);
+  return inbox;
+}
+function writeInbox(inbox) { return writeJsonFile(getFileIds().inbox, inbox); }
+function findBokningInInbox(inbox, bokningId) { return inbox.bokningar.find(b => b.bokningId === bokningId) || null; }
+
+// --- Cache-fil (geokod, restid, icsReserv) – används av Availability.gs/Calendar.gs ---
+function readCacheFile() {
+  const c = readJsonFile(getFileIds().cache);
+  if (!isPlainObject(c.geokod)) c.geokod = {};
+  if (!isPlainObject(c.restid)) c.restid = {};
+  if (c.icsReserv === undefined) c.icsReserv = null;
+  return c;
+}
+function writeCacheFile(c) { return writeJsonFile(getFileIds().cache, c); }
+
+// ============================================================
+// Lås (4.8)
+// ============================================================
+
+function withScriptLock(fn, waitMs) {
+  const lock = LockService.getScriptLock();
+  let fick = false;
+  try { fick = lock.tryLock(waitMs || LOCK_WAIT_MS); } catch (e) { fick = false; }
+  if (!fick) fel('E_LOCK');
+  try { return fn(); }
+  finally { try { lock.releaseLock(); } catch (e) { /* redan släppt */ } }
+}
+
+// ============================================================
+// Räknare i CacheService (4.5) – get→put är inte atomiskt, medvetet utan lås.
+// ============================================================
+
+function bumpCounter(key, ttlS) {
+  const cache = CacheService.getScriptCache();
+  const n = (parseInt(cache.get(key), 10) || 0) + 1;
+  cache.put(key, String(n), ttlS);
+  return n;
+}
+function readCounter(key) { return parseInt(CacheService.getScriptCache().get(key), 10) || 0; }
+function minuteWindow() { return Math.floor(Date.now() / 60000); }
+function hourWindow() { return Math.floor(Date.now() / 3600000); }
+function tenMinWindow() { return Math.floor(Date.now() / 600000); }
+
+// ============================================================
+// Autentisering (4.5)
+// ============================================================
+
+function sha256hex(s) {
+  return Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256, s, Utilities.Charset.UTF_8)
+    .map(b => ('0' + (b & 0xff).toString(16)).slice(-2)).join('');
+}
+// Nyckelprefix för räknare per kod: en del av kodHashen (klartextkoden hamnar aldrig i cache-nycklar).
+function kodKey(bokare) { return String(bokare.kodHash || '').slice(0, 16) || ('id_' + String(bokare.id || '')); }
+
+function findBokareByKod(k, config) {
+  if (typeof k !== 'string' || !KOD_RE.test(k)) return null;
+  const h = sha256hex(k);
+  return config.bokare.find(b => typeof b.kodHash === 'string' && b.kodHash === h && b.aktiv === true) || null;
+}
+
+// Okänd/ogiltig/inaktiv kod: samma svar (E_KEY) – utom när okända koder överskridit sin gräns (E_RATE).
+function badKod() {
+  const n = bumpCounter('rl:bad:' + tenMinWindow(), 600);
+  if (n > RL_BAD_PER_10MIN) fel('E_RATE', undefined, { typ: 'anrop' });
+  fel('E_KEY');
+}
+
+// Returnerar { bokare, config }; sätter ctx.bokareId/ctx.kodKey; tillämpar anropsgränser per kod.
+function authBokare(req, ctx) {
+  const k = req.k;
+  if (typeof k !== 'string' || !KOD_RE.test(k)) badKod();
+  const config = loadConfig(ctx);
+  const bokare = findBokareByKod(k, config);
+  if (!bokare) badKod();
+  ctx.bokareId = String(bokare.id || '');
+  ctx.kodKey = kodKey(bokare);
+  if (bumpCounter('rl:' + ctx.kodKey + ':m' + minuteWindow(), 120) > RL_PER_MIN) fel('E_RATE', undefined, { typ: 'anrop' });
+  if (bumpCounter('rl:' + ctx.kodKey + ':h' + hourWindow(), TTL_H_S) > RL_PER_H) fel('E_RATE', undefined, { typ: 'anrop' });
+  return { bokare: bokare, config: config };
+}
+
+// Konstanttidsjämförelse: HMAC av båda värdena med samma nyckel, därefter full byte-jämförelse utan tidig avbrytning.
+function constantTimeEqual(a, b) {
+  const salt = 'pipeline-bokning-adminnyckel';
+  const ha = Utilities.computeHmacSha256Signature(String(a), salt, Utilities.Charset.UTF_8);
+  const hb = Utilities.computeHmacSha256Signature(String(b), salt, Utilities.Charset.UTF_8);
+  let diff = ha.length ^ hb.length;
+  for (let i = 0; i < ha.length && i < hb.length; i++) diff |= (ha[i] ^ hb[i]);
+  return diff === 0;
+}
+function authAdmin(req, ctx) {
+  if (bumpCounter('rl:admin:m' + minuteWindow(), 120) > RL_ADMIN_PER_MIN) fel('E_RATE', undefined, { typ: 'anrop' });
+  const expected = getProp(PROP.ADMIN_KEY);
+  if (!expected) fel('E_SETUP', 'Adminnyckel saknas i Script Properties');
+  const given = typeof req.adminKey === 'string' ? req.adminKey : '';
+  if (!given || given.length > 256 || !constantTimeEqual(given, expected)) fel('E_ADMIN');
+  ctx.bokareId = 'admin';
+}
+
+// ============================================================
+// Handlingsgränser (4.5)
+// ============================================================
+
+// Bokningar: kontroll före arbetet (utan att räkna upp), uppräkning efter lyckad bokning.
+function checkBookLimits(ctx) {
+  const idag = todayStr();
+  const perH = readCounter('book:h:' + ctx.kodKey + ':' + hourWindow());
+  const perD = readCounter('book:d:' + ctx.kodKey + ':' + idag);
+  const global = parseInt(getProp('book_count_' + ymdCompact(idag)), 10) || 0;
+  if (perH >= MAX_BOOK_PER_KOD_H || perD >= MAX_BOOK_PER_KOD_D || global >= MAX_BOOK_GLOBAL_D)
+    fel('E_RATE', 'För många bokningar – kontakta CJ', { typ: 'bokningar' });
+}
+function countBooking(ctx) {
+  const idag = todayStr();
+  bumpCounter('book:h:' + ctx.kodKey + ':' + hourWindow(), TTL_H_S);
+  bumpCounter('book:d:' + ctx.kodKey + ':' + idag, TTL_D_S);
+  const key = 'book_count_' + ymdCompact(idag);
+  setProp(key, (parseInt(getProp(key), 10) || 0) + 1);
+}
+
+// Adressnyckel för gränsräkning: gemener, utan skiljetecken, ett mellanslag, utan "sverige" (samma princip som cache-filen, 4.1).
+function limitAdressNyckel(adress) {
+  return String(adress || '').toLowerCase().replace(/[^a-z0-9åäö]+/g, ' ').replace(/\bsverige\b/g, '').replace(/\s+/g, ' ').trim();
+}
+// Unika adresser per kod och dag (MAX_ADRESSER_PER_KOD_D) och nya geokodningar per kod och timme (MAX_GEOCODE_PER_KOD_H).
+// En adress som koden redan använt i dag räknas inte igen. Timräknaren KONTROLLERAS här men stegas först i
+// countGeocodeCall() – bara när Geocoding-API:t faktiskt anropades (cache-träffar räknas inte, 4.5/5.8).
+function checkAdressLimits(ctx, adress) {
+  const nyckel = limitAdressNyckel(adress);
+  if (!nyckel) return;
+  const cache = CacheService.getScriptCache();
+  const dagKey = 'geo:count:' + ctx.kodKey + ':' + todayStr();
+  let lista = [];
+  try { lista = JSON.parse(cache.get(dagKey) || '[]'); } catch (e) { lista = []; }
+  if (!Array.isArray(lista)) lista = [];
+  const h = sha256hex(nyckel).slice(0, 16);
+  if (lista.indexOf(h) >= 0) return;
+  if (lista.length >= MAX_ADRESSER_PER_KOD_D) fel('E_RATE', 'För många adresser – kontakta CJ', { typ: 'adresser' });
+  if (readCounter(geocodeTimKey(ctx)) >= MAX_GEOCODE_PER_KOD_H) fel('E_RATE', 'För många adressuppslag – vänta en stund', { typ: 'geocode' });
+  lista.push(h);
+  cache.put(dagKey, JSON.stringify(lista), TTL_D_S);
+}
+function geocodeTimKey(ctx) { return 'geo:h:' + ctx.kodKey + ':' + hourWindow(); }
+// Stegas efter geokodning när geocodeAddress rapporterar nyttAnrop:true (ett riktigt Geocoding-API-anrop).
+function countGeocodeCall(ctx) { if (ctx && ctx.kodKey) bumpCounter(geocodeTimKey(ctx), TTL_H_S); }
+
+// ============================================================
+// Reservationer (4.8, 5.11) – lever bara i CacheService.
+//   res:<id>          → JSON { id, bokareId, motestypId, start, slut, plats, cooldownMin, expires, expiresMs } (TTL 300 s)
+//   res:index         → JSON-lista med samma poster (utgångna rensas vid varje läsning)
+//   res:owner:<kod>   → aktuellt reservations-id för koden (nytt reserve släpper det gamla)
+// Calendar.gs läser aktiva reservationer via listActiveReservations() (eller res:index direkt) i buildBusyList.
+// ============================================================
+
+function resIndexRead() {
+  const cache = CacheService.getScriptCache();
+  let lista = [];
+  try { lista = JSON.parse(cache.get('res:index') || '[]'); } catch (e) { lista = []; }
+  if (!Array.isArray(lista)) lista = [];
+  const nu = Date.now();
+  return lista.filter(r => isPlainObject(r) && typeof r.id === 'string' && Number(r.expiresMs) > nu);
+}
+function resIndexWrite(lista) { CacheService.getScriptCache().put('res:index', JSON.stringify(lista), TTL_D_S); }
+function listActiveReservations() { return resIndexRead(); }
+
+function getReservation(id) {
+  if (typeof id !== 'string' || !/^rs_[A-Za-z0-9]{8,40}$/.test(id)) return null;
+  const raw = CacheService.getScriptCache().get('res:' + id);
+  if (!raw) return null;
+  let r = null;
+  try { r = JSON.parse(raw); } catch (e) { r = null; }
+  return isPlainObject(r) && Number(r.expiresMs) > Date.now() ? r : null;
+}
+function ownReservationId(ctx) { return CacheService.getScriptCache().get('res:owner:' + ctx.kodKey) || ''; }
+
+function createReservation(ctx, bokare, typ, startIso, slutIso, plats) {
+  if (MAX_RES_PER_KOD <= 1) releaseOwnReservation(ctx);
+  const cache = CacheService.getScriptCache();
+  const id = 'rs_' + Utilities.getUuid().replace(/-/g, '').slice(0, 20);
+  const expiresMs = Date.now() + RES_TTL_S * 1000;
+  const r = {
+    id: id, bokareId: String(bokare.id || ''), motestypId: String(typ.id || ''),
+    start: startIso, slut: slutIso, plats: plats || null, cooldownMin: Number(typ.cooldownMin) || 0,
+    expires: isoWithOffset(new Date(expiresMs)), expiresMs: expiresMs
+  };
+  cache.put('res:' + id, JSON.stringify(r), RES_TTL_S);
+  const idx = resIndexRead(); idx.push(r); resIndexWrite(idx);
+  cache.put('res:owner:' + ctx.kodKey, id, RES_TTL_S);
+  return r;
+}
+function releaseReservation(id) {
+  const cache = CacheService.getScriptCache();
+  cache.remove('res:' + id);
+  resIndexWrite(resIndexRead().filter(r => r.id !== id));
+}
+function releaseOwnReservation(ctx) {
+  const cache = CacheService.getScriptCache();
+  const id = ownReservationId(ctx);
+  if (id) releaseReservation(id);
+  cache.remove('res:owner:' + ctx.kodKey);
+}
+
+// ============================================================
+// Gemensam validering och uppslag
+// ============================================================
+
+function str(v) { return typeof v === 'string' ? v : ''; }
+// Tar bort kontrolltecken utom \n och \t (CRLF → LF), trimmar.
+function cleanText(v) { return String(v).replace(/\r\n?/g, '\n').replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, '').trim(); }
+
+// Strängfält i enkla endpoints: kastar E_VALIDATION direkt.
+function strField(v, namn, max, obligatorisk) {
+  if (v === undefined || v === null) v = '';
+  if (typeof v !== 'string') valideringsfel({ [namn]: 'Ogiltigt värde' });
+  const s = cleanText(v);
+  if (s.length > max) valideringsfel({ [namn]: 'För långt värde' });
+  if (obligatorisk && !s) valideringsfel({ [namn]: 'Obligatoriskt' });
+  return s;
+}
+function datumField(v, namn) {
+  if (typeof v !== 'string' || !DATUM_RE.test(v) || isNaN(new Date(v + 'T12:00:00Z').getTime())) valideringsfel({ [namn]: 'Ogiltigt datum' });
+  return v;
+}
+
+function pausInfo(inst) {
+  const p = isPlainObject(inst.paus) ? inst.paus : {};
+  return { aktiv: p.aktiv === true, tom: str(p.tom), meddelande: str(p.meddelande) };
+}
+// reserve/book med start ≤ paus.tom → E_PAUSED (4.3). Aktiv paus utan slutdatum tolkas som tills vidare.
+function pausCheck(inst, datum) {
+  const p = pausInfo(inst);
+  if (!p.aktiv) return;
+  if (!p.tom || datum <= p.tom) fel('E_PAUSED', undefined, { tom: p.tom, meddelande: p.meddelande });
+}
+
+// Aktiva mötestyper som bokaren får boka: typer i bokarens pipeline + globala, filtrerade på tillatnaMotestypIds.
+function tillatnaMotestyper(config, bokare) {
+  const tillatna = Array.isArray(bokare.tillatnaMotestypIds) ? bokare.tillatnaMotestypIds : [];
+  return config.motestyper.filter(t =>
+    t.aktiv !== false &&
+    (t.global === true || (t.pipelineId && t.pipelineId === bokare.pipelineId)) &&
+    (!tillatna.length || tillatna.indexOf(t.id) >= 0));
+}
+function motestypExport(t) {
+  return { id: str(t.id), titel: str(t.titel), langdMin: Number(t.langdMin) || 0, cooldownMin: Number(t.cooldownMin) || 0,
+           restid: t.restid === true, farg: str(t.farg), bekraftelseMall: str(t.bekraftelseMall) };
+}
+// Slår upp mötestypen för ett anrop. undantaPost (ombokning, 4.4/5.3) tillåter bokningens egen typ även om den är inaktiv
+// eller inte längre i tillatnaMotestypIds. Returnerar en normaliserad kopia.
+function resolveMotestyp(config, bokare, motestypId, undantaPost) {
+  if (typeof motestypId !== 'string' || !motestypId || motestypId.length > 64) valideringsfel({ motestypId: 'Okänd mötestyp' });
+  let t = null;
+  if (undantaPost && undantaPost.motestypId === motestypId) t = config.motestyper.find(x => x.id === motestypId) || null;
+  else t = tillatnaMotestyper(config, bokare).find(x => x.id === motestypId) || null;
+  if (!t) valideringsfel({ motestypId: 'Okänd mötestyp' });
+  const typ = Object.assign({}, t, motestypExport(t));
+  if (!(typ.langdMin > 0)) valideringsfel({ motestypId: 'Mötestypen är felkonfigurerad' });
+  return typ;
+}
+
+// undantaBokningId honoreras bara för CJ-bokare eller bokningens egen bokare; annars ignoreras parametern tyst (4.4).
+function honoredUndanta(v, bokare) {
+  if (typeof v !== 'string' || !BOKNING_ID_RE.test(v)) return null;
+  const post = findBokningInInbox(readInbox(), v);
+  if (!post) return null;
+  if (bokare.arCj === true || post.bokareId === bokare.id) return { bokningId: v, post: post };
+  return null;
+}
+
+// Starttid från klienten: ISO med offset → { datum, tid, iso, ms } i Stockholm-tid. Gränserna härleds ur SAMMA källa
+// som availability (mapCfg/isWorkingDay/firstBookableDay/sistaDagFor i Availability.gs): raster, öppen dag (arbetstid,
+// röd dag), framförhållning per mötestyp (4.4 steg 2, 5.4) och horisont – så att en lucka availability visar som
+// 'ledig' aldrig avvisas här med E_VALIDATION.
+function parseStartField(v, inst, typ) {
+  if (typeof v !== 'string' || !ISO_START_RE.test(v)) valideringsfel({ start: 'Ogiltig starttid' });
+  const d = new Date(v);
+  if (isNaN(d.getTime()) || d.getUTCSeconds() !== 0 || d.getUTCMilliseconds() !== 0) valideringsfel({ start: 'Ogiltig starttid' });
+  const p = tzParts(d);
+  const cfg = mapCfg(inst);
+  const at = cfg.arbetstider[weekdayOf(p.datum)];
+  if (!at || !isWorkingDay(p.datum, cfg)) valideringsfel({ start: 'Dagen är stängd' });
+  const m = tidToMin(p.tid), s = tidToMin(at.start);
+  if (isNaN(m) || isNaN(s) || m < s || (m - s) % cfg.rasterMin !== 0) valideringsfel({ start: 'Tiden ligger inte på ett giltigt klockslag' });
+  const idag = todayStr();
+  if (p.datum < firstBookableDay(cfg, typ || { restid: true }, idag)) valideringsfel({ start: 'Tiden är för tidig' });
+  if (p.datum > sistaDagFor(cfg, idag)) valideringsfel({ start: 'Utanför bokningshorisonten' });
+  return { datum: p.datum, tid: p.tid, iso: toIsoWithOffset(p.datum, p.tid), ms: d.getTime() };
+}
+
+// Egen kalenderskrivning kräver kalendern med lage 'fullt' (4.7).
+function bokningarKalenderId(inst) {
+  const k = (Array.isArray(inst.kalendrar) ? inst.kalendrar : []).find(x => isPlainObject(x) && x.lage === 'fullt' && typeof x.id === 'string' && x.id);
+  if (!k) fel('E_CALENDAR', 'Ingen kalender för bokningar är vald i Inställningar');
+  return k.id;
+}
+
+// Geokodning via Availability.gs (cachekedja + Maps). Fel → 'okand' (schablon), aldrig avbruten bokning.
+// ctx (bokare) → timräknaren MAX_GEOCODE_PER_KOD_H stegas bara när ett riktigt API-anrop gjordes (nyttAnrop).
+// Anropas före låset i reserve/book och före computeAvailability i availability: värmer CacheService så att
+// geocodeAddress inuti beräkningen/låset blir cache-träff.
+function geoForBooking(adress, ctx) {
+  const tom = { lat: null, lng: null, formaterad: '', status: 'okand' };
+  if (!adress) return Object.assign(tom, { status: 'saknas' });
+  try {
+    const g = geocodeAddress(adress);
+    if (g && g.nyttAnrop === true) countGeocodeCall(ctx);
+    if (g && g.status === 'ok' && typeof g.lat === 'number' && typeof g.lng === 'number')
+      return { lat: g.lat, lng: g.lng, formaterad: str(g.formaterad), status: 'ok' };
+    return Object.assign(tom, { formaterad: g ? str(g.formaterad) : '' });
+  } catch (e) {
+    if (errorCode(e) === 'E_RATE') throw e;
+    return tom;
+  }
+}
+
+// Räknar om en enskild dag (färsk kalenderläsning i book/reserve) och returnerar slotten för klockslaget, eller null.
+function findSlot(bokare, config, typ, adress, st, reservationId, undantaBokningId, farsk) {
+  const data = computeAvailability({
+    bokare: bokare, config: config, typ: typ, motestypId: typ.id,
+    adress: typ.restid ? (adress || '') : '',
+    from: st.datum, to: st.datum,
+    reservationId: reservationId || '', undantaBokningId: undantaBokningId || '',
+    farsk: !!farsk, intern: true
+  });
+  const dag = (data && Array.isArray(data.dagar) ? data.dagar : []).find(d => d.datum === st.datum);
+  if (!dag || dag.status !== 'oppen') return null;
+  return (Array.isArray(dag.slots) ? dag.slots : []).find(s => s.tid === st.tid) || null;
+}
+function blockLen(block) {
+  if (!Array.isArray(block) || block.length !== 2) return 0;
+  const a = tidToMin(block[0]), b = tidToMin(block[1]);
+  return isNaN(a) || isNaN(b) ? 0 : Math.max(0, b - a);
+}
+// restid-objektet på inkorgsposten (4.1): foreMin/efterMin ur slottens interna minuter (restidMin) eller blocklängderna.
+// status ∈ 'ok' | 'schablon' | 'okand' (4.1/5.8) – appen flaggar allt utom 'ok' som restidsproblem (6.2, 8.4), så en
+// mötestyp utan restid får 'ok' med 0/0 (aldrig ett eget värde).
+function restidFromSlot(slot, typ, geo) {
+  if (!typ.restid) return { foreMin: 0, efterMin: 0, status: 'ok' };
+  const rm = isPlainObject(slot.restidMin) ? slot.restidMin : null;
+  const fore = rm && typeof rm.fore === 'number' ? rm.fore : blockLen(slot.restid && slot.restid.inBlock);
+  const efter = rm && typeof rm.efter === 'number' ? rm.efter : blockLen(slot.restid && slot.restid.utBlock);
+  let status = 'ok';
+  if (geo.status !== 'ok') status = 'okand';
+  else if (slot.restidOkand === true || (rm && rm.kalla === 'schablon')) status = 'schablon';
+  return { foreMin: fore, efterMin: efter, status: status };
+}
+
+// ============================================================
+// Endpoint: ping (oautentiserad, 4.4)
+// ============================================================
+
+function handlePing(req, ctx) {
+  if (bumpCounter('rl:ping:m' + minuteWindow(), 120) > RL_PING_PER_MIN) fel('E_RATE', undefined, { typ: 'anrop' });
+  let konfigurerad = false, config = null;
+  try {
+    getFileIds();
+    if (getProp(PROP.ADMIN_KEY)) { config = loadConfig(ctx); konfigurerad = true; }
+  } catch (e) {
+    if (errorCode(e) !== 'E_SETUP') throw e;
+    konfigurerad = false;
+  }
+  return {
+    scriptVersion: SCRIPT_VERSION,
+    konfigurerad: konfigurerad,
+    mapsNyckel: !!getProp(PROP.MAPS_API_KEY),
+    mapsForbrukningIdag: mapsElementsToday(),
+    mapsVarning: CacheService.getScriptCache().get('maps:varning') || '',
+    icsStatus: icsStatusForPing(config)
+  };
+}
+// ICS-status: i första hand Calendar.gs getIcsStatus() (CacheService 'ics:meta'); reserv = cache-filens icsReserv (senast lyckade läsning).
+function icsStatusForPing(config) {
+  const st = { ok: false, hamtadTs: '', antal: 0, medPlats: 0, preliminara: 0 };
+  if (!config) return st;
+  if (!config.installningar.outlookIcsUrl) { st.ok = true; return st; }
+  try {
+    if (typeof getIcsStatus === 'function') {
+      const g = getIcsStatus();
+      if (isPlainObject(g)) return { ok: g.ok === true, hamtadTs: str(g.hamtadTs), antal: Number(g.antal) || 0, medPlats: Number(g.medPlats) || 0, preliminara: Number(g.preliminara) || 0 };
+    }
+    const r = readCacheFile().icsReserv;
+    st.ok = true;
+    if (isPlainObject(r) && Array.isArray(r.handelser)) {
+      st.hamtadTs = str(r.hamtadTs);
+      st.antal = r.handelser.length;
+      st.medPlats = r.handelser.filter(h => h && h.plats).length;
+      st.preliminara = r.handelser.filter(h => h && h.preliminar === true).length;
+    }
+  } catch (e) { st.ok = false; }
+  return st;
+}
+
+// ============================================================
+// Endpoint: hello (4.4)
+// ============================================================
+
+function handleHello(req, ctx) {
+  const a = authBokare(req, ctx), bokare = a.bokare, config = a.config, inst = config.installningar;
+  const idag = todayStr();
+  const pipeline = config.pipelines.find(p => p.id === bokare.pipelineId) || {};
+  return {
+    bokare: { id: str(bokare.id), arCj: bokare.arCj === true, namn: str(bokare.namn), organisation: str(bokare.organisation),
+              pipelineNamn: str(pipeline.name), pipelineFarg: str(pipeline.color) },
+    motestyper: tillatnaMotestyper(config, bokare).map(motestypExport),
+    formular: config.formular,
+    paus: pausInfo(inst),
+    horisont: { from: idag, to: horisontTomDatum(inst) },
+    integritetstext: str(inst.integritetstext),
+    kontaktTextBokare: str(inst.kontaktTextBokare),
+    notisEpost: str(inst.notisEpost),
+    serverTime: nowIso(),
+    egna: egnaBokningar(bokare, idag)
+  };
+}
+// Bokarens egna bokningar med slut ≥ idag − 7 dagar, sorterade på start. Kundnamn får visas för ägaren (beslut 16).
+function egnaBokningar(bokare, idag) {
+  const grans = addDays(idag, -7);
+  return readInbox().bokningar
+    .filter(b => b.bokareId === bokare.id && typeof b.slut === 'string' && fromIso(b.slut).datum >= grans)
+    .sort((x, y) => String(x.start).localeCompare(String(y.start)))
+    .map(b => ({
+      bokningId: str(b.bokningId), start: str(b.start), slut: str(b.slut),
+      kundNamn: str(b.kund && b.kund.namn), kontaktNamn: str(b.kontakt && b.kontakt.namn), adress: str(b.adress),
+      motestypId: str(b.motestypId), status: egenStatus(b)
+    }));
+}
+function egenStatus(b) {
+  if (b.status === 'avbokad' || b.status === 'avvisad') return b.status;
+  return (Array.isArray(b.historik) ? b.historik : []).some(h => h && h.typ === 'ombokad') ? 'ombokad' : 'bokad';
+}
+
+// ============================================================
+// Endpoint: availability (4.4, 5.3) – beräkningen sker i Availability.gs
+// ============================================================
+
+function handleAvailability(req, ctx) {
+  const a = authBokare(req, ctx), bokare = a.bokare, config = a.config, inst = config.installningar;
+  const from = datumField(req.from, 'from'), to = datumField(req.to, 'to');
+  if (to < from) valideringsfel({ to: 'Slutdatum ligger före startdatum' });
+  if (daysBetween(from, to) > 14) valideringsfel({ to: 'Högst 14 dagar per förfrågan' });
+  if (from > horisontTomDatum(inst)) valideringsfel({ from: 'Utanför bokningshorisonten' });
+  const adress = strField(req.adress, 'adress', MAXLEN.adress, false);
+  const undanta = honoredUndanta(req.undantaBokningId, bokare);
+  const typ = resolveMotestyp(config, bokare, req.motestypId, undanta ? undanta.post : null);
+  const egen = getReservation(req.reservationId);
+  const reservationId = egen && egen.bokareId === bokare.id ? egen.id : '';
+  if (typ.restid && adress) {
+    checkAdressLimits(ctx, adress);
+    geoForBooking(adress, ctx);   // geokodar (räknar ev. API-anrop mot timgränsen) → cache-träff i computeAvailability
+  }
+  return computeAvailability({
+    bokare: bokare, config: config, typ: typ, motestypId: typ.id,
+    adress: typ.restid ? adress : '',
+    from: from, to: to,
+    reservationId: reservationId, undantaBokningId: undanta ? undanta.bokningId : '',
+    farsk: false, intern: false
+  });
+}
+
+// ============================================================
+// Endpoint: reserve / release (4.4, 4.8, 5.11)
+// ============================================================
+
+function handleReserve(req, ctx) {
+  const a = authBokare(req, ctx), bokare = a.bokare, config = a.config, inst = config.installningar;
+  const typ = resolveMotestyp(config, bokare, req.motestypId, null);
+  const st = parseStartField(req.start, inst, typ);
+  pausCheck(inst, st.datum);
+  const adress = typ.restid ? strField(req.adress, 'adress', MAXLEN.adress, false) : '';
+  let plats = null;
+  if (typ.restid && adress) {
+    checkAdressLimits(ctx, adress);
+    const g = geoForBooking(adress, ctx);
+    plats = { text: adress, lat: g.lat, lng: g.lng, geokodad: g.status === 'ok' };
+  }
+  const slutIso = toIsoWithOffset(st.datum, minToTid(tidToMin(st.tid) + typ.langdMin));
+  const egenId = ownReservationId(ctx);
+  // Värm cacherna före låset (4.8): ICS-hämtning (UrlFetchApp), geokodning av ankare och Distance Matrix sker här,
+  // så att bara Calendar.Events.list (färsk) + CacheService återstår inuti låset. Resultatet används inte – luckan
+  // avgörs alltid av den färska läsningen under låset.
+  warmSlotCaches(bokare, config, typ, adress, st, egenId);
+  return withScriptLock(() => {
+    const slot = findSlot(bokare, config, typ, adress, st, egenId, '', true);
+    if (!slot || slot.status !== 'ledig') fel('E_SLOT_TAKEN');
+    const r = createReservation(ctx, bokare, typ, st.iso, slutIso, plats);
+    return { reservationId: r.id, expiresAt: r.expires };
+  });
+}
+// Kör dagsberäkningen utan färsk kalenderläsning (cachat busy:<datum>/ics:busy/geo/restid). Nätverksfel här
+// bryter inte anropet – den färska beräkningen under låset avgör (E_CALENDAR först där).
+function warmSlotCaches(bokare, config, typ, adress, st, reservationId) {
+  try { findSlot(bokare, config, typ, adress, st, reservationId, '', false); }
+  catch (e) { if (errorCode(e) === 'E_RATE') throw e; }
+}
+
+function handleRelease(req, ctx) {
+  const a = authBokare(req, ctx), bokare = a.bokare;
+  const id = typeof req.reservationId === 'string' ? req.reservationId : '';
+  withScriptLock(() => {
+    const r = getReservation(id);
+    if (r && r.bokareId === bokare.id) releaseOwnReservation(ctx);
+  });
+  return {};
+}
+
+// ============================================================
+// Endpoint: book (4.4 – ordning 1–7)
+// ============================================================
+
+// Hård indatavalidering före låset. Samlar alla fältfel och kastar E_VALIDATION med details.falt (statiska texter).
+function validateBookInput(req, config, bokare, typ) {
+  const falt = {};
+  const karna = config.formular.karna || {};
+  const kravs = namn => isPlainObject(karna[namn]) && karna[namn].synlig !== false && karna[namn].obligatorisk === true;
+  const text = (v, namn, max, obligatorisk, min) => {
+    if (v === undefined || v === null) v = '';
+    if (typeof v !== 'string') { falt[namn] = 'Ogiltigt värde'; return ''; }
+    const s = cleanText(v);
+    if (s.length > max) { falt[namn] = 'För långt värde'; return s.slice(0, max); }
+    if (obligatorisk && !s) { falt[namn] = 'Obligatoriskt'; return s; }
+    if (s && min && s.length < min) { falt[namn] = 'För kort värde'; return s; }
+    return s;
+  };
+  const kund = isPlainObject(req.kund) ? req.kund : {};
+  const kontakt = isPlainObject(req.kontakt) ? req.kontakt : {};
+
+  const kundnamn = text(kund.namn, 'kundnamn', MAXLEN.kundnamn, true, 2);
+  const orgnrRaw = text(kund.orgnr, 'orgnr', MAXLEN.orgnr, bokare.arCj !== true);
+  let orgnr = '';
+  if (!falt.orgnr && orgnrRaw) { orgnr = normalizeOrgnr(orgnrRaw); if (!orgnr) falt.orgnr = 'Ogiltigt organisationsnummer'; }
+
+  // Adress tvingas vid restid, e-post utan restid – oavsett formulärets inställning (3.5, A24).
+  const adress = text(req.adress, 'adress', MAXLEN.adress, typ.restid === true || kravs('adress'));
+  const kontaktNamn = text(kontakt.namn, 'kontaktperson', MAXLEN.kontaktperson, kravs('kontaktperson'));
+  const telefon = text(kontakt.telefon, 'telefon', MAXLEN.telefon, kravs('telefon'));
+  if (!falt.telefon && kravs('telefon') && normalizePhone(telefon).length < 8) falt.telefon = 'Ange ett giltigt telefonnummer';
+  const epostRaw = text(kontakt.epost, 'epost', MAXLEN.epost, typ.restid !== true || kravs('epost'));
+  const epost = normalizeEmail(epostRaw);
+  if (!falt.epost && epost && !EPOST_RE.test(epost)) falt.epost = 'Ange en giltig e-postadress';
+  const notering = text(req.notering, 'notering', MAXLEN.notering, kravs('notering'));
+
+  // Extrafält: objekt av strängar, bara kända (synliga) id:n, typregler, obligatoriskhet.
+  const extrafalt = {};
+  const defs = config.formular.extrafalt.filter(d => isPlainObject(d) && typeof d.id === 'string' && d.synlig !== false);
+  const inExtra = req.extrafalt === undefined || req.extrafalt === null ? {} : req.extrafalt;
+  if (!isPlainObject(inExtra)) falt.extrafalt = 'Ogiltigt värde';
+  else {
+    Object.keys(inExtra).forEach(id => {
+      if (id === '_kundId') {
+        if (bokare.arCj === true) {
+          const v = inExtra[id];
+          if (typeof v === 'string' && KUND_ID_RE.test(v)) extrafalt._kundId = v;
+          else if (v !== '' && v !== null && v !== undefined) falt._kundId = 'Ogiltigt värde';
+        }
+        return;   // ignoreras tyst för bokare utan arCj
+      }
+      const def = defs.find(d => d.id === id);
+      if (!def) { falt[id] = 'Okänt fält'; return; }
+      const v = inExtra[id];
+      if (typeof v !== 'string') { falt[id] = 'Ogiltigt värde'; return; }
+      const s = cleanText(v);
+      if (def.typ === 'fritext') { if (s.length > MAXLEN.fritext) { falt[id] = 'För långt värde'; return; } }
+      else if (def.typ === 'dropdown') { if (s && (!Array.isArray(def.alternativ) || def.alternativ.indexOf(s) < 0)) { falt[id] = 'Ogiltigt val'; return; } }
+      else if (def.typ === 'janej') { if (s && s !== 'ja' && s !== 'nej') { falt[id] = 'Ogiltigt val'; return; } }
+      else { if (s.length > MAXLEN.kort) { falt[id] = 'För långt värde'; return; } }
+      extrafalt[id] = s;
+    });
+    defs.forEach(def => { if (def.obligatorisk === true && !extrafalt[def.id] && !falt[def.id]) falt[def.id] = 'Obligatoriskt'; });
+  }
+
+  const clientBokningId = typeof req.clientBokningId === 'string' && CLIENT_BOKNING_ID_RE.test(req.clientBokningId) ? req.clientBokningId : '';
+  if (!clientBokningId) falt.clientBokningId = 'Ogiltig förfrågan – ladda om sidan';
+
+  if (Object.keys(falt).length) valideringsfel(falt);
+  return {
+    kund: { namn: kundnamn, orgnr: orgnr },
+    kontakt: { namn: kontaktNamn, telefon: telefon, epost: epost },
+    adress: adress, notering: notering, extrafalt: extrafalt, clientBokningId: clientBokningId
+  };
+}
+
+function handleBook(req, ctx) {
+  // 1. Kod → E_KEY (anropsgränser i authBokare).
+  const a = authBokare(req, ctx), bokare = a.bokare, config = a.config, inst = config.installningar;
+  const typ = resolveMotestyp(config, bokare, req.motestypId, null);
+  const st = parseStartField(req.start, inst, typ);
+  // 2. Hård indatavalidering före låset.
+  const input = validateBookInput(req, config, bokare, typ);
+  const reservationId = typeof req.reservationId === 'string' ? req.reservationId.slice(0, 64) : '';
+  if (typ.restid && input.adress) checkAdressLimits(ctx, input.adress);
+  const slutIso = toIsoWithOffset(st.datum, minToTid(tidToMin(st.tid) + typ.langdMin));
+  // Geokodning och dagsberäkning (utan färsk kalenderläsning) FÖRE låset värmer cacherna: geocodeAddress, ICS,
+  // ankare och Distance Matrix blir cache-träffar inuti låset, som då bara gör Calendar.Events.list + Drive.
+  // updateCacheFile (Availability.gs) tar INGET lås – nästla aldrig withScriptLock.
+  const geo = typ.restid ? geoForBooking(input.adress, ctx) : { lat: null, lng: null, formaterad: '', status: 'saknas' };
+  const egenFore = getReservation(reservationId);
+  warmSlotCaches(bokare, config, typ, input.adress, st, egenFore && egenFore.bokareId === bokare.id ? egenFore.id : ownReservationId(ctx));
+
+  let bokning = null, ny = false;
+  withScriptLock(() => {
+    // 3. Idempotens: samma clientBokningId + bokare → befintlig bokning som ok:true – FÖRE handlingsgränser, paus och
+    //    luckkontroll, så att sajtens retry efter E_ABORT/E_NETWORK aldrig får E_RATE/E_PAUSED för ett möte som finns.
+    const inbox = readInbox();
+    const befintlig = inbox.bokningar.find(b => b.clientBokningId === input.clientBokningId && b.bokareId === bokare.id);
+    if (befintlig) { bokning = befintlig; return; }
+
+    // 3b. Handlingsgränser → E_RATE; paus → E_PAUSED (bara CacheService/Properties/config – ingen nätverks-I/O).
+    checkBookLimits(ctx);
+    pausCheck(inst, st.datum);
+
+    // 4. Räkna om dagen med färsk kalenderläsning: utan egen reservation, med andras (5.11). Egen reservation =
+    //    den som skickades i reservationId om den är aktiv och bokarens, annars bokarens aktuella (res:owner) –
+    //    så att ett saknat/utgånget id efter en misslyckad tyst omreservation inte gör bokarens egen lucka till hinder.
+    const egen = getReservation(reservationId);
+    const egenAktiv = egen && egen.bokareId === bokare.id ? egen : null;
+    const egenId = egenAktiv ? egenAktiv.id : ownReservationId(ctx);
+    const slot = findSlot(bokare, config, typ, input.adress, st, egenId, '', true);
+    if (!slot || slot.status !== 'ledig') fel(reservationId && !egenAktiv ? 'E_RESERVATION_EXPIRED' : 'E_SLOT_TAKEN');
+
+    const ts = nowIso();
+    bokning = {
+      bokningId: Utilities.getUuid(), clientBokningId: input.clientBokningId, rev: 1, status: 'ny',
+      bokareId: str(bokare.id), pipelineId: str(bokare.pipelineId), motestypId: typ.id,
+      start: st.iso, slut: slutIso,
+      adress: input.adress, geo: geo, restid: restidFromSlot(slot, typ, geo),
+      kund: input.kund, kontakt: input.kontakt, notering: input.notering, extrafalt: input.extrafalt,
+      kalenderEventId: '', skapad: ts,
+      importeradAt: null, importeradAv: null, andradAt: null, plan: null,
+      historik: [{ ts: ts, typ: 'bokad', av: str(bokare.namn) }]
+    };
+
+    // 5. Kalenderhändelse (E_CALENDAR – inget skrivet).
+    const calId = bokningarKalenderId(inst);
+    const ev = createBookingEvent(config, bokare, typ, bokning, calId);
+    bokning.kalenderEventId = str(ev && ev.id);
+
+    // 6. Inkorgen – misslyckas den tas händelsen bort igen (best effort) → E_INTERNAL.
+    try {
+      inbox.bokningar.push(bokning);
+      writeInbox(inbox);
+    } catch (e) {
+      try { Calendar.Events.remove(calId, bokning.kalenderEventId, { sendUpdates: 'all' }); } catch (e2) { /* best effort */ }
+      fel('E_INTERNAL', 'Bokningen kunde inte sparas – inget har bokats');
+    }
+    releaseOwnReservation(ctx);
+    countBooking(ctx);
+    ny = true;
+  });
+
+  // 7. Utanför låset: notismejl till CJ. Bekräftelsetexten renderas på bokningssidan.
+  if (ny) notifyCj(config, bokare, typ, bokning);
+  return { bokningId: bokning.bokningId, start: bokning.start, slut: bokning.slut, kalenderEventId: bokning.kalenderEventId, restid: bokning.restid, bokning: bokning };
+}
+
+// ============================================================
+// Kalenderskrivning (4.7) – Calendar advanced service v3
+// ============================================================
+
+function createBookingEvent(config, bokare, typ, bokning, calId) {
+  const inst = config.installningar;
+  const kalenderId = calId || bokningarKalenderId(inst);
+  const s = v => String(v || '').replace(/[<>]/g, ' ');   // aldrig HTML i kalender/Outlook
+  const kontakt = isPlainObject(bokning.kontakt) ? bokning.kontakt : {};
+  const kund = isPlainObject(bokning.kund) ? bokning.kund : {};
+  const resurs = {
+    summary: s(typ.titel) + ': ' + s(kund.namn),
+    location: s(bokning.adress),
+    description: 'Bokad av: ' + s(bokare.namn) + '\nBokningId: ' + bokning.bokningId +
+                 (inst.kontaktuppgifterIKalender === true
+                   ? '\nKontakt: ' + s(kontakt.namn) + ', ' + s(kontakt.telefon) + ', ' + s(kontakt.epost)
+                   : '\nKontakt: ' + s(kontakt.namn)) +
+                 (bokning.notering ? '\nNotering: ' + s(bokning.notering) : ''),
+    start: { dateTime: bokning.start, timeZone: TZ },
+    end:   { dateTime: bokning.slut,  timeZone: TZ },
+    guestsCanInviteOthers: false, guestsCanSeeOtherGuests: false,
+    extendedProperties: { private: {
+      bokningId: String(bokning.bokningId), bokareId: String(bokning.bokareId || ''),
+      pipelineId: String(bokning.pipelineId || ''), motestypId: String(bokning.motestypId || '') } }
+  };
+  // Telexia-adressen som gäst → Outlook får inbjudan/uppdatering/avbokning. Tom adress → ingen gäst (API:t avvisar tom e-post).
+  if (inst.telexiaEpost) resurs.attendees = [{ email: String(inst.telexiaEpost) }];
+  let ev = null;
+  try { ev = Calendar.Events.insert(resurs, kalenderId, { sendUpdates: 'all' }); }
+  catch (e) { ev = null; }
+  if (!ev || !ev.id) fel('E_CALENDAR');
+  return ev;
+}
+
+// ============================================================
+// E-post (4.9) – plain text, minimerat innehåll
+// ============================================================
+
+function notifyCj(config, bokare, typ, bokning) {
+  const inst = config.installningar;
+  if (!inst.notisEpost) return;
+  const s = v => String(v || '').replace(/[<>]/g, ' ');
+  const p = fromIso(bokning.start), slutTid = fromIso(bokning.slut).tid;
+  const rs = bokning.restid && bokning.restid.status;
+  // Raden väljs på mötestypens restid-flagga (inkorgspostens status är 'ok' med 0/0 för typer utan restid, 4.1).
+  let restidRad = 'OBS: restid okänd – kontrollera adressen';
+  if (typ.restid !== true) restidRad = 'ingen (möte utan restid)';
+  else if (rs === 'ok') restidRad = 'ok (' + bokning.restid.foreMin + ' min före, ' + bokning.restid.efterMin + ' min efter)';
+  else if (rs === 'schablon') restidRad = 'schablon – Maps gav inget svar';
+  const subject = 'Ny bokning: ' + s(typ.titel) + ' ' + p.datum + ' ' + p.tid;
+  const body = [
+    'Ny bokning i Pipeline.',
+    '',
+    'Kund: ' + s(bokning.kund && bokning.kund.namn),
+    'Bokare: ' + s(bokare.namn) + (bokare.organisation ? ' (' + s(bokare.organisation) + ')' : ''),
+    'Mötestyp: ' + s(typ.titel),
+    'Tid: ' + longDateLabel(p.datum) + ' kl ' + p.tid + '–' + slutTid,
+    'Restid: ' + restidRad,
+    '',
+    'Öppna Pipeline: ' + APP_URL,
+    'Bokningsnummer: ' + bokning.bokningId
+  ].join('\n');
+  try { MailApp.sendEmail({ to: String(inst.notisEpost), subject: subject, body: body, name: 'Pipeline bokning' }); }
+  catch (e) { loggaMejlfel(bokning.bokningId); }
+}
+// Mejlfel fäller aldrig bokningen – historikposten skrivs best effort under lås.
+function loggaMejlfel(bokningId) {
+  try {
+    withScriptLock(() => {
+      const inbox = readInbox();
+      const b = findBokningInInbox(inbox, bokningId);
+      if (!b) return;
+      if (!Array.isArray(b.historik)) b.historik = [];
+      b.historik.push({ ts: nowIso(), typ: 'mejlfel', av: 'script' });
+      writeInbox(inbox);
+    }, 5000);
+  } catch (e) { /* best effort */ }
+}
+
+// ============================================================
+// Endpoint: geocode (4.4) – k eller adminKey
+// ============================================================
+
+function handleGeocode(req, ctx) {
+  let bokare = null;
+  if (typeof req.k === 'string' && req.k) bokare = authBokare(req, ctx).bokare;
+  else if (typeof req.adminKey === 'string' && req.adminKey) authAdmin(req, ctx);
+  else badKod();
+  const adress = strField(req.adress, 'adress', MAXLEN.adress, true);
+  if (adress.length < 3) valideringsfel({ adress: 'Ange en adress' });
+  if (bokare) checkAdressLimits(ctx, adress);
+  const g = geoForBooking(adress, bokare ? ctx : null);
+  return { status: g.status === 'ok' ? 'ok' : 'okand', lat: g.lat, lng: g.lng, formaterad: g.formaterad };
+}
+
+// ============================================================
+// Admin-endpoints (M3/M5) – stubbar: adminnyckeln kontrolleras, därefter E_NOT_IMPLEMENTED i samma kuvert.
+// Datastrukturer och filhantering ovan (readInbox/writeInbox/withScriptLock/clearConfigCache/verifyBrevladaFile)
+// är byggda så att M3 fyller i handlarna utan ombyggnad.
+// ============================================================
+
+function adminStub(req, ctx) {
+  authAdmin(req, ctx);
+  fel('E_NOT_IMPLEMENTED');
+}
+function handleSetup(req, ctx) { return adminStub(req, ctx); }           // 4.4: verifiera + spara fil-id:n, kalenderlista
+function handleConfigPush(req, ctx) { return adminStub(req, ctx); }      // 4.4: clearConfigCache() + rev-kontroll + validering
+function handleCalendarsList(req, ctx) { return adminStub(req, ctx); }
+function handleCalendarPreview(req, ctx) { return adminStub(req, ctx); }
+function handleInboxList(req, ctx) { return adminStub(req, ctx); }
+function handleAck(req, ctx) { return adminStub(req, ctx); }
+function handleReject(req, ctx) { return adminStub(req, ctx); }
+function handleCancel(req, ctx) { return adminStub(req, ctx); }
+function handleRebook(req, ctx) { return adminStub(req, ctx); }
+function handlePurge(req, ctx) { return adminStub(req, ctx); }
+
+// Routingtabell (4.4). Nycklarna är action-värdena exakt som klienterna skickar dem.
+const HANDLERS = {
+  'ping': handlePing,
+  'hello': handleHello,
+  'availability': handleAvailability,
+  'reserve': handleReserve,
+  'release': handleRelease,
+  'book': handleBook,
+  'geocode': handleGeocode,
+  'setup': handleSetup,
+  'config-push': handleConfigPush,
+  'calendars-list': handleCalendarsList,
+  'calendar-preview': handleCalendarPreview,
+  'inbox-list': handleInboxList,
+  'ack': handleAck,
+  'reject': handleReject,
+  'cancel': handleCancel,
+  'rebook': handleRebook,
+  'purge': handlePurge
+};
+
+// ============================================================
+// Trigger och underhåll (4.11) – install() körs en gång manuellt av CJ (auktoriserar även scopes).
+// dailyMaintenance är en stub i M2 (gallring/avstämning fylls i M5).
+// ============================================================
+
+function install() {
+  ScriptApp.getProjectTriggers()
+    .filter(t => t.getHandlerFunction() === 'dailyMaintenance')
+    .forEach(t => ScriptApp.deleteTrigger(t));
+  ScriptApp.newTrigger('dailyMaintenance').timeBased().everyDays(1).atHour(3).create();
+  return 'Trigger för dailyMaintenance skapad (kl 03–04). Scriptversion ' + SCRIPT_VERSION + '.';
+}
+
+function dailyMaintenance() {
+  // M2: ingen gallring/avstämning ännu. Rensar bara räknare i Script Properties äldre än 7 dagar (4.2, 4.11).
+  const props = PropertiesService.getScriptProperties();
+  const grans = ymdCompact(addDays(todayStr(), -7));
+  Object.keys(props.getProperties()).forEach(k => {
+    const m = /^(maps_elements_|book_count_)(\d{8})$/.exec(k);
+    if (m && m[2] < grans) props.deleteProperty(k);
+  });
+}
