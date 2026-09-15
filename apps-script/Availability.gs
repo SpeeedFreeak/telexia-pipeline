@@ -288,7 +288,11 @@ function dayPlan(D, cfg, typ, X, busyDay, T) {
         else if (!utBlock) { slot.status = 'restid'; slot.reason = 'restidUt'; }
         else {
           slot.restidOkand = (tIn.kalla === 'schablon' || tUt.kalla === 'schablon');
-          slot.restid = { inBlock: [minToHhmm(inBlock[0]), minToHhmm(inBlock[1])], utBlock: [minToHhmm(utBlock[0]), minToHhmm(utBlock[1])] };
+          // Block med längd 0 (inget ankare/ingen bas åt det hållet, eller restid 0) utelämnas – klienterna ritar bara block
+          // med slut > start, och inkorgspostens foreMin/efterMin kommer ur restidMin.
+          slot.restid = {};
+          if (inBlock[1] > inBlock[0]) slot.restid.inBlock = [minToHhmm(inBlock[0]), minToHhmm(inBlock[1])];
+          if (utBlock[1] > utBlock[0]) slot.restid.utBlock = [minToHhmm(utBlock[0]), minToHhmm(utBlock[1])];
           slot.restidMin = { fore: tIn.min, efter: tUt.min, kalla: slot.restidOkand ? 'schablon' : 'ok' };
         }
       }
@@ -506,7 +510,20 @@ function updateCacheFile(mutator) {
 }
 // ICS-reserv (spec 4.1 icsReserv) – anropas av Calendar.gs (lasIcsReserv_/sparaIcsReserv_).
 function readIcsReserv() { const c = readCacheFileSafe(); return c ? (c.icsReserv || null) : null; }
-function writeIcsReserv(reserv) { return updateCacheFile(obj => { obj.icsReserv = reserv || null; return true; }); }
+// writeIcsReserv(reserv, opts?) – opts.minAlderMs: skriv bara om filens befintliga icsReserv.hamtadTs är äldre än så
+// (Calendar.gs använder 15 min så att ett stort, ocachat ICS-flöde inte skriver cache-filen vid varje anrop).
+// Returnerar true om filen skrevs.
+function writeIcsReserv(reserv, opts) {
+  const minAlderMs = opts && Number(opts.minAlderMs) > 0 ? Number(opts.minAlderMs) : 0;
+  return updateCacheFile(obj => {
+    if (minAlderMs && obj.icsReserv && typeof obj.icsReserv.hamtadTs === 'string' && obj.icsReserv.hamtadTs) {
+      const ts = new Date(obj.icsReserv.hamtadTs).getTime();
+      if (!isNaN(ts) && Date.now() - ts < minAlderMs) return false;
+    }
+    obj.icsReserv = reserv || null;
+    return true;
+  });
+}
 
 // --- Geokodning (spec 5.8) ---
 // Normaliserad adressnyckel: gemener, utan skiljetecken, ett mellanslag, utan "sverige" (spec 4.1).
@@ -638,8 +655,9 @@ function travelMinutes(a, b, restidCfg) {
 
 // =====================================================================================
 // 3. Ingång från Code.gs (handleAvailability / findSlot):
-//    computeAvailability({ bokare, config, typ, motestypId, adress, from, to, reservationId, undantaBokningId, farsk, intern })
+//    computeAvailability({ bokare, config, typ, motestypId, adress, from, to, reservationId, undantaBokningId, farsk, intern, inbox? })
 //    → data enligt 5.12. intern:true behåller slot.restidMin { fore, efter, kalla } för inkorgspostens restid (restidFromSlot).
+//    inbox (valfri) = redan läst inkorg (book under låset) – vidarebefordras till buildBusyList så att filen läses en gång.
 //    Fel kastas som Error med .code/.details (E_VALIDATION, E_RATE, E_CALENDAR, E_SETUP) – route() gör kuvertet.
 //    Code.gs har redan gjort E_KEY, anropsgränser, honoredUndanta, resolveMotestyp, checkAdressLimits och egen-reservation.
 // =====================================================================================
@@ -649,7 +667,8 @@ function computeAvailability(req) {
     config, bokare, typ: req.typ || null, now: new Date(),
     undantaHonorerad: !!req.undantaBokningId,
     buildBusy: (from, to) => buildBusyList(from, to, {
-      config, bokareId: bokare.id, reservationId: req.reservationId || '', undantaBokningId: req.undantaBokningId || '', farsk: !!req.farsk
+      config, bokareId: bokare.id, reservationId: req.reservationId || '', undantaBokningId: req.undantaBokningId || '', farsk: !!req.farsk,
+      inbox: req.inbox || null
     }),
     geocode: adress => geocodeAddress(adress),
     travelSek: (X, platser) => travelSecondsFor(X, platser),

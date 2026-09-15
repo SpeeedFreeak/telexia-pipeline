@@ -31,6 +31,11 @@ const KAL_ICS_CACHE_KEY = 'ics:busy';          // reducerad ICS-lista, 15 min (4
 const KAL_ICS_META_KEY = 'ics:meta';           // status för ping/Kalenderkoll
 const KAL_ICS_CACHE_S = 900;
 const KAL_ICS_FEL_CACHE_S = 300;               // efter misslyckad hämtning: vänta 5 min innan nytt försök
+const KAL_ICS_RESERV_MIN_ALDER_MS = 15 * 60000; // icsReserv i cache-filen skrivs bara om den befintliga är äldre än 15 min
+// Memo per körning (varje request är en ny V8-kontext): reserve/book läser ICS FÖRE låset (warmSlotCaches) och får
+// samma resultat under låset utan nytt UrlFetch – även när flödet är > 90 KB och därför inte cachas i CacheService.
+let KAL_ICS_MEMO = null;                        // { url, res } | null
+function kalResetMemo_() { KAL_ICS_MEMO = null; }   // anropas av doPost (Code.gs) så att memot aldrig överlever ett anrop
 const KAL_ICS_MAX_CACHE_BYTES = 90 * 1024;     // > 90 KB → ingen cache, parsa varje gång (4.6)
 const KAL_BUSY_CACHE_S = 60;                   // busy:<datum> (4.6)
 const KAL_MERGE_TOLERANS_MIN = 5;              // "samma start och slut (±5 min)"
@@ -723,8 +728,18 @@ function lasReservationer_() {
 function lasIcsReserv_() {
   try { return typeof readIcsReserv === 'function' ? (readIcsReserv() || null) : null; } catch (err) { return null; }
 }
-function sparaIcsReserv_(reserv) {
-  try { if (typeof writeIcsReserv === 'function') writeIcsReserv(reserv); } catch (err) { /* best effort – fäller aldrig läsningen */ }
+// icsReserv skrivs till cache-filen högst var 15:e minut (KAL_ICS_RESERV_MIN_ALDER_MS): först grindas på meta.reservTs i
+// CacheService (ingen Drive-läsning), därefter på filens egen hamtadTs (writeIcsReserv, Availability.gs). Ett stort
+// ICS-flöde (> 90 KB, ocachat) läses annars live vid varje anrop och skulle skriva filen varje gång.
+// Returnerar den reservTs som gäller efter anropet (ny eller befintlig).
+function sparaIcsReserv_(reserv, meta) {
+  const nu = kalNu_().getTime();
+  const senast = meta && typeof meta.reservTs === 'string' && meta.reservTs ? kalMsOf(meta.reservTs) : NaN;
+  if (!isNaN(senast) && nu - senast < KAL_ICS_RESERV_MIN_ALDER_MS) return meta.reservTs;
+  try {
+    if (typeof writeIcsReserv === 'function' && writeIcsReserv(reserv, { minAlderMs: KAL_ICS_RESERV_MIN_ALDER_MS })) return reserv.hamtadTs;
+  } catch (err) { /* best effort – fäller aldrig läsningen */ }
+  return meta && typeof meta.reservTs === 'string' ? meta.reservTs : '';
 }
 
 /** Konfig och inkorg ägs av Code.gs (loadConfig / readInbox). */
@@ -766,13 +781,25 @@ function kalFiltreraDatum_(handelser, fran, till) {
  * Cache 15 min i CacheService (ics:busy), filtrerad till [idag−1, horisont+1] före cachning, > 90 KB → ingen cache.
  * Misslyckad hämtning → icsReserv ur cache-filen + varning "Outlook-flödet kunde inte läsas kl HH:MM".
  * opts: { farsk:bool }
+ * Memo per körning (KAL_ICS_MEMO): andra anropet i samma request (t.ex. under låset i reserve/book) får en kopia av
+ * första resultatet – aldrig UrlFetch under låset. opts.farsk läser om och förnyar memot.
  */
 function readIcs(config, opts) {
   opts = opts || {};
   const inst = (config && config.installningar) || {};
   const url = String(inst.outlookIcsUrl || '').trim();
+  if (!url) return { ok: true, handelser: [], varningar: [], hamtadTs: '', kalla: 'ingen' };
+  if (!opts.farsk && KAL_ICS_MEMO && KAL_ICS_MEMO.url === url) return kalKopieraIcsRes_(KAL_ICS_MEMO.res);
+  const res = readIcsUncached_(config, url, opts);
+  KAL_ICS_MEMO = { url, res: kalKopieraIcsRes_(res) };
+  return res;
+}
+function kalKopieraIcsRes_(res) {
+  return { ok: res.ok, handelser: JSON.parse(JSON.stringify(res.handelser || [])), varningar: (res.varningar || []).slice(), hamtadTs: res.hamtadTs || '', kalla: res.kalla };
+}
+function readIcsUncached_(config, url, opts) {
+  const inst = (config && config.installningar) || {};
   const res = { ok: true, handelser: [], varningar: [], hamtadTs: '', kalla: 'ingen' };
-  if (!url) return res;
   if (!/^https:\/\/\S+$/i.test(url)) { res.ok = false; res.varningar.push('Fältet Outlook-ICS är inte en https-adress'); return res; }
   const cache = kalCache_();
   const idag = todayStr();
@@ -818,10 +845,10 @@ function readIcs(config, opts) {
   const nyMeta = {
     ok: true, hamtadTs, felTs: '', felKlockslag: '', antal: res.handelser.length,
     medPlats: res.handelser.filter(h => kalLooksLikePlace(h.plats)).length,
-    preliminara: res.handelser.filter(h => h.preliminar).length, varningar: res.varningar.slice(0, 20)
+    preliminara: res.handelser.filter(h => h.preliminar).length, varningar: res.varningar.slice(0, 20),
+    reservTs: sparaIcsReserv_({ hamtadTs, handelser: res.handelser }, meta)
   };
   try { cache.put(KAL_ICS_META_KEY, JSON.stringify(nyMeta), 6 * 3600); } catch (err) { /* ignore */ }
-  sparaIcsReserv_({ hamtadTs, handelser: res.handelser });
   return res;
 }
 function kalIcsReservSvar_(res, meta, fran, till) {
