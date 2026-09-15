@@ -496,17 +496,41 @@ function mapsHanteraToppstatus(status, errorMessage) {
 }
 
 // --- Cache-filen telexia-bokning-cache.json (spec 4.1). readCacheFile/writeCacheFile ägs av Code.gs (getFileById + getBlob/setContent). ---
-function readCacheFileSafe() { try { return readCacheFile(); } catch (e) { return null; } }   // tillgängligheten ska aldrig falla på cachen
+// Memo per körning (A51): cache-filen läses högst en gång per anrop. Utan memot gjorde varje geokod-miss i CacheService
+// (geo:<hash>, TTL 6 h – alla nycklar går ut ungefär samtidigt) en egen Drive-läsning (~0,3–1 s), och ett availability-anrop
+// med ~100 ICS-platser tog tiotals sekunder efter varje 6 h-fönster (bokningssidans timeout är 15 s). doPost nollställer memot
+// (availResetMemo_) så att varje request läser filen färskt; updateCacheFile läser alltid färskt före skrivning och sätter memot
+// till det skrivna objektet. Ett fel vid läsning memoiseras inte (nästa försök läser igen) – tillgängligheten ska aldrig falla
+// på cachen. Nya geokodposter samlas i AVAIL_GEOKOD_PENDING och skrivs EN gång per körning (availFlushGeokod_, anropas av
+// doPost efter handlern) i stället för en läsning + skrivning per ny adress – första anropet med många nya ICS-platser gjorde
+// annars tiotals Drive-omgångar.
+let AVAIL_FIL_MEMO = null;
+let AVAIL_GEOKOD_PENDING = {};
+function availResetMemo_() { AVAIL_FIL_MEMO = null; AVAIL_GEOKOD_PENDING = {}; }
+// Skriver körningens nya geokodposter till cache-filen (färsk läsning + en skrivning). → true om filen skrevs. Kastar aldrig.
+function availFlushGeokod_() {
+  const nycklar = Object.keys(AVAIL_GEOKOD_PENDING);
+  if (!nycklar.length) return false;
+  const pend = AVAIL_GEOKOD_PENDING; AVAIL_GEOKOD_PENDING = {};
+  return updateCacheFile(obj => { if (!obj.geokod || typeof obj.geokod !== 'object') obj.geokod = {}; nycklar.forEach(k => { obj.geokod[k] = pend[k]; }); return true; });
+}
+function readCacheFileSafe() {
+  if (AVAIL_FIL_MEMO) return AVAIL_FIL_MEMO;
+  try { AVAIL_FIL_MEMO = readCacheFile(); } catch (e) { AVAIL_FIL_MEMO = null; }
+  return AVAIL_FIL_MEMO;
+}
 // Läs-ändra-skriv utan eget lås: filen är en ren cache (alla värden kan räknas om), och ett eget LockService-anrop inuti
 // book/reserve (som redan håller scriptlåset) skulle riskera att släppa deras lås. En förlorad uppdatering är ofarlig.
+// Läser alltid färskt (aldrig memot) så att en annan körnings skrivning inte skrivs över i onödan; memot sätts till objektet.
 // mutator(obj) returnerar true när något ändrats. Returnerar true om filen skrevs.
 function updateCacheFile(mutator) {
   try {
     const obj = readCacheFile();
-    if (!mutator(obj)) return false;
+    if (!mutator(obj)) { AVAIL_FIL_MEMO = obj; return false; }
     writeCacheFile(obj);
+    AVAIL_FIL_MEMO = obj;
     return true;
-  } catch (e) { return false; }
+  } catch (e) { AVAIL_FIL_MEMO = null; return false; }
 }
 // ICS-reserv (spec 4.1 icsReserv) – anropas av Calendar.gs (lasIcsReserv_/sparaIcsReserv_).
 function readIcsReserv() { const c = readCacheFileSafe(); return c ? (c.icsReserv || null) : null; }
@@ -554,7 +578,9 @@ function geocodeAddress(adress) {
   const svar = geocodeViaApi(adress);
   if (svar.status === 'ok') {
     cachePutJson(cacheKey, svar, AVAIL_CACHE_TTL_GEO_OK_S);
-    updateCacheFile(obj => { obj.geokod[key] = { lat: svar.lat, lng: svar.lng, formaterad: svar.formaterad, status: 'ok', ts: availNowIso() }; return true; });
+    const post = { lat: svar.lat, lng: svar.lng, formaterad: svar.formaterad, status: 'ok', ts: availNowIso() };
+    AVAIL_GEOKOD_PENDING[key] = post;                                                     // skrivs av availFlushGeokod_ (doPost)
+    if (AVAIL_FIL_MEMO && AVAIL_FIL_MEMO.geokod && typeof AVAIL_FIL_MEMO.geokod === 'object') AVAIL_FIL_MEMO.geokod[key] = post;
   } else if (svar.status === 'okand') {
     cachePutJson(cacheKey, { status: 'okand' }, AVAIL_CACHE_TTL_GEO_OKAND_S);
   }

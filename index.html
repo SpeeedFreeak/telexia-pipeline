@@ -395,6 +395,9 @@
   .bok-vy-toggle button.active { background: #1d212b; color: #60a5fa; }
   .bok-kal-varningar { display: flex; flex-direction: column; gap: 4px; margin-bottom: 10px; }
   .bok-kal-varningar .bok-status-row.info { color: #6b7280; background: transparent; border-color: transparent; padding: 0 2px; }
+  .bok-drift { display: flex; flex-direction: column; gap: 4px; }
+  .bok-drift .bok-status-row.info { color: #cbd5e1; }
+  .bok-drift:empty::before { content: 'Ingen status hämtad ännu'; color: #6b7280; font-size: 12px; }
   .bok-kal-vy { overflow-x: auto; -webkit-overflow-scrolling: touch; }
   .bok-kal-grid { display: grid; grid-template-columns: 48px repeat(var(--dagar), minmax(120px, 1fr)); background: #161922; border: 1px solid #262b36; border-radius: 10px; overflow: hidden; min-width: 100%; }
   .bok-kal-hornet, .bok-kal-heldag-label { border-bottom: 1px solid #262b36; font-size: 10px; color: #6b7280; text-align: right; padding: 6px 6px 4px; }
@@ -1011,6 +1014,7 @@
 // använder konstanten BOK_SCRIPT_URL. Båda är publika, inga hemligheter. bokAdminApi finns bara här (appen).
 const BOK_SCRIPT_URL = 'https://script.google.com/macros/s/AKfycbxqBn2wQt8pqF0USTj81kiyGHOmV3ICNqxBRYPksJiwBkvkqFjFCHZ1SzYtAo1gRdeROg/exec';   // publik, ej hemlighet – CJ byter efter script-deploy
 const MIN_SCRIPT_VERSION = 1;
+const PURGE_SCRIPT_VERSION = 3;   // scriptversion med purge på riktigt (M5); äldre script → radering av processer/kunder med bokningar avbryts (Drift-panelen varnar)
 const BOK_TIMEOUT_MS = { hello: 15000, availability: 15000, geocode: 15000, ping: 15000 };   // övriga (skrivande) 45 000
 function bokScriptUrl() {
   const u = (typeof BOKNINGSINSTALLNINGAR === 'object' && BOKNINGSINSTALLNINGAR) ? BOKNINGSINSTALLNINGAR.scriptUrl : '';
@@ -2696,29 +2700,28 @@ document.getElementById('leadSaveBtn').addEventListener('click', () => {
   closeLeadModal();
 });
 
-document.getElementById('leadDeleteBtn').addEventListener('click', () => {
+document.getElementById('leadDeleteBtn').addEventListener('click', async () => {
   const id = document.getElementById('leadId').value;
-  if (!id) return;
-  // Bokningsmodul (spec 8.5): kommande bokat möte spärrar; händelser med bokningId markeras 'raderad' i BOKNING_IMPORT så att
-  // avstämningen (8.2 steg 6) aldrig återskapar bokningen. purge-anropet till scriptet läggs till i M5.
+  if (!id || raderingPagar) return;
+  // Bokningsmodul (spec 8.5, 9): kommande bokat möte spärrar; händelser med bokningId markeras 'raderad' i BOKNING_IMPORT så att
+  // avstämningen (8.2 steg 6) aldrig återskapar bokningen, och purge körs i scriptet FÖRE den lokala raderingen (M5).
   const raderasLead = leads.find(l => l.id === id);
   const bokEvents = raderasLead ? (raderasLead.events || []).filter(isBookingEvent) : [];
   if (bokEvents.some(isFutureBooking)) { alert('Processen har ett kommande bokat möte – avboka det först under Bokningar › Kalender'); return; }
-  if (!confirm('Ta bort denna process från pipelinen?')) return;
-  if (bokEvents.length) {
-    const ts = new Date().toISOString();
-    bokEvents.forEach(ev => {
-      const imp = BOKNING_IMPORT.find(p => p.bokningId === ev.bokningId);
-      if (imp) { imp.status = 'raderad'; imp.sedd = true; }
-      else BOKNING_IMPORT.push({ bokningId: ev.bokningId, status: 'raderad', sedd: true, importeradTs: ts, enhetId, leadId: raderasLead.id, eventId: ev.id, kundId: raderasLead.kundId || '', kontaktId: raderasLead.kontaktId || '', nyProcess: false, nyKund: false, mojligDubblett: false, avvisadTs: '', avvisadOrsak: '' });
-    });
-    saveBokningImport(BOKNING_IMPORT);
-  }
+  if (!confirm('Ta bort denna process från pipelinen?' + (bokEvents.length ? '\n\nProcessen har ' + bokEvents.length + ' bokning(ar) – ' + (bokAnsluten() ? 'de tas även bort ur brevlådan och kalendern (passerade möten anonymiseras).' : 'bokningsmodulen är inte ansluten, så kalenderhändelser och inkorgsposter måste tas bort manuellt.') : ''))) return;
+  const btn = document.getElementById('leadDeleteBtn');
+  const aterstall = markeraBokningarRaderade(bokEvents, raderasLead);
+  raderingPagar = true; btn.disabled = true; btn.textContent = bokEvents.length ? 'Tar bort…' : 'Ta bort';
+  let purge;
+  try { purge = await bokPurgeRadering({ bokningIds: bokEvents.map(ev => ev.bokningId), kalenderEventIds: bokEvents.map(ev => ev.kalenderEventId), adresser: bokEvents.map(ev => ev.adress) }); }   // adresser: geokodposten tas bort även när inkorgsposten redan är gallrad (9)
+  finally { raderingPagar = false; btn.disabled = false; btn.textContent = 'Ta bort'; }
+  if (!purge.ok) { aterstall(); alert('Processen togs INTE bort – bokningarna kunde inte tas bort ur brevlådan/kalendern: ' + purge.fel + '\n\nFörsök igen, eller ta bort dem manuellt.'); return; }
   leads = leads.filter(l => l.id !== id);
   saveLeads(leads);
   renderBoard();
   renderStats(); renderKpis();
   closeLeadModal();
+  visaPurgeResultat(purge, 'Processen borttagen');
 });
 
 document.getElementById('searchInput').addEventListener('input', e => {
@@ -2963,15 +2966,40 @@ document.getElementById('customerSaveBtn').addEventListener('click', () => {
   renderCustomerRegistry();
   closeCustomerModal();
 });
-document.getElementById('customerDeleteBtn').addEventListener('click', () => {
+document.getElementById('customerDeleteBtn').addEventListener('click', async () => {
   const id = document.getElementById('customerId').value;
-  if (!id) return;
+  if (!id || raderingPagar) return;
   if (customerProcessCount(id) > 0) { alert('Den här kunden har kopplade processer. Ta bort eller flytta dem först.'); return; }
-  if (!confirm('Ta bort denna kund?')) return;
+  // Bokningsmodul (spec 8.5, 9 – raderingsrutin): samla bokningId/kalenderEventId ur kundens processer (normalt inga kvar – spärren
+  // ovan), kundens orgnr och adresser (kundens + händelsernas) → purge i scriptet FÖRE lokal radering. Orgnr gör att även
+  // inkorgsposter som aldrig importerats (t.ex. 'ny'/'avvisad') tas bort.
+  const kund = getCustomerById(id);
+  const kundLeads = leads.filter(l => l.kundId === id);
+  const bokEvents = []; kundLeads.forEach(l => (l.events || []).filter(isBookingEvent).forEach(ev => bokEvents.push(ev)));
+  if (bokEvents.some(isFutureBooking)) { alert('Kunden har ett kommande bokat möte – avboka det först under Bokningar › Kalender'); return; }
+  const orgnr = kund ? normalizeOrgnr(kund.orgnr) : '';   // bara giltigt orgnr skickas – ogiltigt kan inte matcha i brevlådan (scriptet normaliserar) och skulle ge E_VALIDATION
+  const adresser = [];
+  const laggAdress = a => { a = String(a || '').trim().slice(0, BOK_MAXLEN.adress); if (a && !adresser.includes(a)) adresser.push(a); };
+  if (kund) laggAdress(kund.adress);
+  bokEvents.forEach(ev => laggAdress(ev.adress));
+  // Importposter kopplade till kunden (även efter att processen tagits bort) bär bokningId → tas med så att brevlådan rensas även om orgnr skiljer sig.
+  const bokningIds = bokEvents.map(ev => ev.bokningId).concat(BOKNING_IMPORT.filter(p => p.kundId === id).map(p => p.bokningId));
+  const harBokningsspar = bokningIds.length > 0;
+  if (!confirm('Ta bort denna kund?' + ((orgnr || harBokningsspar) && bokAnsluten() ? '\n\nKundens bokningar tas även bort ur brevlådan och kalendern (passerade möten anonymiseras).' : ''))) return;
+  const btn = document.getElementById('customerDeleteBtn');
+  let purge = { ok: true, hoppad: true };
+  if (orgnr || harBokningsspar) {
+    const aterstall = markeraBokningarRaderade(bokEvents, kundLeads[0] || null);
+    raderingPagar = true; btn.disabled = true; btn.textContent = 'Tar bort…';
+    try { purge = await bokPurgeRadering({ bokningIds, kalenderEventIds: bokEvents.map(ev => ev.kalenderEventId), orgnr, adresser }); }
+    finally { raderingPagar = false; btn.disabled = false; btn.textContent = 'Ta bort'; }
+    if (!purge.ok) { aterstall(); alert('Kunden togs INTE bort – uppgifterna kunde inte tas bort ur brevlådan/kalendern: ' + purge.fel + '\n\nFörsök igen, eller ta bort dem manuellt.'); return; }
+  }
   customers = customers.filter(c => c.id !== id);
   saveCustomers(customers);
   renderCustomerRegistry();
   closeCustomerModal();
+  visaPurgeResultat(purge, 'Kunden borttagen');
 });
 
 // ---------- Quick-add customer modal ----------
@@ -3718,6 +3746,11 @@ function renderBokStatus() {
   else if (s.senastSyncRev) rows.push({ text: 'Konfiguration synkad rev ' + s.senastSyncRev + (s.senastSyncTs ? ' · ' + kortTidLabel(s.senastSyncTs) : ''), kind: 'ok' });
   const saknade = BOKARE.filter(b => !stageKeyValidFor(b.stageKey, b.pipelineId)).length;
   if (saknade) rows.push({ text: saknade + ' bokare pekar på en kolumn som saknas – första kolumnen används', kind: 'warn' });
+  // Gula rader för ICS-/Maps-varningar och avstämningen ur senaste ping/calendar-preview (6.1, 10.4) – inte på Inställningar (Drift-panelen
+  // visar allt) och inte på Kalender (varningsraden ovanför kalendern visar scriptets varningar).
+  if (bokAnsluten() && bokningSub !== 'installningar' && bokningSub !== 'kalender') bokDriftRader().filter(r => r.kind === 'warn' && ['maps', 'ics', 'avstamning', 'bokningar'].includes(r.omrade)).forEach(r => {
+    rows.push({ text: r.text, kind: 'warn', action: r.omrade === 'avstamning' ? { label: 'Visa Kalenderkoll', fn: () => oppnaBokKalender('koll') } : null });
+  });
   el.innerHTML = rows.map((r, i) => `<div class="bok-status-row ${escapeHtml(r.kind)}">${escapeHtml(r.text)}${r.action ? ` <button type="button" class="bok-status-btn" data-i="${i}">${escapeHtml(r.action.label)}</button>` : ''}</div>`).join('');
   el.querySelectorAll('.bok-status-btn').forEach(btn => btn.addEventListener('click', () => rows[Number(btn.dataset.i)].action.fn()));
 }
@@ -3903,6 +3936,7 @@ async function testaAnslutning() {
   bsLoggRensa();
   bsLogg('Testar…');
   const ping = await bokApi('ping');
+  bokDriftSparaPing(ping);   // Drift och kvoter + statusraden visar samma svar
   if (!ping.ok) { bsLogg('Ping: ' + bokFelText(ping), 'err'); return; }
   const d = ping.data || {}, v = Number(ping.scriptVersion) || 0;
   bsLogg('Scriptversion ' + v + (v < MIN_SCRIPT_VERSION ? ' – uppdatera scriptet' : '') + ' · ' + (d.konfigurerad ? 'konfigurerad' : 'INTE konfigurerad (setup saknas)' + (d.orsak ? ' – ' + bstr(d.orsak, 200) : '')), d.konfigurerad && v >= MIN_SCRIPT_VERSION ? 'ok' : 'warn');
@@ -3914,6 +3948,117 @@ async function testaAnslutning() {
   if (!inb.ok) { bsLogg('inbox-list: ' + bokFelText(inb), 'err'); return; }
   const n = Number(inb.data && inb.data.totalt) || ((inb.data && Array.isArray(inb.data.bokningar)) ? inb.data.bokningar.length : 0);
   bsLogg('Adminnyckeln godkänd · ' + n + ' poster i inkorgen · configRev ' + (inb.configRev === null || inb.configRev === undefined ? '–' : inb.configRev), 'ok');
+}
+
+// ---------- Drift och kvoter (spec 10.4, 6.7 › Script/Maps-status) ----------
+// ping-svar (4.4): { scriptVersion (i kuvertet), konfigurerad, orsak?, mapsNyckel, mapsForbrukningIdag, mapsVarning, mapsDagstak? (M5),
+//   icsStatus:{ ok, hamtadTs, antal, medPlats, preliminara, fel?, hamtningMs? (M5), cachad? (M5), langsam? (M5) }, bokningarIdag? (M5:
+//   antal bokningar skapade idag, globalt – book_count_<idag>), underhallSenast? (M5: ISO för senaste lyckade dailyMaintenance, '' före
+//   första), avstamningSaknas? (M5: antal kalenderhändelser som saknas i inkorgen enligt scriptets avstämning 4.11) }. Saknade fält
+//   (äldre script) → null/'–'. Allt valideras/klipps. Sparas i minnet (inte i Drive) och visas i Inställningar › Drift och kvoter samt
+//   som gula rader i statusraden (Maps-varning, ICS-fel, avstämning).
+let bokDrift = { ping: null, pingTs: '', pingFel: '', pingVersion: 0, pagar: false };
+let bokSenasteKalKoll = null;   // { ts, varningar:[], saknasIds:[], saknasAntal } ur senaste calendar-preview (avstämningen 4.11)
+function normPing(d) {
+  d = isPlainObject(d) ? d : {};
+  const ics = isPlainObject(d.icsStatus) ? d.icsStatus : null;
+  return {
+    konfigurerad: d.konfigurerad === true, orsak: bstr(d.orsak, 200),
+    mapsNyckel: d.mapsNyckel === true, mapsForbrukningIdag: Math.max(0, Number(d.mapsForbrukningIdag) || 0), mapsVarning: bstr(d.mapsVarning, 200),
+    mapsDagstak: bnum(d.mapsDagstak), bokningarIdag: bnum(d.bokningarIdag),
+    underhallSenast: typeof d.underhallSenast === 'string' ? bstr(d.underhallSenast, 40) : null,   // null = fältet saknas (äldre script), '' = aldrig kört
+    avstamningSaknas: bnum(d.avstamningSaknas),
+    icsStatus: ics ? { ok: ics.ok === true, hamtadTs: bstr(ics.hamtadTs, 40), antal: Math.max(0, Number(ics.antal) || 0), medPlats: Math.max(0, Number(ics.medPlats) || 0), preliminara: Math.max(0, Number(ics.preliminara) || 0), fel: bstr(ics.fel, 200),
+      hamtningMs: Math.max(0, Number(ics.hamtningMs) || 0), cachad: ics.cachad === true, langsam: ics.langsam === true } : null
+  };
+}
+const UNDERHALL_MAX_ALDER_MS = 30 * 3600000;   // sanity check V1 (10.4): dailyMaintenance kör kl 03–04 varje dygn → senaste lyckade körning ska vara < 30 h gammal
+function bokDriftSparaPing(r) {
+  bokDrift.pingTs = new Date().toISOString();
+  if (!r || !r.ok) { bokDrift.pingFel = bokFelText(r); bokDrift.ping = null; }
+  else { bokDrift.pingFel = ''; bokDrift.pingVersion = Number(r.scriptVersion) || 0; bokDrift.ping = normPing(r.data); }
+  ritaBokDrift(); renderBokStatus();
+}
+async function hamtaBokDrift(tvinga) {
+  if (bokDrift.pagar) return bokDrift;
+  if (!tvinga && bokDrift.pingTs && Date.now() - Date.parse(bokDrift.pingTs) < 300000) return bokDrift;
+  bokDrift.pagar = true; ritaBokDrift();
+  let r;
+  try { r = await bokApi('ping'); } finally { bokDrift.pagar = false; }
+  bokDriftSparaPing(r);
+  return bokDrift;
+}
+// Avstämning på begäran: calendar-preview för idag−7 … horisont+7 (högst 56 dagar = scriptets PREVIEW_MAX_DAGAR) – samma fönster som
+// Kalenderkoll plus en vecka bakåt, så att föräldralösa FRAMTIDA händelser (det vanliga fallet) hittas och inte bara nattens toppnivåantal.
+// Svarets varningar/händelse-varningar 'saknas i inkorgen' sparas i bokSenasteKalKoll av hamtaKalenderPreview.
+async function kontrolleraAvstamning() {
+  if (!bokAnsluten()) { setBokStatus('Bokningsmodulen är inte ansluten', 'warn'); return; }
+  const idag = todayStr(), el = document.getElementById('bsDrift');
+  if (el) el.dataset.avstamning = 'pagar';
+  ritaBokDrift();
+  const res = await hamtaKalenderPreview(addDays(idag, -7), addDays(idag, Math.min(49, bokHorisontVeckor() * 7 + 7)), true);
+  if (el) delete el.dataset.avstamning;
+  if (!res.ok) setBokStatus('Kunde inte kontrollera avstämningen: ' + res.fel, 'err');
+  else if (bokSenasteKalKoll && bokSenasteKalKoll.saknasAntal) setBokStatus('');   // varningen visas som egen rad (bokDriftRader) med "Visa Kalenderkoll"
+  else setBokStatus('Avstämning: inga kalenderhändelser saknas i inkorgen', 'ok');
+  ritaBokDrift();
+}
+// Extraherar avstämningsinfo ur ett calendar-preview-svar: toppnivåvarningen "Kalenderhändelser som saknas i inkorgen: N …" (antal
+// i hela cachen, oberoende av intervall) och händelser med varning 'saknas i inkorgen' (i hämtat intervall).
+function sparaKalKollAvstamning(res) {
+  const saknasIds = Array.from(new Set(res.handelser.filter(s => /saknas i inkorgen/i.test(s.varning || '')).map(s => s.bokningId || s.id)));
+  let antal = saknasIds.length;
+  res.varningar.forEach(v => { const m = /saknas i inkorgen:\s*(\d+)/i.exec(v); if (m) antal = Math.max(antal, Number(m[1]) || 0); });
+  bokSenasteKalKoll = { ts: res.hamtadTs, fran: res.fran, till: res.till, varningar: res.varningar.slice(), saknasIds, saknasAntal: antal };
+}
+function bokDriftRader() {   // gemensamma rader för Drift-panelen; statusraden plockar bara varningarna (kind 'warn'/'err')
+  const rader = [], p = bokDrift.ping, s = BOKNINGSINSTALLNINGAR;
+  if (bokDrift.pingFel) rader.push({ text: 'Scriptet svarar inte: ' + bokDrift.pingFel, kind: 'err', omrade: 'script' });
+  else if (p) {
+    const v = bokDrift.pingVersion;
+    rader.push({ text: 'Scriptversion ' + v + (v < MIN_SCRIPT_VERSION ? ' – uppdatera scriptet (kräver minst ' + MIN_SCRIPT_VERSION + ')' : '') + ' · ' + (p.konfigurerad ? 'konfigurerad' : 'INTE konfigurerad' + (p.orsak ? ' – ' + p.orsak : '')), kind: (p.konfigurerad && v >= MIN_SCRIPT_VERSION) ? 'ok' : 'warn', omrade: 'script' });
+    if (v > 0 && v < PURGE_SCRIPT_VERSION) rader.push({ text: 'Scriptversion ' + v + ' – purge saknas: radering av processer/kunder med bokningar avbryts tills scriptet uppdaterats (Hantera distributioner › Ny version, version ' + PURGE_SCRIPT_VERSION + ')', kind: 'warn', omrade: 'script' });
+    rader.push({ text: 'Maps: ' + (p.mapsNyckel ? 'nyckel finns · ' + p.mapsForbrukningIdag + ' element idag' + (p.mapsDagstak ? ' av ' + p.mapsDagstak : '') : 'ingen nyckel – schablonrestid'), kind: 'info', omrade: 'maps' });
+    if (p.mapsVarning) rader.push({ text: 'Maps-varning: ' + p.mapsVarning + ' – schablonrestid används', kind: 'warn', omrade: 'maps' });
+    const ics = p.icsStatus;
+    if (!s.outlookIcsUrl) rader.push({ text: 'Outlook-ICS: ingen länk angiven (Kalendrar)', kind: 'info', omrade: 'ics' });
+    else if (!ics) rader.push({ text: 'Outlook-ICS: status saknas i svaret', kind: 'info', omrade: 'ics' });
+    else if (ics.ok) {
+      const hamtning = ics.hamtningMs ? ' · hämtning ' + (ics.hamtningMs >= 1000 ? (ics.hamtningMs / 1000).toFixed(1).replace('.', ',') + ' s' : ics.hamtningMs + ' ms') : '';
+      rader.push({ text: 'Outlook-ICS: ok' + (ics.hamtadTs ? ' · läst ' + kortTidLabel(ics.hamtadTs) : '') + ' · ' + ics.antal + ' händelser, ' + ics.medPlats + ' med plats, ' + ics.preliminara + ' preliminära' + hamtning + (ics.cachad ? ' · cachad 15 min' : ''), kind: 'info', omrade: 'ics' });
+      if (ics.langsam) rader.push({ text: 'Outlook-flödet svarade långsamt (' + (ics.hamtningMs / 1000).toFixed(1).replace('.', ',') + ' s) – i 30 min används kopian i cache-filen vid nästa läsning', kind: 'warn', omrade: 'ics' });
+    }
+    else rader.push({ text: 'Outlook-flödet kunde inte läsas' + (ics.hamtadTs ? ' – senast lyckade läsning ' + kortTidLabel(ics.hamtadTs) + ' (' + ics.antal + ' händelser) används som reserv' : '') + (ics.fel ? ' · ' + ics.fel : ''), kind: 'warn', omrade: 'ics' });
+    rader.push({ text: 'Bokningar idag: ' + (p.bokningarIdag === null ? '– (rapporteras inte av scriptversionen)' : p.bokningarIdag + ' av 40 (global dagsgräns)'), kind: p.bokningarIdag !== null && p.bokningarIdag >= 40 ? 'warn' : 'info', omrade: 'bokningar' });
+    // Underhåll (4.11, sanity check V1): senaste lyckade dailyMaintenance < 30 h gammal, annars varning (triggern kan ha dött → kör install() om).
+    if (p.underhallSenast === null) rader.push({ text: 'Underhåll (gallring/avstämning): – (rapporteras inte av scriptversionen)', kind: 'info', omrade: 'underhall' });
+    else if (!p.underhallSenast) rader.push({ text: 'Underhåll (gallring/avstämning): har aldrig körts – triggern skapas av Anslut-guiden (kl 03–04); dröjer den mer än ett dygn: kör install() i scriptet', kind: p.konfigurerad ? 'warn' : 'info', omrade: 'underhall' });
+    else {
+      const alder = Date.now() - Date.parse(p.underhallSenast);
+      rader.push({ text: 'Underhåll (gallring/avstämning): senast ' + kortTidLabel(p.underhallSenast) + (alder > UNDERHALL_MAX_ALDER_MS ? ' – mer än 30 h sedan, triggern verkar inte köra (kör install() i scriptet)' : ''), kind: alder > UNDERHALL_MAX_ALDER_MS ? 'warn' : 'ok', omrade: 'underhall' });
+    }
+  }
+  // Avstämning (4.11): den egna kontrollen (calendar-preview, bokSenasteKalKoll) i första hand; annars scriptets nattliga körning
+  // (ping.avstamningSaknas) – t.ex. när kontrollen gjordes före nattens körning eller när händelserna ligger utanför hämtat intervall.
+  // Är den egna kontrollen nyare än ping-svaret (cachat 5 min) gäller den även när den säger 0 – t.ex. efter purge/"Ta bort ur kalendern",
+  // som stryker id:t ur scriptets lista medan det gamla ping-svaret fortfarande räknar det.
+  const k = bokSenasteKalKoll, pingSaknas = p && p.avstamningSaknas !== null && !(k && k.ts >= bokDrift.pingTs) ? p.avstamningSaknas : 0;
+  if (k && k.saknasAntal) rader.push({ text: k.saknasAntal + ' kalenderhändelse' + (k.saknasAntal === 1 ? '' : 'r') + ' saknas i inkorgen (avstämning ' + kortTidLabel(k.ts) + ') – kontrollera i Kalenderkoll; ta bort händelsen i kalendern eller boka om', kind: 'warn', omrade: 'avstamning' });
+  else if (pingSaknas > 0) rader.push({ text: pingSaknas + ' kalenderhändelse' + (pingSaknas === 1 ? '' : 'r') + ' saknas i inkorgen enligt scriptets avstämning – klicka "Kontrollera avstämning" eller öppna Kalenderkoll', kind: 'warn', omrade: 'avstamning' });
+  else if (k) rader.push({ text: 'Avstämning kalender ↔ inkorg: inga saknade händelser (kontrollerad ' + kortTidLabel(k.ts) + ')', kind: 'ok', omrade: 'avstamning' });
+  if (k) k.varningar.filter(v => !/saknas i inkorgen|^Maps:/i.test(v)).forEach(v => rader.push({ text: 'Kalender: ' + v, kind: 'warn', omrade: 'kalender' }));
+  return rader;
+}
+function ritaBokDrift() {
+  const el = document.getElementById('bsDrift');
+  if (!el) return;
+  const rader = bokDriftRader();
+  if (bokDrift.pagar) rader.unshift({ text: 'Hämtar status från scriptet…', kind: 'info' });
+  else if (!bokDrift.pingTs) rader.unshift({ text: 'Ingen status hämtad ännu', kind: 'info' });
+  if (el.dataset.avstamning === 'pagar') rader.push({ text: 'Kontrollerar avstämningen (hämtar kalendern)…', kind: 'info' });
+  else if (!bokSenasteKalKoll) rader.push({ text: 'Avstämning kalender ↔ inkorg: inte kontrollerad ännu – klicka "Kontrollera avstämning" eller öppna Kalender', kind: 'info' });
+  if (bokDrift.pingTs) rader.push({ text: 'Status hämtad ' + kortTidLabel(bokDrift.pingTs), kind: 'info' });
+  el.innerHTML = rader.map(r => `<div class="bok-status-row ${escapeHtml(r.kind)}">${escapeHtml(r.text)}</div>`).join('');
 }
 
 // ---------- Import från brevlådan (spec 8.1–8.3) ----------
@@ -4663,6 +4808,17 @@ function renderBokInstallningar(body) {
   </div>
 
   <div class="bok-panel">
+    <div class="section-title">Drift och kvoter</div>
+    <div id="bsDrift" class="bok-drift"></div>
+    <div class="bok-inline" style="margin-top:8px">
+      <button type="button" class="btn ghost" id="bsDriftUppdateraBtn">Uppdatera</button>
+      <button type="button" class="btn ghost" id="bsDriftAvstamningBtn">Kontrollera avstämning</button>
+      <span class="bok-muted">Uppdatera = ping mot scriptet. Kontrollera avstämning = hämtar kalendern för en vecka bakåt t.o.m. horisonten + en vecka (högst 8 veckor) och visar händelser som saknas i inkorgen.</span>
+    </div>
+    <div class="hint" style="margin-top:6px">Gränser i scriptet (spec 4.5): 1 aktiv reservation per bokare · 5 bokningar/timme och 15/dag per bokare · 40 bokningar/dag totalt · 20 adresser/dag och 20 nya geokodningar/timme per bokare · admin ~60 anrop/min. Maps-förbrukningen räknas i element (Geocoding + Distance Matrix) mot scriptets dagstak (Script Property MAPS_DAILY_CAP, standard 1 000); när taket nås eller nyckeln avvisas används schablonrestid och scriptet sparar en Maps-varning som visas här.</div>
+  </div>
+
+  <div class="bok-panel">
     <div class="section-title">Arbetstider</div>
     ${dagRader}
     <div class="bok-grid" style="margin-top:8px">
@@ -4756,6 +4912,10 @@ function renderBokInstallningar(body) {
   body.querySelector('#bsAnslutBtn').addEventListener('click', anslutBrevladaSteg1);
   body.querySelector('#bsFortsattBtn').addEventListener('click', () => { anslutBrevladaSteg2().catch(e => bsLogg('Fel: ' + (e && e.message || e), 'err')); });
   body.querySelector('#bsTestaBtn').addEventListener('click', () => { testaAnslutning().catch(e => bsLogg('Fel: ' + (e && e.message || e), 'err')); });
+  body.querySelector('#bsDriftUppdateraBtn').addEventListener('click', () => { hamtaBokDrift(true).catch(() => {}); });
+  body.querySelector('#bsDriftAvstamningBtn').addEventListener('click', () => { kontrolleraAvstamning().catch(() => {}); });
+  ritaBokDrift();
+  hamtaBokDrift(false).catch(() => {});   // ping (oautentiserat, 15 s timeout) – cachat 5 min
   body.querySelector('#bsVisaNyckelBtn').addEventListener('click', () => visaNyckelPanel(!bsNyckelSynlig));
   body.querySelector('#bsTestaAdressBtn').addEventListener('click', testaBasadress);
   body.querySelector('#bsHamtaKalendrarBtn').addEventListener('click', hamtaKalendrar);
@@ -5013,6 +5173,7 @@ async function hamtaKalenderPreview(fran, till, tvinga) {
   const varningar = (Array.isArray(d.varningar) ? d.varningar : []).filter(v => typeof v === 'string').map(v => v.slice(0, 300)).slice(0, 20);
   const res = { ok: true, handelser, varningar, fran, till, hamtadTs: new Date().toISOString() };
   bokKal.cache.set(key, { ts: Date.now(), res });
+  sparaKalKollAvstamning(res); renderBokStatus();   // avstämningsvarningar (4.11) → Drift och kvoter + statusraden
   return res;
 }
 // Normaliserar en händelse ur svaret till dagssegment { datum, startMin, slutMin, … } (händelse över midnatt delas per dag).
@@ -5030,7 +5191,7 @@ function normKalHandelse(h) {
     id: rawId || ignoreId || (kalla + ':' + start), ignoreId, matchIds, kalla, heldag,
     titel: bstr(h.titel, 120) || bstr(h.summary, 120), plats, hasPlace: h.hasPlace === true || (!!plats && h.hasPlace !== false),
     preliminar: h.preliminar === true, raknad: h.raknad === true, ignorerad: h.ignorerad === true,
-    bokningId, restid: h.restid === true, varning: bstr(h.varning, 300) || varningar.join(' · '),
+    bokningId, restid: h.restid === true, varning: Array.from(new Set([bstr(h.varning, 300)].concat(varningar).filter(Boolean))).join(' · '),   // alla varningar (scriptets varning = varningar[0])
     sammanslagenMed: (Array.isArray(h.sammanslagenMed) ? h.sammanslagenMed : []).map(x => bstr(x, 200)).filter(Boolean).slice(0, 10),
     lokal: null, sid: -1
   };
@@ -5128,11 +5289,13 @@ function kalStatusText(s) {
   const st = kalEffStatus(s);
   if (s.kalla === 'lokal') return '<span class="bok-warn-text">saknas i kalendern</span>';
   if (s.kalla === 'reservation') return 'reserverad i högst 5 min';
+  if (kalSaknasIInkorgen(s)) return '<span class="bok-warn-text">saknas i inkorgen</span> · ' + (s.lokal ? 'räknas som upptaget (processen finns lokalt – posten kan vara gallrad)' : 'räknas som upptaget – ingen lokal bokning');   // avstämning 4.11
   if (st.ignorerad) return '<span class="bok-muted">ignorerad – räknas inte</span>';
   if (s.preliminar) return st.raknad ? 'räknas <span class="bok-prel-badge">Preliminär – räknas</span>' : '<span class="bok-prel-badge">Preliminär – ej besvarad</span> räknas inte';
   return 'räknas som upptaget';
 }
 function kalArBokning(s) { return s.kalla === 'bokningar' && !!s.bokningId; }
+function kalSaknasIInkorgen(s) { return kalArBokning(s) && /saknas i inkorgen/i.test(s.varning || ''); }   // avstämningens varning (4.11) per händelse
 function kalAtgardKnappar(s) {
   const st = kalEffStatus(s);
   let h = '';
@@ -5140,6 +5303,8 @@ function kalAtgardKnappar(s) {
     h += `<button type="button" data-act="oppna" data-sid="${s.sid}">Öppna process</button>`;
     if (s.lokal.ev.status === 'bokad') h += `<button type="button" data-act="omboka" data-sid="${s.sid}">Omboka</button><button type="button" class="danger" data-act="avboka" data-sid="${s.sid}">Avboka</button>`;
   }
+  // Avstämning (4.11): händelse i Bokningar-kalendern utan inkorgspost och utan lokal bokning = föräldralös → kan tas bort via cancel { kalenderEventId }
+  else if (kalSaknasIInkorgen(s) && s.ignoreId) h += `<button type="button" class="danger" data-act="tabort" data-sid="${s.sid}" title="Tar bort kalenderhändelsen (Outlook-kopian avbokas)">Ta bort ur kalendern</button>`;
   // Riktiga bokningar (bokningId) avbokas/ombokas – ignoreras de försvinner de ur tillgängligheten och luckan blir ledig igen (dubbelbokning).
   // Händelser i Bokningar-kalendern utan bokningId (manuellt skapade) kan fortfarande ignoreras.
   if (s.kalla !== 'lokal' && (s.ignoreId || s.matchIds.length)) {
@@ -5378,7 +5543,25 @@ async function kalAtgard(act, sid) {
   if (act === 'oppna' && s.lokal) { openLeadModal(s.lokal.lead.id); return; }
   if (act === 'omboka' && s.lokal) { startOmbokaFlode(s.lokal.ev.bokningId); return; }
   if (act === 'avboka' && s.lokal) { await avbokaBokning(s.lokal.ev.bokningId); return; }
+  if (act === 'tabort') { await taBortForaldralosHandelse(s); return; }
   if (act === 'ignorera' || act === 'rakna') await kalIgnoreraAtgard(s, act);
+}
+// Föräldralös kalenderhändelse (saknas i inkorgen, ingen lokal bokning): purge { bokningIds:[s.bokningId], kalenderEventIds:[s.ignoreId] }
+// (A50) – inte cancel: purge raderar ett kommande möte (sendUpdates:'all' så Outlook-kopian avbokas), anonymiserar ett passerat
+// (A19 – inget raderas bakåt i tiden) och stryker bokningId ur scriptets avstämningslista (annars står "saknas i inkorgen: N" kvar i
+// ping/calendar-preview upp till 24 h). Kräver bekräftelse. bokPurgeRadering filtrerar id-formaten och tömmer bokKal.cache.
+async function taBortForaldralosHandelse(s) {
+  if (!kalSaknasIInkorgen(s) || s.lokal || !s.ignoreId) return;
+  const passerad = s.datum < todayStr();
+  if (!confirm('Ta bort "' + kalBlockTitel(s) + '" ' + longDateLabel(s.datum) + (s.heldag ? '' : ' ' + bokTidOf(s.startMin)) + ' ur kalendern?\nHändelsen saknar inkorgspost och lokal bokning. ' + (passerad ? 'Mötet har passerat och anonymiseras (titel "Möte (borttaget)", plats och beskrivning tas bort; Outlook-kopian uppdateras).' : 'Kommande möte tas bort och Outlook-inbjudan avbokas (ett passerat möte anonymiseras i stället).') + ' Kan inte ångras.')) return;
+  setBokStatus(passerad ? 'Anonymiserar kalenderhändelsen…' : 'Tar bort kalenderhändelsen…', 'info');
+  const purge = await bokPurgeRadering({ bokningIds: [s.bokningId], kalenderEventIds: [s.ignoreId] });
+  if (purge.hoppad) { setBokStatus('Händelsen har ett id som scriptet inte känner igen – ta bort den manuellt i Google Kalender', 'warn'); return; }
+  if (purge.ejAnsluten) { setBokStatus('Bokningsmodulen är inte ansluten – ta bort händelsen manuellt i Google Kalender', 'warn'); return; }
+  if (!purge.ok) { setBokStatus('Kunde inte ta bort händelsen: ' + purge.fel, 'err'); return; }
+  if (purge.kalenderFel.length) setBokStatus('Händelsen kunde INTE tas bort/anonymiseras (' + purge.kalenderFel.map(f => f.fel).join(', ') + ') – ta bort den manuellt i Google Kalender', 'warn');
+  else setBokStatus(purge.anonymiserade ? 'Kalenderhändelsen anonymiserad (passerat möte)' : 'Kalenderhändelsen borttagen', 'ok');
+  if (bokningSub === 'kalender') laddaBokKalVy(true);
 }
 // Ignorera/Räkna (3.5): motsatt åtgärd på befintlig post tar bort den; annars skapas posten. Sparas → config-push → ny hämtning.
 async function kalIgnoreraAtgard(s, lage) {
@@ -5732,6 +5915,92 @@ async function avbokaBokning(bokningId) {
   bokKal.cache.clear();
   setBokStatus(problem.length ? 'Bokningen avbokad, men ' + problem.join('; ') : 'Bokningen avbokad – ' + (harEpost ? 'bokaren (' + namn + ') meddelas per e-post' : 'ingen bokare att meddela'), problem.length ? 'warn' : 'ok');
   renderBoard(); renderActivity(); updateBokningTabCount(); renderBookingsIfVisible();
+}
+
+// ---------- Radering: purge i scriptet (spec 4.4, 8.5, 9 – raderingsrutinen steg 1–3) ----------
+// Kontrakt (scriptets handlePurge): request { adminKey, bokningIds:[36 tecken [0-9a-f-]], kalenderEventIds:[[A-Za-z0-9_@.-]{1,256}],
+//   orgnr? (bara giltigt, normaliserat – ogiltigt ger E_VALIDATION i scriptet och skickas därför aldrig), adresser?:[≤ 200 tecken] } →
+// data { borttagna, kalenderRaderade, anonymiserade, geokodBorttagna, kalenderFel:[{ eventId, bokningId, typ:'radera'|'anonymisera'|'sok'|'hamta' }], rev }.
+// Id:n som inte har scriptets format kan inte finnas i brevlådan och filtreras bort (annars avvisar scriptet hela anropet).
+const PURGE_BOKNING_ID_RE = /^[0-9a-f-]{36}$/, PURGE_EVENT_ID_RE = /^[A-Za-z0-9_@.-]{1,256}$/;
+const PURGE_TYP_TEXT = { radera: 'kunde inte tas bort', anonymisera: 'kunde inte anonymiseras', sok: 'kunde inte sökas i kalendern', hamta: 'kunde inte hämtas' };
+// Ordning (9): (1) BOKNING_IMPORT markeras 'raderad' (avstämningen återskapar aldrig bokningen), (2) purge i scriptet
+// (inkorgsposter + geokod bort; framtida kalenderhändelser raderas, passerade anonymiseras – A19), (3) lokal radering + Drive-push.
+// Misslyckas purge → markeringen återställs och raderingen avbryts. Modulen inte ansluten → lokal radering med varning.
+let raderingPagar = false;
+function markeraBokningarRaderade(bokEvents, lead) {   // returnerar en återställningsfunktion (används när purge misslyckas)
+  const ts = new Date().toISOString(), tidigare = [];
+  bokEvents.forEach(ev => {
+    if (!BOKNING_ID_RE.test(String(ev.bokningId || ''))) return;
+    const imp = BOKNING_IMPORT.find(p => p.bokningId === ev.bokningId);
+    if (imp) { tidigare.push({ imp, status: imp.status, sedd: imp.sedd }); imp.status = 'raderad'; imp.sedd = true; }
+    else {
+      const ny = { bokningId: ev.bokningId, status: 'raderad', sedd: true, importeradTs: ts, enhetId, leadId: lead ? lead.id : '', eventId: ev.id, kundId: lead ? (lead.kundId || '') : '', kontaktId: lead ? (lead.kontaktId || '') : '', nyProcess: false, nyKund: false, mojligDubblett: false, avvisadTs: '', avvisadOrsak: '' };
+      BOKNING_IMPORT.push(ny); tidigare.push({ imp: ny, ny: true });
+    }
+  });
+  if (tidigare.length) saveBokningImport(BOKNING_IMPORT);
+  return () => {
+    tidigare.forEach(t => { if (t.ny) { const i = BOKNING_IMPORT.indexOf(t.imp); if (i >= 0) BOKNING_IMPORT.splice(i, 1); } else { t.imp.status = t.status; t.imp.sedd = t.sedd; } });
+    if (tidigare.length) saveBokningImport(BOKNING_IMPORT);
+  };
+}
+async function bokPurgeRadering(p) {
+  const bokningIds = Array.from(new Set((p.bokningIds || []).map(x => String(x || '')).filter(x => PURGE_BOKNING_ID_RE.test(x)))).slice(0, 100);
+  const kalenderEventIds = Array.from(new Set((p.kalenderEventIds || []).map(x => String(x || '')).filter(x => PURGE_EVENT_ID_RE.test(x)))).slice(0, 100);
+  const orgnr = normalizeOrgnr(p.orgnr);   // '' när ogiltigt/tomt → ingen orgnr-matchning (scriptet matchar bara normaliserade, giltiga orgnr)
+  const adresser = Array.from(new Set((p.adresser || []).map(x => bstr(x, BOK_MAXLEN.adress).trim()).filter(Boolean))).slice(0, 20);   // scriptets PURGE_MAX_ADRESSER
+  const ut = { ok: true, hoppad: false, ejAnsluten: false, borttagna: 0, kalenderRaderade: 0, anonymiserade: 0, geokodBorttagna: 0, kalenderFel: [], rev: 0, fel: '', antalId: Math.max(bokningIds.length, kalenderEventIds.length) };
+  if (!bokningIds.length && !kalenderEventIds.length && !orgnr) { ut.hoppad = true; return ut; }   // inget att rensa i brevlådan
+  if (!bokAnsluten()) { ut.ejAnsluten = true; return ut; }                                     // lokal radering – varning i visaPurgeResultat
+  const req = { bokningIds, kalenderEventIds };
+  if (orgnr) req.orgnr = orgnr;
+  if (adresser.length) req.adresser = adresser;
+  const r = await bokAdminApi('purge', req);
+  if (!r.ok) {
+    ut.ok = false; ut.fel = bokFelText(r);
+    if (r.error && r.error.code === 'E_NOT_IMPLEMENTED') ut.fel += ' – uppdatera scriptet (Inställningar › Script)';
+    return ut;
+  }
+  const d = isPlainObject(r.data) ? r.data : {};
+  ut.borttagna = Math.max(0, Number(d.borttagna) || 0);
+  ut.kalenderRaderade = Math.max(0, Number(d.kalenderRaderade) || 0);
+  ut.anonymiserade = Math.max(0, Number(d.anonymiserade) || 0);
+  ut.geokodBorttagna = Math.max(0, Number(d.geokodBorttagna) || 0);
+  ut.rev = Number(d.rev) || 0;
+  ut.kalenderFel = (Array.isArray(d.kalenderFel) ? d.kalenderFel : []).slice(0, 50).map(f => {
+    if (typeof f === 'string') return { id: '', fel: f.slice(0, 200) };
+    if (!isPlainObject(f)) return null;
+    const typ = bstr(f.typ, 40);
+    return { id: bstr(f.eventId, 256) || bstr(f.kalenderEventId, 256) || bstr(f.bokningId, 64), typ, fel: PURGE_TYP_TEXT[typ] || bstr(f.fel, 200) || bstr(f.message, 200) || bstr(f.kod, 40) || 'kalenderfel' };
+  }).filter(Boolean);
+  bokKal.cache.clear();   // kalendern har ändrats
+  bokInkorgCache = bokInkorgCache.filter(b => !bokningIds.includes(String(b.bokningId || '')) && !(orgnr && b.kund && normalizeOrgnr(b.kund.orgnr) === normalizeOrgnr(orgnr)));
+  return ut;
+}
+// Statusraden (6.1) visar purge-resultatet; kalenderFel → varning (och alert, eftersom statusraden bara syns under Bokningar).
+function visaPurgeResultat(purge, prefix) {
+  if (!purge || purge.hoppad) return;
+  if (purge.ejAnsluten) {
+    const t = prefix + ' lokalt – bokningsmodulen är inte ansluten, så ' + (purge.antalId ? purge.antalId + ' kalenderhändelse(r) och inkorgsposter måste tas bort manuellt i Google Kalender och brevlådan' : 'ev. inkorgsposter måste tas bort manuellt i brevlådan');
+    setBokStatus(t, 'warn'); alert(t); return;
+  }
+  const delar = [purge.borttagna + ' inkorgspost(er) borttagna', purge.kalenderRaderade + ' kommande kalenderhändelse(r) raderade', purge.anonymiserade + ' passerade anonymiserade'];
+  if (purge.geokodBorttagna) delar.push(purge.geokodBorttagna + ' adress(er) ur geokodcachen');
+  const n = purge.kalenderFel.length;
+  if (n) {
+    const t = prefix + ' – ' + delar.join(', ') + '. ' + n + ' kalenderhändelse' + (n === 1 ? '' : 'r') + ' kunde inte tas bort/anonymiseras – kalenderhändelser måste tas bort manuellt';
+    setBokStatus(t, 'warn', { label: 'Visa kalendern', fn: () => oppnaBokKalender('koll') });
+    alert(t + ':\n' + purge.kalenderFel.map(f => '• ' + (f.id ? f.id + ': ' : '') + f.fel).join('\n'));
+  } else setBokStatus(prefix + ' – brevlådan: ' + delar.join(', ') + (purge.rev ? ' (rev ' + purge.rev + ')' : ''), 'ok');
+  updateBokningTabCount(); renderBookingsIfVisible();
+}
+function oppnaBokKalender(lage) {   // öppnar Bokningar › Kalender (lage 'grid'|'koll') från valfri flik
+  bokningSub = 'kalender'; if (lage) bokKal.lage = lage; bokKal.valdSid = -1;
+  const body = document.getElementById('bokningBody');
+  if (body && body.querySelector('#bkVy')) renderBokKalender(body);   // redan ritad – rita om med nytt läge (renderBookings rör inte vyn)
+  const tabBtn = document.querySelector('.tab-btn[data-tab="bokning"]');
+  if (tabBtn && !tabBtn.classList.contains('active')) tabBtn.click(); else renderBookings();
 }
 
 // ---------- Formulär-underfliken (6.6) ----------

@@ -1,14 +1,14 @@
 /**
  * Pipeline by Redneck Engineering – bokningsmodul, Apps Script-kärna (Code.gs).
  *
- * Milstolpe M4. Specifikation: "[C] Bokningsmodul - specifikation steg 1.md", avsnitt 4 (brevlåda, transport,
+ * Milstolpe M5. Specifikation: "[C] Bokningsmodul - specifikation steg 1.md", avsnitt 4 (brevlåda, transport,
  * endpoints, säkerhet), 5 (tillgänglighet – anropas i Availability.gs) och 9 (säkerhet/GDPR).
  *
  * Projektet består av tre filer:
  *   Code.gs          – denna fil: Script Properties, filhantering, doPost/doGet, autentisering, gränser,
  *                      reservation, book, kalenderskrivning, notismejl, hello/ping/geocode/release,
- *                      admin-endpoints setup/config-push/calendars-list/inbox-list/ack/reject (M3) och
- *                      calendar-preview/rebook/cancel (M4); purge är stub (E_NOT_IMPLEMENTED) till M5.
+ *                      admin-endpoints setup/config-push/calendars-list/inbox-list/ack/reject (M3),
+ *                      calendar-preview/rebook/cancel (M4), purge + dailyMaintenance på riktigt (M5).
  *   Calendar.gs      – readBusy(fran, till), parseIcs, mergeBusy, applyIgnore, buildBusyList(from, to).
  *   Availability.gs  – computeAvailability(req), dayPlan, placeTravel, geocodeAddress(adress), travelMinutes,
  *                      swedishHolidays.
@@ -25,7 +25,7 @@
 // Konstanter
 // ============================================================
 
-const SCRIPT_VERSION = 2;                       // MIN_SCRIPT_VERSION i index.html/bokning.js jämförs mot denna (4.12)
+const SCRIPT_VERSION = 3;                       // MIN_SCRIPT_VERSION i index.html/bokning.js jämförs mot denna (4.12); 3 = M5 (purge, dailyMaintenance, nya ping-fält)
 const TZ = 'Europe/Stockholm';
 const APP_URL = 'https://speeedfreeak.github.io/telexia-pipeline/';   // länk i notismejlet (4.9)
 const MAX_BODY_BYTES = 16384;                   // body kontrolleras före JSON.parse (4.3)
@@ -44,7 +44,20 @@ const INBOX_LIST_MAX = 500;
 const ACK_MAX_IDS = 200;
 const ORSAK_MAX = 500;                          // reject/cancel/rebook-orsak (mejlas till bokaren)
 const PREVIEW_MAX_DAGAR = 56;                   // calendar-preview: högst 8 veckor per förfrågan (M4)
-const AVSTAMNING_CACHE_KEY = 'avstamning:saknas'; // CacheService: JSON-lista av bokningId som saknas i inkorgen (4.11, skrivs av dailyMaintenance i M5)
+const AVSTAMNING_CACHE_KEY = 'avstamning:saknas'; // CacheService (≤ 6 h): JSON-lista av bokningId som saknas i inkorgen (4.11) – läses även av calendar-preview
+const AVSTAMNING_PROP = 'avstamning_saknas';      // Script Property { ts, ids } – dailyMaintenance skriver, calendar-preview läser (24 h-fönstret, A48)
+const AVSTAMNING_GILTIG_MS = 36 * 3600000;        // avstämningens varning gäller tills nästa körning; efter 36 h utan körning tystnar den
+const AVSTAMNING_MAX_IDS = 100;
+const MAINT_PROP_SENAST = 'maintenance_senast';   // ISO för senaste lyckade dailyMaintenance (ping.underhallSenast, sanity check V1)
+const PURGE_MAX_IDS = 100;                        // purge: högst 100 bokningId + 100 kalenderEventId per anrop
+const PURGE_MAX_ADRESSER = 20;                    // purge: högst 20 adresser per anrop (M5-brief; kundradering behöver 1–3)
+const PURGE_ANONYM_TITEL = 'Möte (borttaget)';    // A19: titel på anonymiserad passerad händelse – räknas aldrig som föräldralös igen
+const PURGE_EVENT_ID_RE = /^[A-Za-z0-9_@.-]{1,256}$/;  // Google event-id (base32hex, ev. _<ts> för instanser)
+const GALLRING_IMPORTERAD_DAGAR = 30;             // 4.11: importerad/avvisad/avbokad – 30 dagar efter import/ändring OCH mötet passerat
+const GALLRING_NY_DAGAR = 90;                     // 4.11: ny – 90 dagar efter mötets slut ("gallrad utan import")
+const GALLRING_CACHE_DAGAR = 180;                 // 4.11: geokod-/restidsposter äldre än 180 dagar
+const GALLRING_GEOKOD_GALLRAD_DAGAR = 90;         // 4.11: geokodpost vars adress hör till en gallrad bokning – efter 90 dagar
+const MAINT_LOCK_WAIT_MS = 20000;                 // 4.8: triggern väntar 20 s på låset
 const EPOST_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const DATUM_RE = /^\d{4}-\d{2}-\d{2}$/;
 const ISO_START_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2}(\.\d+)?)?(Z|[+-]\d{2}:?\d{2})$/;
@@ -189,14 +202,40 @@ const SV_MONTHS = ['januari','februari','mars','april','maj','juni','juli','augu
 // och anropas per slot/dag-segment/ICS-instans. Nycklar: d.getTime() resp. lokal väggtid (offset beror bara på den).
 const TZ_PARTS_CACHE = new Map();
 const TZ_OFFSET_CACHE = new Map();
+// Snabbväg (M5, A47): Stockholms offset räknas i ren JS enligt EU-regeln (sommartid från sista söndagen i mars 01:00 UTC till
+// sista söndagen i oktober 01:00 UTC; +02:00 resp. +01:00). Aktiveras först när tzSnabbOk_() verifierat mot Utilities.formatDate
+// att scriptets zon ger exakt samma väggtid för sex kontrollinstanter (vinter, sommar, båda omställningarna) – annars används
+// Java-bryggan som förut. Sparar ~1 ms per unik tidpunkt: ett ICS-flöde med hundratals händelser och serier ger tusentals anrop.
+let TZ_SNABB = null;
+function tzSistaSondagUtcMs_(ar, manad) {          // sista söndagen i månaden (0-baserad) kl 00:00 UTC
+  const sista = new Date(Date.UTC(ar, manad + 1, 0));
+  return sista.getTime() - sista.getUTCDay() * 86400000;
+}
+function tzStockholmOffsetMin_(ms) {
+  const ar = new Date(ms).getUTCFullYear();
+  const start = tzSistaSondagUtcMs_(ar, 2) + 3600000, slut = tzSistaSondagUtcMs_(ar, 9) + 3600000;
+  return ms >= start && ms < slut ? 120 : 60;
+}
+function tzPartsJs_(d) {
+  const s = new Date(d.getTime() + tzStockholmOffsetMin_(d.getTime()) * 60000).toISOString();
+  return { datum: s.slice(0, 10), tid: s.slice(11, 16) };
+}
+function tzSnabbOk_() {
+  if (TZ_SNABB !== null) return TZ_SNABB;
+  try {
+    const prov = [Date.UTC(2026, 0, 15, 12), Date.UTC(2026, 6, 15, 12), Date.UTC(2026, 2, 29, 0, 30), Date.UTC(2026, 2, 29, 1, 30), Date.UTC(2026, 9, 25, 0, 30), Date.UTC(2026, 9, 25, 1, 30)];
+    TZ_SNABB = prov.every(ms => { const d = new Date(ms), p = tzPartsJs_(d); return Utilities.formatDate(d, APP_TZ, 'yyyy-MM-dd HH:mm') === p.datum + ' ' + p.tid; });
+  } catch (e) { TZ_SNABB = false; }
+  return TZ_SNABB;
+}
 function tzParts(d) {
   // Ogiltigt Date (t.ex. trasig ISO-sträng i en inkorgspost) ger tomma fält i stället för Java-undantag → E_INTERNAL.
   if (!(d instanceof Date) || isNaN(d.getTime())) return { datum: '', tid: '' };
   const k = d.getTime();
   let p = TZ_PARTS_CACHE.get(k);
   if (!p) {
-    const s = Utilities.formatDate(d, APP_TZ, 'yyyy-MM-dd HH:mm');
-    p = { datum: s.slice(0, 10), tid: s.slice(11, 16) };
+    if (tzSnabbOk_()) p = tzPartsJs_(d);
+    else { const s = Utilities.formatDate(d, APP_TZ, 'yyyy-MM-dd HH:mm'); p = { datum: s.slice(0, 10), tid: s.slice(11, 16) }; }
     TZ_PARTS_CACHE.set(k, p);
   }
   return { datum: p.datum, tid: p.tid };
@@ -271,9 +310,14 @@ function errEnvelope(code, message, details) {
 // ============================================================
 
 function doPost(e) {
+  try { return doPostInner_(e); }
+  finally { if (typeof availFlushGeokod_ === 'function') availFlushGeokod_(); }   // körningens nya geokodposter → cache-filen, en skrivning (A51)
+}
+function doPostInner_(e) {
   const t0 = Date.now(); let action = '?', bokareId = '';
   try {
     if (typeof kalResetMemo_ === 'function') kalResetMemo_();   // per-anrop-memo (ICS) – varje request är en ny körning
+    if (typeof availResetMemo_ === 'function') availResetMemo_();   // per-anrop-memo (cache-filen, A51)
 
     if (!e || !e.postData || typeof e.postData.contents !== 'string' || e.postData.contents.length > MAX_BODY_BYTES)
       return respond(errEnvelope('E_VALIDATION', 'Ogiltig eller för stor förfrågan'));
@@ -829,7 +873,13 @@ function handlePing(req, ctx) {
     mapsNyckel: !!getProp(PROP.MAPS_API_KEY),
     mapsForbrukningIdag: mapsElementsToday(),
     mapsVarning: CacheService.getScriptCache().get('maps:varning') || '',
-    icsStatus: icsStatusForPing(config)
+    mapsDagstak: mapsDailyCap(),   // M5: dagstaket (Script Property MAPS_DAILY_CAP, default 1000) så att Inställningar kan visa "N av tak"
+    icsStatus: icsStatusForPing(config),
+    // M5 (10.4): bokningar i dag (Script Property book_count_<YYYYMMDD>, samma räknare som MAX_BOOK_GLOBAL_D), senaste lyckade
+    // dailyMaintenance (V1: triggern kör fortfarande) och antal avstämningsvarningar "saknas i inkorgen" (4.11).
+    bokningarIdag: parseInt(getProp('book_count_' + ymdCompact(todayStr())), 10) || 0,
+    underhallSenast: getProp(MAINT_PROP_SENAST),
+    avstamningSaknas: avstamningSaknas().antal
   };
 }
 // Kontroll av de tre brevlådefilerna (4.2, cachad 10 min per id). Returnerar '' när allt är i ordning, annars '<roll>: <statisk orsak>'.
@@ -845,14 +895,17 @@ function brevladaStatus() {
   return '';
 }
 // ICS-status: i första hand Calendar.gs getIcsStatus() (CacheService 'ics:meta'); reserv = cache-filens icsReserv (senast lyckade läsning).
+// M5: dessutom hamtningMs (senaste hämtningens tid), cachad (resultatet ryms i CacheService) och langsam (senaste hämtningen tog
+// > 5 s → reservkopian används vid cache-miss i 30 min, A46) – visas under Inställningar › ICS-status.
 function icsStatusForPing(config) {
-  const st = { ok: false, hamtadTs: '', antal: 0, medPlats: 0, preliminara: 0 };
+  const st = { ok: false, hamtadTs: '', antal: 0, medPlats: 0, preliminara: 0, hamtningMs: 0, cachad: false, langsam: false };
   if (!config) return st;
   if (!config.installningar.outlookIcsUrl) { st.ok = true; return st; }
   try {
     if (typeof getIcsStatus === 'function') {
       const g = getIcsStatus();
-      if (isPlainObject(g)) return { ok: g.ok === true, hamtadTs: str(g.hamtadTs), antal: Number(g.antal) || 0, medPlats: Number(g.medPlats) || 0, preliminara: Number(g.preliminara) || 0 };
+      if (isPlainObject(g)) return { ok: g.ok === true, hamtadTs: str(g.hamtadTs), antal: Number(g.antal) || 0, medPlats: Number(g.medPlats) || 0, preliminara: Number(g.preliminara) || 0,
+        hamtningMs: Number(g.hamtningMs) || 0, cachad: g.cachad === true, langsam: g.langsam === true };
     }
     const r = readCacheFile().icsReserv;
     st.ok = true;
@@ -1231,8 +1284,7 @@ function handleGeocode(req, ctx) {
 
 // ============================================================
 // Admin-endpoints (4.4) – autentiseras med adminKey (authAdmin: ~60/min, konstanttidsjämförelse).
-// M3: setup, config-push, calendars-list, inbox-list, ack, reject. M4: calendar-preview, rebook, cancel.
-// Stub (E_NOT_IMPLEMENTED) till M5: purge.
+// M3: setup, config-push, calendars-list, inbox-list, ack, reject. M4: calendar-preview, rebook, cancel. M5: purge.
 // ============================================================
 
 // ---------- setup (4.2, 4.4, 10.1 steg 4c) ----------
@@ -1547,7 +1599,7 @@ function notifyBokareAvvisad(config, bokning, orsak) {
 // inkorgen (appen har dem lokalt) – bokningId räcker för att matcha. `id` = intern busy-id (unik per segment, prefix anger källa,
 // används i sammanslagenMed); `ignoreraId` = det id KALENDER_IGNORERA ska lagra (Google event-id / ICS UID / bokningens
 // kalenderhändelse-id), `matchIds` = alla id:n posten matchas på (event-id, recurringEventId, UID). Varningar: ICS-fel,
-// "Många obesvarade …", Maps-varning, avstämningens "saknas i inkorgen" (4.11, fylls av dailyMaintenance i M5 – läses redan här),
+// "Många obesvarade …", Maps-varning, avstämningens "saknas i inkorgen" (4.11, fylls av dailyMaintenance – Script Property + CacheService),
 // "N avbokade/avvisade möten ligger kvar i kalendern" (4.7: händelse vars bokningId är avbokad/avvisad i inkorgen, t.ex. efter
 // misslyckad Calendar.Events.remove – posten får varning "Avbokad/Avvisad i inkorgen men händelsen finns kvar …").
 function handleCalendarPreview(req, ctx) {
@@ -1567,7 +1619,18 @@ function handleCalendarPreview(req, ctx) {
   try { inbox = readInbox(); } catch (e) { inbox = null; }             // null → buildBusyList läser själv och varnar
   const dodaPoster = avbokadeIInkorgen(inbox);
   const busy = buildBusyList(from, to, { config: config, inbox: inbox, farsk: false });
+  // Avstämning (4.11, A52): den nattliga listan (Script Property/CacheService) + en LIVE jämförelse av vyn mot inkorgen, så att
+  // "Kontrollera avstämning" ser en föräldralös händelse (bokningId utan inkorgspost) direkt – även före första nattkörningen,
+  // efter att en händelse skapats under dagen och när triggern dött (V1). Anonymiserade händelser (PURGE_ANONYM_TITEL) räknas inte.
   const saknas = avstamningSaknas();
+  if (inbox && Array.isArray(inbox.bokningar)) {
+    const kanda = {};
+    inbox.bokningar.forEach(b => { if (b && b.bokningId) kanda[str(b.bokningId)] = true; });
+    busy.forEach(x => {
+      const id = str(x.bokningId);
+      if (x.kalla === 'bokningar' && id && BOKNING_ID_RE.test(id) && !kanda[id] && str(x.summary) !== PURGE_ANONYM_TITEL && saknas[id] !== true) { saknas[id] = true; saknas.antal++; }
+    });
+  }
   const handelser = busy.map(x => previewExport(x, saknas, dodaPoster));
   const varningar = [];
   const lagg = v => { const s = str(v); if (s && varningar.indexOf(s) < 0) varningar.push(s); };
@@ -1584,16 +1647,29 @@ function handleCalendarPreview(req, ctx) {
     handelser: handelser, icsStatus: icsStatusForPing(config), obesvarade: obesvarade, varningar: varningar
   };
 }
-// Avstämningens lista "saknas i inkorgen" (4.11): CacheService AVSTAMNING_CACHE_KEY = JSON-lista av bokningId (skrivs av
-// dailyMaintenance i M5). → { <bokningId>: true, …, antal }.
+// Avstämningens lista "saknas i inkorgen" (4.11): Script Property AVSTAMNING_PROP { ts, ids } + CacheService AVSTAMNING_CACHE_KEY
+// (JSON-lista av bokningId), båda skrivna av dailyMaintenance (avstamningSkriv). → { <bokningId>: true, …, antal }.
 function avstamningSaknas() {
   const ut = { antal: 0 };
+  const lagg = lista => { if (Array.isArray(lista)) lista.forEach(id => { if (typeof id === 'string' && id && id !== 'antal' && !ut[id]) { ut[id] = true; ut.antal++; } }); };
+  // Script Property (skrivs av dailyMaintenance, giltig AVSTAMNING_GILTIG_MS – CacheService klarar högst 6 h, spec säger 24 h, A48) …
+  try {
+    const raw = getProp(AVSTAMNING_PROP);
+    const obj = raw ? JSON.parse(raw) : null;
+    if (isPlainObject(obj) && typeof obj.ts === 'string' && Date.now() - new Date(obj.ts).getTime() < AVSTAMNING_GILTIG_MS) lagg(obj.ids);
+  } catch (e) { /* best effort */ }
+  // … plus CacheService-nyckeln (samma lista, kortare liv – används även av tester/felsökning).
   try {
     const raw = CacheService.getScriptCache().get(AVSTAMNING_CACHE_KEY);
-    const lista = raw ? JSON.parse(raw) : [];
-    if (Array.isArray(lista)) lista.forEach(id => { if (typeof id === 'string' && id && id !== 'antal' && !ut[id]) { ut[id] = true; ut.antal++; } });
+    lagg(raw ? JSON.parse(raw) : []);
   } catch (e) { /* cache är best effort */ }
   return ut;
+}
+// Skriver avstämningslistan (dailyMaintenance) eller tar bort id:n ur den (purge). ids = hela nya listan.
+function avstamningSkriv(ids, ts) {
+  const lista = (Array.isArray(ids) ? ids : []).filter(id => typeof id === 'string' && id).slice(0, AVSTAMNING_MAX_IDS);
+  try { setProp(AVSTAMNING_PROP, JSON.stringify({ ts: typeof ts === 'string' && ts ? ts : nowIso(), ids: lista })); } catch (e) { /* best effort */ }
+  try { CacheService.getScriptCache().put(AVSTAMNING_CACHE_KEY, JSON.stringify(lista), TTL_D_S); } catch (e) { /* best effort */ }
 }
 // Inkorgens avbokade/avvisade poster (status 'avbokad'/'avvisad' – dit hör även de med historik typ 'kalenderfel') → { <bokningId>: status }.
 // En kalenderhändelse med sådant bokningId ska inte finnas kvar (cancel/reject tar bort den) – finns den ändå varnar Kalenderkoll (4.7).
@@ -1816,7 +1892,20 @@ function handleCancel(req, ctx) {
     let b = bokningId ? findBokningInInbox(inbox, bokningId) : null;
     if (!b && !bokningId && kalenderEventId) b = inbox.bokningar.find(x => str(x.kalenderEventId) === kalenderEventId) || null;
     if (!b) {
-      if (!bokningId && kalenderEventId) { kal = removeBookingEvent(config, kalenderEventId); postSaknas = true; rev = Number(inbox.rev) || 0; return; }
+      if (!bokningId && kalenderEventId) {
+        // Föräldralös händelse (4.4, Kalenderkoll "Ta bort ur kalendern"): hämta först dag + bokningId så att busy:<datum>-cachen
+        // (60 s) töms och id:t stryks ur avstämningslistan – annars visar nästa calendar-preview händelsen (och 'saknas i
+        // inkorgen') i upp till en minut efter borttagningen. Borta/fel vid hämtning → bara borttagning som förut.
+        let resurs = null;
+        try { resurs = Calendar.Events.get(bokningarKalenderId(config.installningar), kalenderEventId); } catch (e) { resurs = null; }
+        kal = removeBookingEvent(config, kalenderEventId); postSaknas = true; rev = Number(inbox.rev) || 0;
+        if (resurs) {
+          clearBusyCacheFor({ start: purgeStartIso(resurs), slut: purgeSlutIso(resurs) });
+          const priv = (resurs.extendedProperties && resurs.extendedProperties.private) || {};
+          if (priv.bokningId) avstamningStryk({ [str(priv.bokningId)]: true });
+        }
+        return;
+      }
       fel('E_NOT_FOUND');
     }
     if (REBOOK_STATUSAR.indexOf(str(b.status)) < 0) fel('E_STATE', undefined, { status: str(b.status) });
@@ -1866,12 +1955,172 @@ function notifyBokareAvbokad(config, bokning, orsak) {
   catch (e) { loggaMejlfel(bokning.bokningId); return false; }
 }
 
-// ---------- Stub till M5 ----------
-function adminStub(req, ctx) {
+// ---------- purge (4.4, 8.5, 9 raderingsrutin, A19) – M5 ----------
+// In:  { adminKey, bokningIds?:[…], kalenderEventIds?:[…], orgnr?, adresser?:[…] } – minst ett av fälten måste ha innehåll.
+//      bokningIds: inkorgs-id:n (36 tecken); kalenderEventIds: appens ev.kalenderEventId (Google event-id); orgnr: kundens orgnr
+//      (normaliseras med normalizeOrgnr – bara ett giltigt orgnr matchar, aldrig tomt); adresser: adressträngar vars geokodposter
+//      ska bort. Högst PURGE_MAX_IDS per id-lista, PURGE_MAX_ADRESSER adresser.
+// Ut:  { borttagna, kalenderRaderade, anonymiserade, geokodBorttagna, kalenderFel:[{ eventId, bokningId, typ }], rev }
+//      borttagna = inkorgsposter som togs bort; kalenderRaderade = framtida kalenderhändelser raderade (sendUpdates 'all',
+//      404/410 = redan borta = ok, räknas inte); anonymiserade = passerade händelser med titel "Möte (borttaget)", tom plats/
+//      beskrivning och bokningId-egenskaperna borttagna (sendUpdates 'all' så Outlook-kopian uppdateras, V9); geokodBorttagna =
+//      geokodposter ur cache-filen (adresser ur berörda poster + adresser[]); kalenderFel = händelser som inte kunde raderas/
+//      anonymiseras/sökas (typ 'radera' | 'anonymisera' | 'sok' | 'hamta'); rev = inkorgens rev efter skrivningen.
+// Under lås (4.8): inkorgsposter vars bokningId ingår ELLER vars kund.orgnr = orgnr tas bort; kalenderhändelser hittas via
+// posten (kalenderEventId), via kalenderEventIds och via Calendar.Events.list(privateExtendedProperty 'bokningId=<id>') för
+// bokningId utan känt event-id; händelse med slut i framtiden raderas, passerad anonymiseras (A19 – aldrig radering bakåt) efter
+// Calendar.Events.get (borta/'cancelled'/redan anonymiserad → hoppas över utan patch eller notis);
+// inkorgen skrivs (rev+1) om något togs bort; geokodposter tas bort ur cache-filen och CacheService (geo:<hash>); busy:<datum>
+// töms för berörda dagar och id:na stryks ur avstämningslistan. Ingen nätverks-I/O (Calendar/Drive är Google-interna, som i
+// cancel/reject). Inga mejl. Kalenderfel fäller aldrig anropet – de rapporteras i kalenderFel (appen visar varning).
+function handlePurge(req, ctx) {
   authAdmin(req, ctx);
-  fel('E_NOT_IMPLEMENTED');
+  const idLista = (v, namn, re, max) => {
+    if (v === undefined || v === null) return [];
+    if (!Array.isArray(v) || v.length > max) valideringsfel({ [namn]: 'Ogiltigt värde' });
+    const ut = [];
+    v.forEach(x => { if (typeof x !== 'string' || !re.test(x)) valideringsfel({ [namn]: 'Ogiltigt värde' }); if (ut.indexOf(x) < 0) ut.push(x); });
+    return ut;
+  };
+  const bokningIds = idLista(req.bokningIds, 'bokningIds', BOKNING_ID_RE, PURGE_MAX_IDS);
+  const kalenderEventIds = idLista(req.kalenderEventIds, 'kalenderEventIds', PURGE_EVENT_ID_RE, PURGE_MAX_IDS);
+  const orgnrRaw = req.orgnr === undefined || req.orgnr === null ? '' : strField(req.orgnr, 'orgnr', 40, false);
+  const orgnr = normalizeOrgnr(orgnrRaw);
+  if (orgnrRaw && !orgnr) valideringsfel({ orgnr: 'Ogiltigt orgnr' });
+  let adresser = [];
+  if (req.adresser !== undefined && req.adresser !== null) {
+    if (!Array.isArray(req.adresser) || req.adresser.length > PURGE_MAX_ADRESSER) valideringsfel({ adresser: 'Ogiltigt värde' });
+    adresser = req.adresser.map(a => strField(a, 'adresser', MAXLEN.adress, false)).filter(Boolean);
+  }
+  if (!bokningIds.length && !kalenderEventIds.length && !orgnr && !adresser.length) valideringsfel({ bokningIds: 'Inget att radera' });
+  const config = loadConfig(ctx);
+  let calId = '';
+  try { calId = bokningarKalenderId(config.installningar); } catch (e) { calId = ''; }
+  const ut = { borttagna: 0, kalenderRaderade: 0, anonymiserade: 0, geokodBorttagna: 0, kalenderFel: [], rev: 0 };
+
+  withScriptLock(() => {
+    const inbox = readInbox();
+    const idSet = {}; bokningIds.forEach(id => { idSet[id] = true; });
+    const traff = b => idSet[str(b.bokningId)] === true || (!!orgnr && isPlainObject(b.kund) && normalizeOrgnr(b.kund.orgnr) === orgnr);
+    const borttagna = inbox.bokningar.filter(traff);
+    const kvar = inbox.bokningar.filter(b => !traff(b));
+    // Alla bokningId som berörs (begärda + funna via orgnr) och deras kända händelser.
+    const allaIds = {}; bokningIds.forEach(id => { allaIds[id] = ''; });
+    borttagna.forEach(b => { if (b.bokningId) allaIds[str(b.bokningId)] = str(b.kalenderEventId); });
+    const handelser = {};   // eventId → { bokningId, slut (ISO|''), resurs|null }
+    // Samma händelse kan komma från flera håll (appen skickar både bokningId och kalenderEventId): en befintlig post kompletteras
+    // med slut/resurs/bokningId när den saknar dem, så att sökträffen (som bär end) slipper ett extra Calendar.Events.get.
+    const laggHandelse = (eventId, bokningId, slut, resurs) => {
+      if (!eventId) return;
+      const h = handelser[eventId];
+      if (!h) { handelser[eventId] = { bokningId: bokningId || '', slut: slut || '', resurs: resurs || null }; return; }
+      if (!h.bokningId && bokningId) h.bokningId = bokningId;
+      if (!h.slut && slut) h.slut = slut;
+      if (!h.resurs && resurs) h.resurs = resurs;
+    };
+    borttagna.forEach(b => laggHandelse(str(b.kalenderEventId), str(b.bokningId), str(b.slut), null));
+    kalenderEventIds.forEach(id => laggHandelse(id, '', '', null));
+    if (calId) {
+      Object.keys(allaIds).forEach(id => {
+        if (allaIds[id]) return;   // känt event-id via posten
+        try { listGoogleEventsByBokningId_(calId, id).forEach(ev => laggHandelse(str(ev.id), id, purgeSlutIso(ev), ev)); }
+        catch (e) { ut.kalenderFel.push({ eventId: '', bokningId: id, typ: 'sok' }); }
+      });
+    }
+    const adressNycklar = {};
+    borttagna.forEach(b => { const k = normalizeAdressKey(b.adress); if (k) adressNycklar[k] = true; });
+    adresser.forEach(a => { const k = normalizeAdressKey(a); if (k) adressNycklar[k] = true; });
+
+    // Kalendern: framtida raderas, passerade anonymiseras. Utan bokningskalender → alla kända händelser blir kalenderFel.
+    // Passerade händelser hämtas först (Calendar.Events.get) när resursen inte redan är känd: en avbokad/avvisad post behåller
+    // kalenderEventId fast cancel/reject redan tagit bort händelsen (404/410 eller status 'cancelled' → inget att anonymisera,
+    // ingen patch och ingen notis), och en redan anonymiserad händelse (PURGE_ANONYM_TITEL) patchas inte om.
+    const nuMs = Date.now();
+    const hamta = h => {   // → true om händelsen fortfarande ska hanteras
+      if (!h.resurs) {
+        try { h.resurs = Calendar.Events.get(calId, h.eventId); }
+        catch (e) { if (calendarEventGone(e)) return false; ut.kalenderFel.push({ eventId: h.eventId, bokningId: h.bokningId, typ: 'hamta' }); return false; }
+      }
+      return !(h.resurs && (h.resurs.status === 'cancelled' || str(h.resurs.summary) === PURGE_ANONYM_TITEL));
+    };
+    Object.keys(handelser).forEach(eventId => {
+      const h = handelser[eventId]; h.eventId = eventId;
+      if (!calId) { ut.kalenderFel.push({ eventId, bokningId: h.bokningId, typ: 'radera' }); return; }
+      let slutMs = h.slut ? new Date(h.slut).getTime() : NaN;
+      if (isNaN(slutMs)) {
+        if (!hamta(h)) return;
+        slutMs = new Date(purgeSlutIso(h.resurs)).getTime();
+      }
+      const framtida = isNaN(slutMs) || slutMs > nuMs;
+      if (!framtida && !hamta(h)) return;
+      const r = framtida ? purgeRaderaHandelse(calId, eventId) : purgeAnonymiseraHandelse(calId, eventId);
+      if (r.fel) ut.kalenderFel.push({ eventId, bokningId: h.bokningId, typ: r.typ });
+      else if (r.typ === 'radera') { if (r.gjort) ut.kalenderRaderade++; }
+      else if (r.gjort) ut.anonymiserade++;
+    });
+
+    if (borttagna.length) { inbox.bokningar = kvar; writeInbox(inbox); }
+    ut.borttagna = borttagna.length;
+    ut.rev = Number(inbox.rev) || 0;
+
+    // Cache-filen (geokod) + CacheService (geo:<hash>, busy:<datum>, avstämning).
+    const nycklar = Object.keys(adressNycklar);
+    if (nycklar.length) {
+      updateCacheFile(obj => { let n = 0; nycklar.forEach(k => { if (obj.geokod && Object.prototype.hasOwnProperty.call(obj.geokod, k)) { delete obj.geokod[k]; n++; } }); ut.geokodBorttagna = n; return n > 0; });
+      try { CacheService.getScriptCache().removeAll(nycklar.map(k => 'geo:' + sha256hex(k))); } catch (e) { /* best effort */ }
+    }
+    borttagna.forEach(b => clearBusyCacheFor(b));
+    // Händelser utan inkorgspost (kalenderEventIds/sökning) har ingen känd dag utan extra anrop – töm busy:<datum> för hela
+    // preview-fönstret (≤ ~80 nycklar, 60 s-cache) så att Kalenderkoll inte visar den raderade händelsen (och 'saknas i inkorgen')
+    // i upp till en minut efter "Ta bort ur kalendern".
+    if (Object.keys(handelser).length) clearBusyCacheWindow(config.installningar);
+    avstamningStryk(allaIds);
+  });
+  return ut;
 }
-function handlePurge(req, ctx) { return adminStub(req, ctx); }             // M5
+// Tömmer busy:<datum> för [idag−7, horisont+7] (calendar-preview-fönstret). Cachen är en optimering – fel ignoreras.
+function clearBusyCacheWindow(inst) {
+  try {
+    const keys = [];
+    const till = addDays(horisontTomDatum(inst), 7);
+    for (let d = addDays(todayStr(), -7), g = 0; d <= till && g < 120; d = addDays(d, 1), g++) keys.push('busy:' + d);
+    CacheService.getScriptCache().removeAll(keys);
+  } catch (e) { /* cache är en optimering */ }
+}
+// Stryker id:n (objekt { <bokningId>: … }) ur avstämningslistan utan att ändra listans ts (A48) – purge och cancel { kalenderEventId }.
+function avstamningStryk(idSet) {
+  const saknas = avstamningSaknas();
+  const kvar = Object.keys(saknas).filter(id => id !== 'antal' && !Object.prototype.hasOwnProperty.call(idSet || {}, id));
+  if (kvar.length !== saknas.antal) avstamningSkriv(kvar, purgeAvstamningTs());
+}
+function purgeAvstamningTs() { try { const o = JSON.parse(getProp(AVSTAMNING_PROP) || 'null'); return isPlainObject(o) && typeof o.ts === 'string' ? o.ts : ''; } catch (e) { return ''; } }
+// Start-/sluttid (ISO) för en Events-resurs: dateTime, eller date (heldag; end.date är exklusivt) som lokal midnatt.
+function purgeStartIso(ev) {
+  const start = ev && ev.start ? ev.start : {};
+  if (start.dateTime) return String(start.dateTime);
+  if (start.date) return toIsoWithOffset(String(start.date), '00:00');
+  return '';
+}
+function purgeSlutIso(ev) {
+  const end = ev && ev.end ? ev.end : {};
+  if (end.dateTime) return String(end.dateTime);
+  if (end.date) return toIsoWithOffset(String(end.date), '00:00');
+  return '';
+}
+function purgeRaderaHandelse(calId, eventId) {
+  try { Calendar.Events.remove(calId, String(eventId), { sendUpdates: 'all' }); return { typ: 'radera', gjort: true, fel: false }; }
+  catch (e) { return calendarEventGone(e) ? { typ: 'radera', gjort: false, fel: false } : { typ: 'radera', gjort: false, fel: true }; }
+}
+// Anonymisering (A19, 9): titel "Möte (borttaget)", tom plats och beskrivning, bokningsegenskaperna borttagna (null = ta bort i
+// Calendar API:s patch), gäster oförändrade så att Outlook-kopian uppdateras med sendUpdates 'all' (V9). 404/410 = redan borta.
+function purgeAnonymiseraHandelse(calId, eventId) {
+  const resurs = {
+    summary: 'Möte (borttaget)', location: '', description: '',
+    extendedProperties: { private: { bokningId: null, bokareId: null, pipelineId: null, motestypId: null } }
+  };
+  try { Calendar.Events.patch(resurs, calId, String(eventId), { sendUpdates: 'all' }); return { typ: 'anonymisera', gjort: true, fel: false }; }
+  catch (e) { return calendarEventGone(e) ? { typ: 'anonymisera', gjort: false, fel: false } : { typ: 'anonymisera', gjort: false, fel: true }; }
+}
 
 // Routingtabell (4.4). Nycklarna är action-värdena exakt som klienterna skickar dem.
 const HANDLERS = {
@@ -1896,7 +2145,8 @@ const HANDLERS = {
 
 // ============================================================
 // Trigger och underhåll (4.11) – install() körs en gång manuellt av CJ vid deploy (auktoriserar även scopes) och
-// därefter idempotent av setup (Anslut-guiden). dailyMaintenance är en stub t.o.m. M3 (gallring/avstämning fylls i M5).
+// därefter idempotent av setup (Anslut-guiden). dailyMaintenance (M5): gallring av inkorg och cache-fil, räknare i Script
+// Properties, avstämning kalender ↔ inkorg. Loggar EN rad { trigger:'dailyMaintenance', ok, ms, … } utan personuppgifter.
 // ============================================================
 
 function install() {
@@ -1908,11 +2158,137 @@ function install() {
 }
 
 function dailyMaintenance() {
-  // M2: ingen gallring/avstämning ännu. Rensar bara räknare i Script Properties äldre än 7 dagar (4.2, 4.11).
+  const t0 = Date.now();
+  if (typeof availResetMemo_ === 'function') availResetMemo_();   // egen körning – memona ska vara tomma som i doPost
+  if (typeof kalResetMemo_ === 'function') kalResetMemo_();
+  const rad = { trigger: 'dailyMaintenance', ok: true, ms: 0, raknare: 0, inkorg: 0, utanImport: 0, geokod: 0, restid: 0, saknas: 0, fel: [] };
+  const nuMs = Date.now();
+  // 1. Räknare i Script Properties äldre än 7 dagar (4.2, 4.11) – oberoende av brevlådan.
+  try { rad.raknare = gallraRaknare(todayStr()); } catch (e) { rad.ok = false; rad.fel.push('raknare:' + felKlass(e)); }
+  // 2. Inkorg + cache-fil under lås (4.8: 20 s). Kräver ansluten brevlåda (annars hoppas steget över, ingen felrad).
+  let config = null, inbox = null, gallradeIds = {};
+  try { config = loadConfig(); } catch (e) { config = null; if (errorCode(e) !== 'E_SETUP') { rad.ok = false; rad.fel.push('config:' + felKlass(e)); } }
+  if (config) {
+    try {
+      withScriptLock(() => {
+        inbox = readInbox();
+        const g = gallraInkorg(inbox.bokningar, nuMs);
+        rad.inkorg = g.borttagna.length; rad.utanImport = g.utanImport;
+        g.borttagna.forEach(b => { if (b.bokningId) gallradeIds[str(b.bokningId)] = true; });
+        if (g.borttagna.length) { inbox.bokningar = g.kvar; writeInbox(inbox); }
+        const gallradeNycklar = {};
+        g.borttagna.forEach(b => { const k = normalizeAdressKey(b.adress); if (k) gallradeNycklar[k] = true; });
+        updateCacheFile(obj => { const c = gallraCacheFil(obj, nuMs, gallradeNycklar); rad.geokod = c.geokod; rad.restid = c.restid; return c.andrad; });
+      }, MAINT_LOCK_WAIT_MS);
+    } catch (e) { rad.ok = false; rad.fel.push('inkorg:' + (errorCode(e) || felKlass(e))); }
+    // 3. Avstämning kalender ↔ inkorg (4.11, A52): Bokningar-kalenderns händelser i [nu−7 d, horisont+7 d] med
+    //    extendedProperties.private.bokningId som saknar inkorgspost → Script Property + CacheService (calendar-preview/ping visar).
+    //    Events.list körs efter att låset släppts; en bokning som skapas däremellan finns i kalendern men inte i det redan lästa
+    //    inbox-objektet, därför läses inkorgen om (en Drive-läsning) när något hittats och id:n med post stryks.
+    try {
+      if (inbox) {
+        let saknas = avstamningKorning(config, inbox, gallradeIds, nuMs);
+        if (saknas.length) {
+          let farsk = null;
+          try { farsk = readInbox(); } catch (e) { farsk = null; }
+          if (farsk && Array.isArray(farsk.bokningar)) {
+            const kanda = {}; farsk.bokningar.forEach(b => { if (b && b.bokningId) kanda[str(b.bokningId)] = true; });
+            saknas = saknas.filter(id => !kanda[id]);
+          }
+        }
+        rad.saknas = saknas.length;
+        avstamningSkriv(saknas);
+      }
+    } catch (e) { rad.ok = false; rad.fel.push('avstamning:' + (errorCode(e) || felKlass(e))); }
+  }
+  rad.ms = Date.now() - t0;
+  if (rad.ok) { try { setProp(MAINT_PROP_SENAST, nowIso()); } catch (e) { /* best effort */ } }
+  console.log(JSON.stringify(rad));
+  return rad;
+}
+// Räknare maps_elements_<YYYYMMDD>/book_count_<YYYYMMDD> äldre än 7 dagar. → antal borttagna.
+function gallraRaknare(idag) {
   const props = PropertiesService.getScriptProperties();
-  const grans = ymdCompact(addDays(todayStr(), -7));
+  const grans = ymdCompact(addDays(idag, -7));
+  let n = 0;
   Object.keys(props.getProperties()).forEach(k => {
     const m = /^(maps_elements_|book_count_)(\d{8})$/.exec(k);
-    if (m && m[2] < grans) props.deleteProperty(k);
+    if (m && m[2] < grans) { props.deleteProperty(k); n++; }
   });
+  return n;
+}
+// Ren funktion (4.11, A6): → { kvar:[], borttagna:[], utanImport }.
+//   importerad/avvisad/avbokad: referens = senaste av andradAt/importeradAt/avvisadTs/avbokadTs (reserv skapad); äldre än 30 dagar
+//   OCH slut passerat → bort. ny: slut passerat med > 90 dagar → bort ("gallrad utan import"). Okänd status eller poster utan
+//   tolkbara datum behålls (hellre en post för mycket än en förlorad).
+function gallraInkorg(bokningar, nuMs) {
+  const kvar = [], borttagna = []; let utanImport = 0;
+  const ms = v => { const t = typeof v === 'string' && v ? new Date(v).getTime() : NaN; return isNaN(t) ? null : t; };
+  const dag = 86400000;
+  (bokningar || []).forEach(b => {
+    if (!isPlainObject(b)) return;
+    const status = str(b.status), slutMs = ms(b.slut);
+    let bort = false;
+    if (status === 'importerad' || status === 'avvisad' || status === 'avbokad') {
+      const ref = [b.andradAt, b.importeradAt, b.avvisadTs, b.avbokadTs].map(ms).filter(t => t !== null);
+      const refMs = ref.length ? Math.max.apply(null, ref) : ms(b.skapad);
+      bort = refMs !== null && slutMs !== null && nuMs - refMs > GALLRING_IMPORTERAD_DAGAR * dag && slutMs < nuMs;
+    } else if (status === 'ny') {
+      bort = slutMs !== null && nuMs - slutMs > GALLRING_NY_DAGAR * dag;
+      if (bort) utanImport++;
+    }
+    (bort ? borttagna : kvar).push(b);
+  });
+  return { kvar, borttagna, utanImport };
+}
+// Ren funktion (4.11): geokod-/restidsposter äldre än 180 dagar bort; geokodposter för gallrade bokningars adresser markeras
+// gallrad och tas bort när de är äldre än 90 dagar. → { andrad, geokod, restid }.
+function gallraCacheFil(obj, nuMs, gallradeNycklar) {
+  const dag = 86400000; let geokod = 0, restid = 0, andrad = false;
+  const alder = post => { const t = post && typeof post.ts === 'string' ? new Date(post.ts).getTime() : NaN; return isNaN(t) ? null : nuMs - t; };
+  if (!isPlainObject(obj.geokod)) obj.geokod = {};
+  if (!isPlainObject(obj.restid)) obj.restid = {};
+  Object.keys(gallradeNycklar || {}).forEach(k => { const post = obj.geokod[k]; if (isPlainObject(post) && post.gallrad !== true) { post.gallrad = true; andrad = true; } });
+  Object.keys(obj.geokod).forEach(k => {
+    const post = obj.geokod[k], a = alder(post);
+    if (!isPlainObject(post) || a === null) return;   // utan ts (äldre format): lämnas
+    if (a > GALLRING_CACHE_DAGAR * dag || (post.gallrad === true && a > GALLRING_GEOKOD_GALLRAD_DAGAR * dag)) { delete obj.geokod[k]; geokod++; }
+  });
+  Object.keys(obj.restid).forEach(k => {
+    const post = obj.restid[k], a = alder(post);
+    if (isPlainObject(post) && a !== null && a > GALLRING_CACHE_DAGAR * dag) { delete obj.restid[k]; restid++; }
+  });
+  return { andrad: andrad || geokod > 0 || restid > 0, geokod, restid };
+}
+// Avstämning (4.11, A52): en avgränsad Events.list på Bokningar-kalendern i [nu−7 d, horisont+7 d] (listGoogleEventsAvstamning_,
+// Calendar.gs – singleEvents, showDeleted:false, bara de fält som behövs). Flaggas: händelser med private.bokningId i giltigt
+// format som saknar inkorgspost och inte gallrades i samma körning, där
+//   • alla FRAMTIDA händelser räknas (framtida poster gallras aldrig och purge tar bort båda → en framtida händelse utan post är
+//     alltid föräldralös; den blockerar dessutom luckan i tillgängligheten tills den tas bort), och
+//   • PASSERADE händelser (de senaste 7 dagarna) bara räknas om de ändrats/skapats de senaste 7 dagarna (`updated`) – äldre
+//     gallrade möten som bara fått en gästuppdatering flaggas inte.
+// Anonymiserade händelser (PURGE_ANONYM_TITEL) hoppas över även om bryggan skulle ha behållit bokningId (V13).
+// Utan tidsgräns skulle ett aldrig slutande återkommande möte i en delad "fullt"-kalender expanderas till 50 × 2 500 poster.
+// → [bokningId] (unika). Kastar E_CALENDAR.
+function avstamningKorning(config, inbox, ignoreraIds, nuMs) {
+  let calId = '';
+  try { calId = bokningarKalenderId(config.installningar); } catch (e) { return []; }   // ingen bokningskalender vald → inget att stämma av
+  const kanda = {}; (inbox.bokningar || []).forEach(b => { if (b && b.bokningId) kanda[str(b.bokningId)] = true; });
+  const granMs = nuMs - 7 * 86400000;
+  const timeMin = isoWithOffset(new Date(granMs));
+  const timeMax = toIsoWithOffset(addDays(horisontTomDatum(config.installningar), 8), '00:00');   // t.o.m. horisont+7 (exklusiv gräns)
+  const saknas = [];
+  listGoogleEventsAvstamning_(calId, timeMin, timeMax).forEach(ev => {
+    const priv = (ev && ev.extendedProperties && ev.extendedProperties.private) || {};
+    const id = str(priv.bokningId);
+    if (!id || !BOKNING_ID_RE.test(id) || kanda[id] || (ignoreraIds && ignoreraIds[id]) || saknas.indexOf(id) >= 0) return;
+    if (str(ev.summary) === PURGE_ANONYM_TITEL) return;
+    const slutMs = new Date(purgeSlutIso(ev)).getTime();
+    if (!isNaN(slutMs) && slutMs <= nuMs) {
+      const updMs = ev.updated ? new Date(ev.updated).getTime() : NaN;
+      if (isNaN(updMs) || updMs < granMs) return;   // passerad och inte nyligen ändrad → inte föräldralös-varning
+    }
+    saknas.push(id);
+  });
+  return saknas;
 }

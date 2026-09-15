@@ -33,10 +33,24 @@ const KAL_ICS_CACHE_S = 900;
 const KAL_ICS_FEL_CACHE_S = 300;               // efter misslyckad hämtning: vänta 5 min innan nytt försök
 const KAL_ICS_RESERV_MIN_ALDER_MS = 15 * 60000; // icsReserv i cache-filen skrivs bara om den befintliga är äldre än 15 min
 // Memo per körning (varje request är en ny V8-kontext): reserve/book läser ICS FÖRE låset (warmSlotCaches) och får
-// samma resultat under låset utan nytt UrlFetch – även när flödet är > 90 KB och därför inte cachas i CacheService.
+// samma resultat under låset utan nytt UrlFetch – även om flödet inte ryms i CacheService (fler än KAL_ICS_MAX_CHUNKS bitar).
 let KAL_ICS_MEMO = null;                        // { url, res } | null
 function kalResetMemo_() { KAL_ICS_MEMO = null; }   // anropas av doPost (Code.gs) så att memot aldrig överlever ett anrop
-const KAL_ICS_MAX_CACHE_BYTES = 90 * 1024;     // > 90 KB → ingen cache, parsa varje gång (4.6)
+// CacheService-format för det filtrerade, reducerade ICS-resultatet (M5, spec 4.6 + A45): JSON → Utilities.gzip → base64,
+// delat i bitar om högst KAL_ICS_CHUNK_BYTES under nycklarna ics:busy:0 … ics:busy:<n-1>; indexnyckeln ics:busy bär
+// { v, delar, langd, hamtadTs, antal }. Ett stort flöde (CJ: ~370 händelser, > 90 KB som JSON) ryms därmed i cachen och
+// andra anropet inom 15 min gör varken UrlFetch eller parsning. Fler än KAL_ICS_MAX_CHUNKS bitar → ingen cache (parsa varje gång).
+const KAL_ICS_CACHE_VERSION = 2;
+const KAL_ICS_CHUNK_BYTES = 90 * 1024;         // per nyckel (CacheService-gräns 100 KB/värde)
+const KAL_ICS_MAX_CHUNKS = 8;                  // ≈ 720 KB base64 ≈ 540 KB gzip – långt över alla rimliga flöden
+const KAL_ICS_SUMMARY_MAX = 160;               // reducerad post: titel/plats klipps (Kalenderkoll visar högst 200 tecken)
+const KAL_ICS_PLATS_MAX = 200;
+// Långsamt Outlook (A46): tar hämtningen längre än KAL_ICS_LANGSAM_MS markeras meta.langsamTs, och i KAL_ICS_LANGSAM_S därefter
+// används cache-filens icsReserv (Drive-läsning ~1 s) vid cache-miss i stället för ny hämtning – förutsatt att reserven är
+// yngre än KAL_ICS_RESERV_MAX_ALDER_MS. Resultatet läggs i CacheService så att följande anrop inte ens läser Drive.
+const KAL_ICS_LANGSAM_MS = 5000;
+const KAL_ICS_LANGSAM_S = 1800;
+const KAL_ICS_RESERV_MAX_ALDER_MS = 60 * 60000;
 const KAL_BUSY_CACHE_S = 60;                   // busy:<datum> (4.6)
 const KAL_MERGE_TOLERANS_MIN = 5;              // "samma start och slut (±5 min)"
 const KAL_MERGE_OVERLAPP = 0.9;                // "överlapp ≥ 90 % av den kortare"
@@ -359,8 +373,16 @@ function expandRrule(vevent, fromDatum, toDatum) {
   }
   const untilMs = r.until ? icsPartsMs(r.until) + (r.until.heldag ? 1440 * 60000 - 1 : 0) : null;
   const startMs = icsPartsMs(st);
+  // Instanser som slutar före fönstret behöver ingen tidszonsberäkning (M5, prestanda): en instans vars datum ligger mer än
+  // durationen + 2 dagar före fönstret kan inte nå in i det. De räknas (COUNT) men konverteras aldrig.
+  const hoppaFore = addDays(fromDatum, -(Math.ceil(durMin / 1440) + 2));
   let count = 0, iter = 0;
   const emit = (datum) => {                                  // returnerar false när serien är slut
+    if (datum < hoppaFore && datum > st.datum && !(r.until && datum >= addDays(r.until.datum, -1))) {   // före fönstret (efter DTSTART, ej nära UNTIL): räkna, hoppa över
+      if (r.count !== null && count >= r.count) return false;
+      count++;
+      return true;
+    }
     const p = Object.assign({}, st, { datum });
     const ms = icsPartsMs(p);
     if (ms < startMs) return true;                           // före DTSTART: ingen instans
@@ -374,6 +396,8 @@ function expandRrule(vevent, fromDatum, toDatum) {
   };
   if (r.freq === 'DAILY') {
     let d = st.datum;
+    // Snabbspolning (serier utan COUNT): hoppa direkt till sista instansen före hoppaFore i intervallets takt.
+    if (r.count === null && hoppaFore > d) { const steg = Math.floor(daysBetween(d, hoppaFore) / r.interval); if (steg > 0) d = addDays(d, steg * r.interval); }
     while (iter++ < KAL_MAX_RRULE_INSTANSER) {
       const wd = weekdayOf(d);
       if (!r.byday.length || r.byday.indexOf(wd) >= 0) { if (!emit(d)) break; }
@@ -384,6 +408,7 @@ function expandRrule(vevent, fromDatum, toDatum) {
     const bydays = r.byday.length ? r.byday : [weekdayOf(st.datum)];
     const veckostart = addDays(st.datum, -((weekdayOf(st.datum) + 6) % 7));
     let vecka = 0, slut = false;
+    if (r.count === null && hoppaFore > veckostart) { const v = Math.floor(daysBetween(veckostart, hoppaFore) / (7 * r.interval)) - 1; if (v > 0) vecka = v; }
     while (!slut && iter++ < KAL_MAX_RRULE_INSTANSER) {
       const ws = addDays(veckostart, 7 * r.interval * vecka);
       for (let o = 0; o < 7; o++) {
@@ -461,7 +486,8 @@ function icsInstances(parsed, fromDatum, toDatum, opts) {
       uid: v.uid, heldag: !!s.heldag,
       start: s.heldag ? s.datum : toIsoWithOffset(s.datum, s.tid),
       slut: e.heldag ? e.datum : toIsoWithOffset(e.datum, e.tid),
-      plats: v.location || '', summary: v.summary || '', status: regel.status, preliminar: regel.preliminar, varning: varn
+      plats: String(v.location || '').slice(0, KAL_ICS_PLATS_MAX), summary: String(v.summary || '').slice(0, KAL_ICS_SUMMARY_MAX),
+      status: regel.status, preliminar: regel.preliminar, varning: varn
     });
   };
   Object.keys(perUid).forEach(uid => {
@@ -690,6 +716,36 @@ function listGoogleEvents_(calendarId, timeMin, timeMax) {
   }
   return out;
 }
+/** events.list för avstämningen (4.11, A52): avgränsad till [timeMin, timeMax) med singleEvents och bara de fält som behövs
+ *  (id, status, updated, start, end, summary, private.bokningId) – aldrig updatedMin utan tidsgräns (ett aldrig slutande
+ *  återkommande möte i en delad kalender skulle annars expanderas till 50 × 2 500 poster). Raderade filtreras bort. Kastar E_CALENDAR. */
+function listGoogleEventsAvstamning_(calendarId, timeMin, timeMax) {
+  const out = [];
+  let pageToken = null, guard = 0;
+  try {
+    do {
+      const params = { timeMin, timeMax, singleEvents: true, maxResults: 2500, showDeleted: false,
+        fields: 'nextPageToken,items(id,status,updated,start,end,summary,extendedProperties/private/bokningId)' };
+      if (pageToken) params.pageToken = pageToken;
+      const res = Calendar.Events.list(calendarId, params);
+      (res.items || []).forEach(ev => { if (ev && ev.status !== 'cancelled') out.push(ev); });
+      pageToken = res.nextPageToken || null;
+    } while (pageToken && guard++ < 50);
+  } catch (err) {
+    throw kalFel_('E_CALENDAR', 'Kalendern kunde inte läsas');
+  }
+  return out;
+}
+/** events.list på privateExtendedProperty bokningId=<id> (purge 4.4: händelse vars event-id inte är känt). Raderade och redan
+ *  anonymiserade händelser ("Möte (borttaget)", A19 – ifall bryggan behållit bokningId, V13) filtreras bort. Kastar E_CALENDAR. */
+function listGoogleEventsByBokningId_(calendarId, bokningId) {
+  try {
+    const res = Calendar.Events.list(calendarId, { privateExtendedProperty: 'bokningId=' + String(bokningId), singleEvents: true, maxResults: 50, showDeleted: false });
+    return (res.items || []).filter(ev => ev && ev.id && ev.status !== 'cancelled' && String(ev.summary || '') !== 'Möte (borttaget)');
+  } catch (err) {
+    throw kalFel_('E_CALENDAR', 'Kalendern kunde inte läsas');
+  }
+}
 
 /** Hämtar ICS-texten. Returnerar null vid nätverks-/HTTP-fel (URL:en loggas aldrig). */
 function hamtaIcs_(url) {
@@ -729,8 +785,8 @@ function lasIcsReserv_() {
   try { return typeof readIcsReserv === 'function' ? (readIcsReserv() || null) : null; } catch (err) { return null; }
 }
 // icsReserv skrivs till cache-filen högst var 15:e minut (KAL_ICS_RESERV_MIN_ALDER_MS): först grindas på meta.reservTs i
-// CacheService (ingen Drive-läsning), därefter på filens egen hamtadTs (writeIcsReserv, Availability.gs). Ett stort
-// ICS-flöde (> 90 KB, ocachat) läses annars live vid varje anrop och skulle skriva filen varje gång.
+// CacheService (ingen Drive-läsning), därefter på filens egen hamtadTs (writeIcsReserv, Availability.gs). Ett flöde som
+// inte ryms i CacheService läses annars live vid varje anrop och skulle skriva filen varje gång.
 // Returnerar den reservTs som gäller efter anropet (ny eller befintlig).
 function sparaIcsReserv_(reserv, meta) {
   const nu = kalNu_().getTime();
@@ -778,8 +834,10 @@ function kalFiltreraDatum_(handelser, fran, till) {
 
 /**
  * readIcs(config, opts) → { ok, handelser:[reducerad], varningar:[], hamtadTs, kalla:'ingen'|'cache'|'live'|'reserv' }
- * Cache 15 min i CacheService (ics:busy), filtrerad till [idag−1, horisont+1] före cachning, > 90 KB → ingen cache.
- * Misslyckad hämtning → icsReserv ur cache-filen + varning "Outlook-flödet kunde inte läsas kl HH:MM".
+ * Cache 15 min i CacheService (ics:busy-index + ics:busy:<n>, gzip+base64 i bitar ≤ 90 KB – M5), filtrerad till [idag−1, horisont+1]
+ * och reducerad (uid, start, slut, plats ≤ 200, summary ≤ 160, status, preliminar, heldag, varning) före cachning; fler än
+ * KAL_ICS_MAX_CHUNKS bitar → ingen cache. Misslyckad hämtning → icsReserv ur cache-filen + varning "Outlook-flödet kunde inte läsas
+ * kl HH:MM". Långsam hämtning (> 5 s) → i 30 min används en färsk icsReserv (< 60 min) vid cache-miss i stället för ny hämtning (A46).
  * opts: { farsk:bool }
  * Memo per körning (KAL_ICS_MEMO): andra anropet i samma request (t.ex. under låset i reserve/book) får en kopia av
  * första resultatet – aldrig UrlFetch under låset. opts.farsk läser om och förnyar memot.
@@ -806,23 +864,38 @@ function readIcsUncached_(config, url, opts) {
   const fran = addDays(idag, -1), till = addDays(addDays(idag, 7 * kalHorisontVeckor_(config)), 1);
   let meta = null;
   try { const m = cache.get(KAL_ICS_META_KEY); meta = m ? JSON.parse(m) : null; } catch (err) { meta = null; }
+  const nuMs = kalNu_().getTime();
 
   if (!opts.farsk) {
-    const c = cache.get(KAL_ICS_CACHE_KEY);
+    const c = kalIcsCacheLas_(cache);
     if (c) {
-      try {
-        res.handelser = kalFiltreraDatum_(JSON.parse(c), fran, till);
-        res.kalla = 'cache'; res.hamtadTs = meta ? meta.hamtadTs || '' : '';
-        res.varningar = meta && Array.isArray(meta.varningar) ? meta.varningar.slice() : [];
-        return res;
-      } catch (err) { /* trasig cache → läs om */ }
+      res.handelser = kalFiltreraDatum_(c.handelser, fran, till);
+      res.kalla = 'cache'; res.hamtadTs = (meta && meta.hamtadTs) || c.hamtadTs || '';
+      res.varningar = meta && Array.isArray(meta.varningar) ? meta.varningar.slice() : [];
+      return res;
     }
-    if (meta && meta.felTs && (kalNu_().getTime() - kalMsOf(meta.felTs)) < KAL_ICS_FEL_CACHE_S * 1000) {
+    if (meta && meta.felTs && (nuMs - kalMsOf(meta.felTs)) < KAL_ICS_FEL_CACHE_S * 1000) {
       return kalIcsReservSvar_(res, meta, fran, till);        // nyligen misslyckat – vänta med nytt försök
+    }
+    // Långsamt Outlook nyligen (A46): färsk reserv i cache-filen i stället för ny hämtning.
+    if (meta && meta.langsamTs && (nuMs - kalMsOf(meta.langsamTs)) < KAL_ICS_LANGSAM_S * 1000) {
+      const reserv = lasIcsReserv_();
+      const alder = reserv && typeof reserv.hamtadTs === 'string' && reserv.hamtadTs ? nuMs - kalMsOf(reserv.hamtadTs) : NaN;
+      if (reserv && Array.isArray(reserv.handelser) && !isNaN(alder) && alder >= 0 && alder < KAL_ICS_RESERV_MAX_ALDER_MS) {
+        res.handelser = kalFiltreraDatum_(reserv.handelser, fran, till);
+        res.hamtadTs = reserv.hamtadTs; res.kalla = 'reserv';
+        res.varningar = (meta && Array.isArray(meta.varningar) ? meta.varningar : []).filter(v => !/^Outlook-flödet svarade långsamt/.test(v));
+        res.varningar.push('Outlook-flödet svarade långsamt kl ' + (meta.langsamKlockslag || '') + ' – kopian från kl ' + String(reserv.hamtadTs).slice(11, 16) + ' används');
+        kalIcsCacheSkriv_(cache, res.handelser, reserv.hamtadTs);
+        try { cache.put(KAL_ICS_META_KEY, JSON.stringify(Object.assign({}, meta, { varningar: res.varningar.slice(0, 20), hamtadTs: reserv.hamtadTs })), 6 * 3600); } catch (err) { /* ignore */ }
+        return res;
+      }
     }
   }
 
+  const t0 = kalNu_().getTime();
   const text = hamtaIcs_(url);
+  const hamtningMs = kalNu_().getTime() - t0;
   if (text === null) {
     const nyMeta = Object.assign({}, meta || {}, { ok: false, felTs: rfc3339_(kalNu_()), felKlockslag: kalKlockslagNu_() });
     try { cache.put(KAL_ICS_META_KEY, JSON.stringify(nyMeta), 6 * 3600); } catch (err) { /* ignore */ }
@@ -839,17 +912,74 @@ function readIcsUncached_(config, url, opts) {
     return kalIcsReservSvar_(res, nyMeta, fran, till);
   }
   const hamtadTs = rfc3339_(kalNu_());
-  res.handelser = inst2.handelser; res.varningar = inst2.varningar; res.hamtadTs = hamtadTs; res.kalla = 'live';
-  const json = JSON.stringify(res.handelser);
-  try { if (kalByteLength_(json) <= KAL_ICS_MAX_CACHE_BYTES) cache.put(KAL_ICS_CACHE_KEY, json, KAL_ICS_CACHE_S); } catch (err) { /* ignore */ }
+  // Filtrera till [idag−1, horisont+1] FÖRE cachning/reserv (4.6): enstaka händelser utanför fönstret (icsInstances filtrerar
+  // bara serier och RECURRENCE-ID-instanser) ska varken ta cacheplats eller skrivas till cache-filen.
+  res.handelser = kalFiltreraDatum_(inst2.handelser, fran, till); res.varningar = inst2.varningar; res.hamtadTs = hamtadTs; res.kalla = 'live';
+  const cachad = kalIcsCacheSkriv_(cache, res.handelser, hamtadTs);
+  const langsam = hamtningMs > KAL_ICS_LANGSAM_MS;
   const nyMeta = {
     ok: true, hamtadTs, felTs: '', felKlockslag: '', antal: res.handelser.length,
     medPlats: res.handelser.filter(h => kalLooksLikePlace(h.plats)).length,
     preliminara: res.handelser.filter(h => h.preliminar).length, varningar: res.varningar.slice(0, 20),
+    hamtningMs: hamtningMs, cachad: cachad,
+    langsamTs: langsam ? hamtadTs : '', langsamKlockslag: langsam ? kalKlockslagNu_() : '',
     reservTs: sparaIcsReserv_({ hamtadTs, handelser: res.handelser }, meta)
   };
   try { cache.put(KAL_ICS_META_KEY, JSON.stringify(nyMeta), 6 * 3600); } catch (err) { /* ignore */ }
   return res;
+}
+// --- Komprimerad, chunkad CacheService-cache för ICS-resultatet (M5) ---
+// kalIcsPacka_(handelser) → { delar:[base64-bitar], langd, jsonBytes } | null (för stort). Rena Utilities-anrop, ingen I/O.
+function kalIcsPacka_(handelser) {
+  const json = JSON.stringify(handelser);
+  const gz = Utilities.gzip(Utilities.newBlob(json, 'application/json'));
+  const b64 = Utilities.base64Encode(gz.getBytes());
+  const delar = [];
+  for (let i = 0; i < b64.length; i += KAL_ICS_CHUNK_BYTES) delar.push(b64.slice(i, i + KAL_ICS_CHUNK_BYTES));
+  if (!delar.length || delar.length > KAL_ICS_MAX_CHUNKS) return null;
+  return { delar, langd: b64.length, jsonBytes: kalByteLength_(json) };
+}
+function kalIcsPackaUpp_(delar) {
+  const bytes = Utilities.base64Decode(delar.join(''));
+  const json = Utilities.ungzip(Utilities.newBlob(bytes, 'application/x-gzip')).getDataAsString('UTF-8');
+  const lista = JSON.parse(json);
+  return Array.isArray(lista) ? lista : null;
+}
+/** Skriver ics:busy (index) + ics:busy:<n> (bitar) med samma TTL. → true om cachat. Kastar aldrig. */
+function kalIcsCacheSkriv_(cache, handelser, hamtadTs) {
+  let paket = null;
+  try { paket = kalIcsPacka_(handelser); } catch (err) { paket = null; }
+  if (!paket) return false;
+  const put = {};
+  paket.delar.forEach((d, i) => { put[KAL_ICS_CACHE_KEY + ':' + i] = d; });
+  put[KAL_ICS_CACHE_KEY] = JSON.stringify({ v: KAL_ICS_CACHE_VERSION, delar: paket.delar.length, langd: paket.langd, hamtadTs: hamtadTs || '', antal: handelser.length });
+  try { cache.putAll(put, KAL_ICS_CACHE_S); return true; } catch (err) { return false; }
+}
+/** Läser cachen → { handelser, hamtadTs } | null (saknas, ofullständig – t.ex. en bit avvisad/utgången – eller trasig).
+ *  Tål det äldre formatet (ren JSON-lista under ics:busy). */
+function kalIcsCacheLas_(cache) {
+  let raw = null;
+  try { raw = cache.get(KAL_ICS_CACHE_KEY); } catch (err) { raw = null; }
+  if (!raw) return null;
+  try {
+    if (raw.charAt(0) === '[') { const l = JSON.parse(raw); return Array.isArray(l) ? { handelser: l, hamtadTs: '' } : null; }
+    const idx = JSON.parse(raw);
+    if (!idx || idx.v !== KAL_ICS_CACHE_VERSION || !(idx.delar >= 1) || idx.delar > KAL_ICS_MAX_CHUNKS) return null;
+    const nycklar = [];
+    for (let i = 0; i < idx.delar; i++) nycklar.push(KAL_ICS_CACHE_KEY + ':' + i);
+    const hit = cache.getAll(nycklar) || {};
+    const delar = nycklar.map(k => hit[k]);
+    if (delar.some(d => typeof d !== 'string' || !d)) return null;
+    if (delar.join('').length !== idx.langd) return null;
+    const handelser = kalIcsPackaUpp_(delar);
+    return handelser ? { handelser, hamtadTs: idx.hamtadTs || '' } : null;
+  } catch (err) { return null; }
+}
+/** Tömmer ICS-cachen (index + bitar). Felsökning/tester – ingen produktionsväg behöver den. */
+function kalIcsCacheRensa_() {
+  const cache = kalCache_(), nycklar = [KAL_ICS_CACHE_KEY];
+  for (let i = 0; i < KAL_ICS_MAX_CHUNKS; i++) nycklar.push(KAL_ICS_CACHE_KEY + ':' + i);
+  try { cache.removeAll(nycklar); } catch (err) { /* ignore */ }
 }
 function kalIcsReservSvar_(res, meta, fran, till) {
   res.ok = false; res.kalla = 'reserv';
@@ -871,7 +1001,11 @@ function getIcsStatus() {
     return { ok: !!reserv, hamtadTs: reserv ? reserv.hamtadTs || '' : '', antal: reserv && reserv.handelser ? reserv.handelser.length : 0,
       medPlats: 0, preliminara: 0 };
   }
-  return { ok: !!meta.ok, hamtadTs: meta.hamtadTs || '', antal: meta.antal | 0, medPlats: meta.medPlats | 0, preliminara: meta.preliminara | 0 };
+  // langsam = samma villkor som readIcsUncached_ använder för reservvägen (A46): markeringen ligger kvar i ics:meta (TTL 6 h)
+  // tills nästa live-hämtning, men gäller bara i KAL_ICS_LANGSAM_S efter hämtningen.
+  const langsam = !!meta.langsamTs && (kalNu_().getTime() - kalMsOf(meta.langsamTs)) < KAL_ICS_LANGSAM_S * 1000;
+  return { ok: !!meta.ok, hamtadTs: meta.hamtadTs || '', antal: meta.antal | 0, medPlats: meta.medPlats | 0, preliminara: meta.preliminara | 0,
+    hamtningMs: meta.hamtningMs | 0, cachad: meta.cachad === true, langsam: langsam };
 }
 
 /**
