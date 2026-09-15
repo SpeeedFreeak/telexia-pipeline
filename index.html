@@ -1009,7 +1009,7 @@
 // bokApi är en ordagrann kopia av sajtens assets/js/bokning.js (A39) med EN medveten avvikelse: adressen hämtas via
 // bokScriptUrl(), som föredrar BOKNINGSINSTALLNINGAR.scriptUrl (klistras in under Bokningar › Inställningar) och annars
 // använder konstanten BOK_SCRIPT_URL. Båda är publika, inga hemligheter. bokAdminApi finns bara här (appen).
-const BOK_SCRIPT_URL = 'https://script.google.com/macros/s/AKfycbze2ZPt6WxAOH3DFuNkVMSOk7o0HmC_6WbSvk1V_tihow5qi9OLWzdDU_3lQV34g-PMWQ/exec';   // publik, ej hemlighet – CJ byter efter script-deploy
+const BOK_SCRIPT_URL = 'https://script.google.com/macros/s/AKfycbxqBn2wQt8pqF0USTj81kiyGHOmV3ICNqxBRYPksJiwBkvkqFjFCHZ1SzYtAo1gRdeROg/exec';   // publik, ej hemlighet – CJ byter efter script-deploy
 const MIN_SCRIPT_VERSION = 1;
 const BOK_TIMEOUT_MS = { hello: 15000, availability: 15000, geocode: 15000, ping: 15000 };   // övriga (skrivande) 45 000
 function bokScriptUrl() {
