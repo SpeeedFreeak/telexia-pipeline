@@ -1,14 +1,14 @@
 /**
  * Pipeline by Redneck Engineering – bokningsmodul, Apps Script-kärna (Code.gs).
  *
- * Milstolpe M3. Specifikation: "[C] Bokningsmodul - specifikation steg 1.md", avsnitt 4 (brevlåda, transport,
+ * Milstolpe M4. Specifikation: "[C] Bokningsmodul - specifikation steg 1.md", avsnitt 4 (brevlåda, transport,
  * endpoints, säkerhet), 5 (tillgänglighet – anropas i Availability.gs) och 9 (säkerhet/GDPR).
  *
  * Projektet består av tre filer:
  *   Code.gs          – denna fil: Script Properties, filhantering, doPost/doGet, autentisering, gränser,
  *                      reservation, book, kalenderskrivning, notismejl, hello/ping/geocode/release,
- *                      admin-endpoints setup/config-push/calendars-list/inbox-list/ack/reject (M3);
- *                      calendar-preview/cancel/rebook/purge är stubbar (E_NOT_IMPLEMENTED) till M4/M5.
+ *                      admin-endpoints setup/config-push/calendars-list/inbox-list/ack/reject (M3) och
+ *                      calendar-preview/rebook/cancel (M4); purge är stub (E_NOT_IMPLEMENTED) till M5.
  *   Calendar.gs      – readBusy(fran, till), parseIcs, mergeBusy, applyIgnore, buildBusyList(from, to).
  *   Availability.gs  – computeAvailability(req), dayPlan, placeTravel, geocodeAddress(adress), travelMinutes,
  *                      swedishHolidays.
@@ -42,7 +42,9 @@ const INBOX_STATUSAR = ['ny', 'importerad', 'avvisad', 'avbokad'];
 const INBOX_LIST_DEFAULT = 200;
 const INBOX_LIST_MAX = 500;
 const ACK_MAX_IDS = 200;
-const ORSAK_MAX = 500;                          // reject/cancel-orsak (mejlas till bokaren)
+const ORSAK_MAX = 500;                          // reject/cancel/rebook-orsak (mejlas till bokaren)
+const PREVIEW_MAX_DAGAR = 56;                   // calendar-preview: högst 8 veckor per förfrågan (M4)
+const AVSTAMNING_CACHE_KEY = 'avstamning:saknas'; // CacheService: JSON-lista av bokningId som saknas i inkorgen (4.11, skrivs av dailyMaintenance i M5)
 const EPOST_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const DATUM_RE = /^\d{4}-\d{2}-\d{2}$/;
 const ISO_START_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2}(\.\d+)?)?(Z|[+-]\d{2}:?\d{2})$/;
@@ -1229,8 +1231,8 @@ function handleGeocode(req, ctx) {
 
 // ============================================================
 // Admin-endpoints (4.4) – autentiseras med adminKey (authAdmin: ~60/min, konstanttidsjämförelse).
-// M3: setup, config-push, calendars-list, inbox-list, ack, reject. Stubbar (E_NOT_IMPLEMENTED) till M4/M5:
-// calendar-preview, cancel, rebook, purge.
+// M3: setup, config-push, calendars-list, inbox-list, ack, reject. M4: calendar-preview, rebook, cancel.
+// Stub (E_NOT_IMPLEMENTED) till M5: purge.
 // ============================================================
 
 // ---------- setup (4.2, 4.4, 10.1 steg 4c) ----------
@@ -1529,14 +1531,346 @@ function notifyBokareAvvisad(config, bokning, orsak) {
   catch (e) { loggaMejlfel(bokning.bokningId); return false; }
 }
 
-// ---------- Stubbar till M4/M5 ----------
+// ---------- calendar-preview (4.4, 4.6, 6.3 Kalenderkoll) – M4 ----------
+// In:  { adminKey, from, to }  ('YYYY-MM-DD' inklusive; även spec-formen { fran, till }). Högst PREVIEW_MAX_DAGAR (8 veckor),
+//      fönstret måste ligga inom [idag−7, horisont+7] (E_VALIDATION, falt.from/to).
+// Ut:  { from, to, idag, horisontTom, genererad,
+//        handelser:[{ id, ignoreraId, matchIds, kalla:'bokningar'|'privat'|'ics'|'reservation', datum, start, slut, heldag,
+//                     titel, plats, hasPlace, restid, cooldownMin, preliminar, raknad, ignorerad, bokningId, bokareId, motestypId,
+//                     sammanslagenMed:[], varning, varningar:[] }],
+//        icsStatus:{ ok, hamtadTs, antal, medPlats, preliminara }, obesvarade, varningar:[] }
+// Exakt det scriptet ser efter sammanslagning (buildBusyList med ALLA källor: Google 'tider'/'fullt', Outlook-ICS, inkorgens
+// bokningar, aktiva reservationer). Ignorerade händelser är MED (ignorerad:true) i stället för uteslutna; preliminära ICS-poster
+// är med (preliminar:true, raknad enligt config). En händelse över midnatt ger ett segment per dag (samma id, olika datum).
+// Regel för titel/plats (4.6, 9): bara för kalendrar med läge 'fullt' (kalla 'bokningar'), Outlook-ICS och reservationer –
+// ALDRIG för läge 'tider' (kalla 'privat'): där är titel/plats alltid '' (hasPlace/restid är bara boolska). Inga kundnamn ur
+// inkorgen (appen har dem lokalt) – bokningId räcker för att matcha. `id` = intern busy-id (unik per segment, prefix anger källa,
+// används i sammanslagenMed); `ignoreraId` = det id KALENDER_IGNORERA ska lagra (Google event-id / ICS UID / bokningens
+// kalenderhändelse-id), `matchIds` = alla id:n posten matchas på (event-id, recurringEventId, UID). Varningar: ICS-fel,
+// "Många obesvarade …", Maps-varning, avstämningens "saknas i inkorgen" (4.11, fylls av dailyMaintenance i M5 – läses redan här),
+// "N avbokade/avvisade möten ligger kvar i kalendern" (4.7: händelse vars bokningId är avbokad/avvisad i inkorgen, t.ex. efter
+// misslyckad Calendar.Events.remove – posten får varning "Avbokad/Avvisad i inkorgen men händelsen finns kvar …").
+function handleCalendarPreview(req, ctx) {
+  authAdmin(req, ctx);
+  const config = loadConfig(ctx), inst = config.installningar;
+  const from = datumField(req.from !== undefined && req.from !== null ? req.from : req.fran, 'from');
+  const to = datumField(req.to !== undefined && req.to !== null ? req.to : req.till, 'to');
+  if (to < from) valideringsfel({ to: 'Slutdatum ligger före startdatum' });
+  if (daysBetween(from, to) > PREVIEW_MAX_DAGAR) valideringsfel({ to: 'Högst 8 veckor per förfrågan' });
+  const idag = todayStr(), horisontTom = horisontTomDatum(inst);
+  if (from < addDays(idag, -7)) valideringsfel({ from: 'Utanför fönstret (tidigast 7 dagar bakåt)' });
+  if (to > addDays(horisontTom, 7)) valideringsfel({ to: 'Utanför bokningshorisonten' });
+
+  // Inkorgen läses en gång: buildBusyList får den som opts.inbox, och avbokade/avvisade poster används för att flagga händelser
+  // som ligger kvar i kalendern (4.7: misslyckad Calendar.Events.remove → status sätts ändå, Kalenderkoll ska visa varning).
+  let inbox = null;
+  try { inbox = readInbox(); } catch (e) { inbox = null; }             // null → buildBusyList läser själv och varnar
+  const dodaPoster = avbokadeIInkorgen(inbox);
+  const busy = buildBusyList(from, to, { config: config, inbox: inbox, farsk: false });
+  const saknas = avstamningSaknas();
+  const handelser = busy.map(x => previewExport(x, saknas, dodaPoster));
+  const varningar = [];
+  const lagg = v => { const s = str(v); if (s && varningar.indexOf(s) < 0) varningar.push(s); };
+  (busy.varningar || []).forEach(lagg);
+  const kvarIKalendern = handelser.filter(h => h.bokningId && dodaPoster[h.bokningId]).length;
+  if (kvarIKalendern) lagg(kvarIKalendern + ' avbokade/avvisade möten ligger kvar i kalendern – ta bort dem manuellt');
+  const mapsVarning = CacheService.getScriptCache().get('maps:varning');
+  if (mapsVarning) lagg('Maps: ' + mapsVarning);
+  const saknasIVyn = handelser.filter(h => h.bokningId && saknas[h.bokningId]).length;
+  if (saknas.antal) lagg('Kalenderhändelser som saknas i inkorgen: ' + saknas.antal + (saknasIVyn ? ' (' + saknasIVyn + ' i vyn)' : ''));
+  const obesvarade = handelser.filter(h => h.preliminar).length;
+  return {
+    from: from, to: to, idag: idag, horisontTom: horisontTom, genererad: nowIso(),
+    handelser: handelser, icsStatus: icsStatusForPing(config), obesvarade: obesvarade, varningar: varningar
+  };
+}
+// Avstämningens lista "saknas i inkorgen" (4.11): CacheService AVSTAMNING_CACHE_KEY = JSON-lista av bokningId (skrivs av
+// dailyMaintenance i M5). → { <bokningId>: true, …, antal }.
+function avstamningSaknas() {
+  const ut = { antal: 0 };
+  try {
+    const raw = CacheService.getScriptCache().get(AVSTAMNING_CACHE_KEY);
+    const lista = raw ? JSON.parse(raw) : [];
+    if (Array.isArray(lista)) lista.forEach(id => { if (typeof id === 'string' && id && id !== 'antal' && !ut[id]) { ut[id] = true; ut.antal++; } });
+  } catch (e) { /* cache är best effort */ }
+  return ut;
+}
+// Inkorgens avbokade/avvisade poster (status 'avbokad'/'avvisad' – dit hör även de med historik typ 'kalenderfel') → { <bokningId>: status }.
+// En kalenderhändelse med sådant bokningId ska inte finnas kvar (cancel/reject tar bort den) – finns den ändå varnar Kalenderkoll (4.7).
+function avbokadeIInkorgen(inbox) {
+  const ut = {};
+  ((inbox && inbox.bokningar) || []).forEach(b => {
+    if (!b || !b.bokningId) return;
+    const st = str(b.status);
+    if (st === 'avbokad' || st === 'avvisad') ut[str(b.bokningId)] = st;
+  });
+  return ut;
+}
+// BusyItem-segment → Kalenderkoll-post. Titel/plats bara för 'bokningar', 'ics' och 'reservation' – aldrig 'privat' (läge 'tider').
+// dodaPoster (valfri) = avbokadeIInkorgen(inbox): händelse med bokningId som är avbokad/avvisad i inkorgen får en varning.
+function previewExport(x, saknas, dodaPoster) {
+  const kalla = ['bokningar', 'privat', 'ics', 'reservation'].indexOf(x.kalla) >= 0 ? x.kalla : 'privat';
+  const visaText = kalla !== 'privat';
+  const text = v => cleanText(String(v || '')).slice(0, 200);
+  const platsText = x.plats && typeof x.plats === 'object' ? x.plats.text : x.plats;
+  const matchIds = kalla === 'reservation' ? [] : (Array.isArray(x.matchIds) ? x.matchIds : []).map(v => String(v || '')).filter(Boolean);
+  let titel = '';
+  if (kalla === 'reservation') titel = 'Reservation';
+  else if (visaText) titel = text(x.summary);
+  const varningarPost = [];
+  if (x.varning) varningarPost.push(text(x.varning));
+  if (x.bokningId && saknas && saknas[x.bokningId] === true) varningarPost.push('saknas i inkorgen');
+  const dod = x.bokningId && dodaPoster ? dodaPoster[x.bokningId] : '';
+  if (dod === 'avbokad' || dod === 'avvisad') varningarPost.push((dod === 'avbokad' ? 'Avbokad' : 'Avvisad') + ' i inkorgen men händelsen finns kvar i kalendern – ta bort den manuellt');
+  return {
+    id: str(x.id), ignoreraId: matchIds[0] || '', matchIds: matchIds,
+    kalla: kalla, datum: str(x.datum), start: str(x.start), slut: str(x.slut), heldag: x.heldag === true,
+    titel: titel, plats: visaText && kalla !== 'reservation' ? text(platsText) : '',
+    hasPlace: x.hasPlace === true, restid: x.isTravelMeeting === true, cooldownMin: Number(x.cooldownMin) || 0,
+    preliminar: x.preliminar === true, raknad: x.raknad === true, ignorerad: x.ignorerad === true,
+    bokningId: str(x.bokningId), bokareId: str(x.bokareId), motestypId: str(x.motestypId),
+    sammanslagenMed: (Array.isArray(x.sammanslagenMed) ? x.sammanslagenMed : []).map(v => String(v || '')).filter(Boolean),
+    varning: varningarPost[0] || '', varningar: varningarPost
+  };
+}
+
+// ---------- rebook (4.4, 4.7, 4.9, 6.3 Omboka, 8.3) – M4 ----------
+// In:  { adminKey, bokningId, start, adress?, reservationId?, motestypId?, orsak? }
+//      start = ISO med offset ('2026-09-24T10:00:00+02:00') eller { datum:'YYYY-MM-DD', tid:'HH:MM' }; samma regler som book
+//      (raster, öppen dag, framförhållning per mötestyp, horisont – parseStartField). adress: ny adress (typ med restid; utelämnad →
+//      befintlig). motestypId: bara bokningens egen (utelämnad = samma) eller en aktiv typ som bokningens bokare får boka.
+//      reservationId: honoreras (undantas som hinder) bara om reservationen tillhör bokningens bokare eller en CJ-bokare.
+// Ut:  { bokningId, start, slut, adress, geo, restid, motestypId, kalenderEventId, kalenderNyHandelse, rev, mejlSkickat, bokning }
+// Posten måste ha status ny/importerad (annars E_STATE, details.status; okänd → E_NOT_FOUND). Bokningens mötestyp tillåts även om
+// den är inaktiv eller inte längre i tillatnaMotestypIds (resolveMotestyp med undantaPost). Den nya luckan kontrolleras under låset
+// med färsk kalenderläsning och computeAvailability(undantaBokningId = bokningId) → E_SLOT_TAKEN. Nätverks-I/O (ICS, geokodning,
+// Distance Matrix) före låset (4.8). Kalendern: Calendar.Events.patch(start/end/location[/summary], sendUpdates 'all'); är händelsen
+// borta (404/410) skapas en ny (kalenderNyHandelse:true, nytt kalenderEventId); annat fel → E_CALENDAR, inget ändrat. Inkorgsposten:
+// start, slut, adress, geo, restid, rev+1, andradAt, historik { typ:'ombokad', av:'cj', fran, till } – status oförändrad (appen speglar
+// via rev > bokningRev, 8.3). Busy-cachen töms för gamla och nya dagen. Utanför låset: mejl till bokaren om bokare.epost finns (A25).
+const REBOOK_STATUSAR = ['ny', 'importerad', 'bokad', 'ombokad'];
+function handleRebook(req, ctx) {
+  authAdmin(req, ctx);
+  const bokningId = typeof req.bokningId === 'string' ? req.bokningId : '';
+  if (!BOKNING_ID_RE.test(bokningId)) valideringsfel({ bokningId: 'Ogiltigt värde' });
+  const startIso = rebookStartIso(req.start);
+  const orsak = strField(req.orsak, 'orsak', ORSAK_MAX, false);
+  const nyAdress = req.adress === undefined || req.adress === null ? null : strField(req.adress, 'adress', MAXLEN.adress, false);
+  if (req.motestypId !== undefined && req.motestypId !== null && (typeof req.motestypId !== 'string' || !req.motestypId || req.motestypId.length > 64)) valideringsfel({ motestypId: 'Okänd mötestyp' });
+  const config = loadConfig(ctx), inst = config.installningar;
+
+  // Posten läses utan lås för validering och cache-värmning; avgörs på nytt under låset.
+  const post0 = findBokningInInbox(readInbox(), bokningId);
+  if (!post0) fel('E_NOT_FOUND');
+  if (REBOOK_STATUSAR.indexOf(str(post0.status)) < 0) fel('E_STATE', undefined, { status: str(post0.status) });
+  const bokare = rebookBokare(config, post0);
+  const typbyte = typeof req.motestypId === 'string' && req.motestypId !== str(post0.motestypId);
+  const typ = typbyte ? resolveMotestyp(config, bokare, req.motestypId, null) : resolveMotestyp(config, bokare, str(post0.motestypId), post0);
+  const st = parseStartField(startIso, inst, typ);
+  const adress = nyAdress !== null ? nyAdress : str(post0.adress);
+  if (typ.restid && !adress) valideringsfel({ adress: 'Obligatoriskt' });
+  const slutIso = toIsoWithOffset(st.datum, minToTid(tidToMin(st.tid) + typ.langdMin));
+  const reservationId = rebookReservationId(req.reservationId, config, post0);
+
+  // Före låset (4.8): geokodning, ICS och dagsberäkning utan färsk kalenderläsning värmer cacherna.
+  const geo = typ.restid ? geoForBooking(adress, null) : { lat: null, lng: null, formaterad: '', status: 'saknas' };
+  if (typeof readIcs === 'function') { try { readIcs(config, { farsk: false }); } catch (e) { /* avgörs under låset */ } }
+  try { findSlot(bokare, config, typ, adress, st, reservationId, bokningId, false); } catch (e) { if (errorCode(e) === 'E_RATE') throw e; }
+
+  let bokning = null, fran = '', kal = null;
+  withScriptLock(() => {
+    const inbox = readInbox();
+    const b = findBokningInInbox(inbox, bokningId);
+    if (!b) fel('E_NOT_FOUND');
+    if (REBOOK_STATUSAR.indexOf(str(b.status)) < 0) fel('E_STATE', undefined, { status: str(b.status) });
+    const slot = findSlot(bokare, config, typ, adress, st, reservationId, bokningId, true, inbox);   // färsk läsning, egen post undantagen
+    if (!slot || slot.status !== 'ledig') fel('E_SLOT_TAKEN');
+    const ts = nowIso();
+    fran = str(b.start); const franSlut = str(b.slut);
+    const nytt = { start: st.iso, slut: slutIso, adress: adress, motestypId: typ.id };
+    kal = patchBookingEvent(config, bokare, typ, b, nytt);                 // E_CALENDAR → inget ändrat
+    b.start = st.iso; b.slut = slutIso; b.adress = adress; b.geo = geo; b.restid = restidFromSlot(slot, typ, geo);
+    if (typbyte) b.motestypId = typ.id;
+    b.kalenderEventId = kal.eventId;
+    b.rev = (Number(b.rev) || 0) + 1; b.andradAt = ts;
+    if (!Array.isArray(b.historik)) b.historik = [];
+    const h = { ts: ts, typ: 'ombokad', av: 'cj', fran: fran, till: st.iso };
+    if (orsak) h.orsak = orsak;
+    if (typbyte) h.motestypFran = str(post0.motestypId);
+    b.historik.push(h);
+    try { writeInbox(inbox); }
+    catch (e) {
+      // Kalendern är redan flyttad – försök flytta tillbaka (best effort) så att kalender och inkorg inte går isär.
+      try { patchBookingEvent(config, bokare, typ, Object.assign({}, b, { kalenderEventId: kal.eventId }), { start: fran, slut: franSlut, adress: str(post0.adress), motestypId: str(b.motestypId) }); } catch (e2) { /* best effort */ }
+      fel('E_INTERNAL', 'Ombokningen kunde inte sparas – inget har ändrats');
+    }
+    clearBusyCacheFor({ start: fran, slut: franSlut });
+    clearBusyCacheFor(b);
+    bokning = b;
+  });
+  const mejlSkickat = notifyBokareOmbokad(config, bokning, fran, orsak);
+  return {
+    bokningId: bokningId, start: bokning.start, slut: bokning.slut, adress: bokning.adress, geo: bokning.geo, restid: bokning.restid,
+    motestypId: bokning.motestypId, kalenderEventId: bokning.kalenderEventId, kalenderNyHandelse: kal.ny === true,
+    rev: Number(bokning.rev) || 0, mejlSkickat: mejlSkickat, bokning: inboxExport(bokning)
+  };
+}
+// start för rebook: ISO med offset eller { datum, tid } → ISO-sträng (parseStartField gör resten).
+function rebookStartIso(v) {
+  if (isPlainObject(v)) {
+    const datum = typeof v.datum === 'string' ? v.datum : '', tid = typeof v.tid === 'string' ? v.tid : '';
+    if (!DATUM_RE.test(datum) || isNaN(new Date(datum + 'T12:00:00Z').getTime()) || isNaN(tidToMin(tid))) valideringsfel({ start: 'Ogiltig starttid' });
+    return toIsoWithOffset(datum, tid);
+  }
+  if (typeof v !== 'string') valideringsfel({ start: 'Ogiltig starttid' });
+  return v;
+}
+// Bokaren som tillgängligheten räknas för: bokningens egen bokare (även inaktiv), annars en syntetisk CJ-bokare i bokningens
+// pipeline (bokaren borttagen ur config) – typen slås ändå upp via undantaPost, och kundnamn/egen-flaggor spelar ingen roll för admin.
+function rebookBokare(config, post) {
+  const b = config.bokare.find(x => x.id === post.bokareId) || null;
+  if (b) return b;
+  return { id: str(post.bokareId), namn: 'Borttagen bokare', epost: '', pipelineId: str(post.pipelineId), tillatnaMotestypIds: [], aktiv: false, arCj: true };
+}
+// Reservation som undantas vid ombokning: bara om den finns och tillhör bokningens bokare eller en CJ-bokare.
+function rebookReservationId(v, config, post) {
+  const r = getReservation(typeof v === 'string' ? v.slice(0, 64) : '');
+  if (!r) return '';
+  if (r.bokareId === post.bokareId) return r.id;
+  const agare = config.bokare.find(x => x.id === r.bokareId);
+  return agare && agare.arCj === true ? r.id : '';
+}
+// Flyttar bokningens kalenderhändelse (4.7): Events.patch({ start, end, location[, summary, extendedProperties] }, sendUpdates 'all').
+// Händelsen borta (404/410) eller inget id → ny händelse via createBookingEvent (ny:true). Annat fel → E_CALENDAR (inget ändrat).
+function patchBookingEvent(config, bokare, typ, bokning, nytt) {
+  const inst = config.installningar;
+  const calId = bokningarKalenderId(inst);
+  const s = v => String(v || '').replace(/[<>]/g, ' ');
+  const uppdaterad = Object.assign({}, bokning, { start: nytt.start, slut: nytt.slut, adress: nytt.adress, motestypId: nytt.motestypId });
+  const skapaNy = () => { const ev = createBookingEvent(config, bokare, typ, uppdaterad, calId); return { eventId: str(ev && ev.id), ny: true }; };
+  const eventId = str(bokning.kalenderEventId);
+  if (!eventId) return skapaNy();
+  const resurs = {
+    start: { dateTime: nytt.start, timeZone: TZ },
+    end:   { dateTime: nytt.slut,  timeZone: TZ },
+    location: s(nytt.adress)
+  };
+  if (nytt.motestypId !== str(bokning.motestypId)) {
+    const kund = isPlainObject(bokning.kund) ? bokning.kund : {};
+    resurs.summary = s(typ.titel) + ': ' + s(kund.namn);
+    resurs.extendedProperties = { private: { bokningId: String(bokning.bokningId), bokareId: String(bokning.bokareId || ''), pipelineId: String(bokning.pipelineId || ''), motestypId: String(nytt.motestypId) } };
+  }
+  let ev = null, gone = false;
+  try { ev = Calendar.Events.patch(resurs, calId, eventId, { sendUpdates: 'all' }); }
+  catch (e) { if (calendarEventGone(e)) gone = true; else fel('E_CALENDAR'); }
+  if (gone) return skapaNy();
+  return { eventId: str(ev && ev.id) || eventId, ny: false };
+}
+// Mejl till bokaren efter ombokning (4.9, A25): kundnamn, gammal och ny tid, CJ:s orsak, "Du kontaktar kunden.". Aldrig kontaktuppgifter.
+function notifyBokareOmbokad(config, bokning, franIso, orsak) {
+  const bokare = config.bokare.find(b => b.id === bokning.bokareId) || null;
+  const epost = bokare ? normalizeEmail(bokare.epost) : '';
+  if (!epost || !EPOST_RE.test(epost)) return false;
+  const s = v => String(v || '').replace(/[<>]/g, ' ');
+  const typ = config.motestyper.find(t => t.id === bokning.motestypId) || {};
+  const g = franIso ? fromIso(franIso) : { datum: '', tid: '' };
+  const p = fromIso(bokning.start), slutTid = fromIso(bokning.slut).tid;
+  const subject = 'Bokning flyttad: ' + s(bokning.kund && bokning.kund.namn) + ' ' + p.datum + ' ' + p.tid;
+  const body = [
+    'Hej ' + s(bokare.namn) + '!',
+    '',
+    'CJ har flyttat bokningen nedan. Kalenderinbjudan är uppdaterad.',
+    '',
+    'Kund: ' + s(bokning.kund && bokning.kund.namn),
+    'Mötestyp: ' + s(typ.titel || bokning.motestypId),
+    'Tidigare tid: ' + (g.datum ? longDateLabel(g.datum) + ' kl ' + g.tid : '(okänd)'),
+    'Ny tid: ' + longDateLabel(p.datum) + ' kl ' + p.tid + '–' + slutTid,
+    'Orsak: ' + (orsak ? s(orsak) : '(ingen orsak angiven)'),
+    '',
+    'Du kontaktar kunden.',
+    '',
+    'Bokningsnummer: ' + String(bokning.bokningId)
+  ].join('\n');
+  try { MailApp.sendEmail({ to: epost, subject: subject, body: body, name: 'Pipeline bokning' }); return true; }
+  catch (e) { loggaMejlfel(bokning.bokningId); return false; }
+}
+
+// ---------- cancel (4.4, 4.7, 4.9, 6.3 Avboka, 8.3) – M4 ----------
+// In:  { adminKey, bokningId, orsak? }  (även { kalenderEventId, orsak? } utan bokningId, 4.4: avbokning ska fungera efter gallring –
+//      finns ingen inkorgspost med det händelse-id:t tas bara kalenderhändelsen bort, postSaknas:true)
+// Ut:  { ok:true, bokningId, status:'avbokad', kalenderBorttagen, kalenderFel, mejlSkickat, rev, postSaknas, bokning }
+// Från ny/importerad (annars E_STATE, details.status – t.ex. redan 'avbokad'/'avvisad'); okänd → E_NOT_FOUND. Under lås:
+// Calendar.Events.remove (sendUpdates 'all'; 404/410 = redan borta = lyckat; annat fel → status sätts ändå + historik 'kalenderfel'
+// + kalenderFel:true, 4.7), status 'avbokad', avbokadTs/avbokadOrsak/andradAt, historik { typ:'avbokad', av:'cj', orsak }, inkorgen
+// skrivs (rev+1), busy-cachen töms. Posten raderas aldrig (8.3). Utanför låset: mejl till bokaren om bokare.epost finns (A25).
+function handleCancel(req, ctx) {
+  authAdmin(req, ctx);
+  const bokningId = typeof req.bokningId === 'string' ? req.bokningId : '';
+  const kalenderEventId = typeof req.kalenderEventId === 'string' ? cleanText(req.kalenderEventId).slice(0, 256) : '';
+  if (bokningId || !kalenderEventId) { if (!BOKNING_ID_RE.test(bokningId)) valideringsfel({ bokningId: 'Ogiltigt värde' }); }
+  const orsak = strField(req.orsak, 'orsak', ORSAK_MAX, false);
+  const config = loadConfig(ctx);
+  let bokning = null, kal = { borttagen: false, fel: false }, rev = 0, postSaknas = false;
+  withScriptLock(() => {
+    const inbox = readInbox();
+    let b = bokningId ? findBokningInInbox(inbox, bokningId) : null;
+    if (!b && !bokningId && kalenderEventId) b = inbox.bokningar.find(x => str(x.kalenderEventId) === kalenderEventId) || null;
+    if (!b) {
+      if (!bokningId && kalenderEventId) { kal = removeBookingEvent(config, kalenderEventId); postSaknas = true; rev = Number(inbox.rev) || 0; return; }
+      fel('E_NOT_FOUND');
+    }
+    if (REBOOK_STATUSAR.indexOf(str(b.status)) < 0) fel('E_STATE', undefined, { status: str(b.status) });
+    const ts = nowIso();
+    kal = removeBookingEvent(config, b.kalenderEventId);
+    b.status = 'avbokad';
+    b.avbokadTs = ts; b.avbokadOrsak = orsak; b.andradAt = ts;
+    if (!Array.isArray(b.historik)) b.historik = [];
+    b.historik.push({ ts: ts, typ: 'avbokad', av: 'cj', orsak: orsak });
+    if (kal.fel) b.historik.push({ ts: ts, typ: 'kalenderfel', av: 'script' });
+    writeInbox(inbox);
+    rev = Number(inbox.rev) || 0;
+    clearBusyCacheFor(b);
+    bokning = b;
+  });
+  const mejlSkickat = bokning ? notifyBokareAvbokad(config, bokning, orsak) : false;
+  return {
+    ok: true, bokningId: bokning ? str(bokning.bokningId) : '', status: 'avbokad',
+    kalenderBorttagen: kal.borttagen, kalenderFel: kal.fel, mejlSkickat: mejlSkickat, rev: rev, postSaknas: postSaknas,
+    bokning: bokning ? inboxExport(bokning) : null
+  };
+}
+// Mejl till bokaren efter avbokning (4.9, A25): kundnamn, tid, orsak, "Du kontaktar kunden.". Aldrig kontaktuppgifter.
+function notifyBokareAvbokad(config, bokning, orsak) {
+  const bokare = config.bokare.find(b => b.id === bokning.bokareId) || null;
+  const epost = bokare ? normalizeEmail(bokare.epost) : '';
+  if (!epost || !EPOST_RE.test(epost)) return false;
+  const s = v => String(v || '').replace(/[<>]/g, ' ');
+  const typ = config.motestyper.find(t => t.id === bokning.motestypId) || {};
+  const p = fromIso(bokning.start), slutTid = fromIso(bokning.slut).tid;
+  const subject = 'Bokning avbokad: ' + s(bokning.kund && bokning.kund.namn) + ' ' + p.datum + ' ' + p.tid;
+  const body = [
+    'Hej ' + s(bokare.namn) + '!',
+    '',
+    'CJ har avbokat bokningen nedan. Kalenderinbjudan är borttagen.',
+    '',
+    'Kund: ' + s(bokning.kund && bokning.kund.namn),
+    'Mötestyp: ' + s(typ.titel || bokning.motestypId),
+    'Tid: ' + longDateLabel(p.datum) + ' kl ' + p.tid + '–' + slutTid,
+    'Orsak: ' + (orsak ? s(orsak) : '(ingen orsak angiven)'),
+    '',
+    'Du kontaktar kunden.',
+    '',
+    'Bokningsnummer: ' + String(bokning.bokningId)
+  ].join('\n');
+  try { MailApp.sendEmail({ to: epost, subject: subject, body: body, name: 'Pipeline bokning' }); return true; }
+  catch (e) { loggaMejlfel(bokning.bokningId); return false; }
+}
+
+// ---------- Stub till M5 ----------
 function adminStub(req, ctx) {
   authAdmin(req, ctx);
   fel('E_NOT_IMPLEMENTED');
 }
-function handleCalendarPreview(req, ctx) { return adminStub(req, ctx); }   // M4
-function handleCancel(req, ctx) { return adminStub(req, ctx); }            // M4
-function handleRebook(req, ctx) { return adminStub(req, ctx); }            // M4
 function handlePurge(req, ctx) { return adminStub(req, ctx); }             // M5
 
 // Routingtabell (4.4). Nycklarna är action-värdena exakt som klienterna skickar dem.

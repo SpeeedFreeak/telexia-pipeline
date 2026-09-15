@@ -545,7 +545,7 @@ function inboxBookingToBusy(b, opts) {
     cooldownMin: typeof opts.cooldownFor === 'function' ? (opts.cooldownFor(b.motestypId) | 0) : 0,
     bokningId: String(b.bokningId || ''), bokareId: String(b.bokareId || ''), motestypId: String(b.motestypId || ''),
     pipelineId: String(b.pipelineId || ''), kundnamn: b.kund && b.kund.namn ? String(b.kund.namn) : '',
-    summary: 'Bokning' + (b.kund && b.kund.namn ? ': ' + b.kund.namn : '')
+    summary: 'Bokning'                              // aldrig kundnamn i titeln (calendar-preview, M4) – kundnamn är eget fält (bara ägande bokare)
   };
   if (b.geo && typeof b.geo.lat === 'number' && typeof b.geo.lng === 'number') {
     base.plats.lat = b.geo.lat; base.plats.lng = b.geo.lng; base.plats.geokodad = true; base.hasPlace = true;
@@ -942,9 +942,21 @@ function readBusy(fran, till, opts) {
  *   readBusy + bekräftade bokningar ur inkorgen (ny/importerad, framtida) + aktiva reservationer
  *   → mergeBusy → applyIgnore → finalizeBusy.
  * opts: { config, inbox, farsk, reservationId (anropande bokarens egen), bokareId (för egen/kundnamn),
- *         undantaBokningId (ombokning: posten med samma bokningId tas bort helt) }
+ *         undantaBokningId (ombokning: alla poster med samma bokningId tas bort helt, samt ICS-poster vars UID är bokningens
+ *         Google-iCalUID – Outlooks accepterade kopia; se kalUndantaBokning_) }
  * Returnerar array med egenskapen `varningar`.
  */
+/** Tar bort bokningens egna segment (bokningId) och Outlook-ICS-kopian av dem (uid = Google-händelsens iCalUID, eller
+ *  '<kalenderhändelse-id>@google.com' som Google ger händelser skapade via API:t) – körs före mergeBusy. */
+function kalUndantaBokning_(items, bokningId) {
+  const uids = {};
+  items.forEach(x => {
+    if (x.bokningId !== bokningId) return;
+    if (x.iCalUID) uids[String(x.iCalUID)] = true;
+    if (x.eventId) uids[String(x.eventId) + '@google.com'] = true;
+  });
+  return items.filter(x => x.bokningId !== bokningId && !(x.kalla === 'ics' && x.uid && uids[String(x.uid)]));
+}
 function buildBusyList(from, to, opts) {
   opts = opts || {};
   const config = kalConfig_(opts);
@@ -970,7 +982,11 @@ function buildBusyList(from, to, opts) {
       .forEach(seg => { if (seg.datum >= from && seg.datum <= to) items.push(seg); });
   });
 
-  if (opts.undantaBokningId) items = items.filter(x => x.bokningId !== opts.undantaBokningId);
+  // Undantag för ombokning (4.4): bokningens egna poster tas bort FÖRE sammanslagningen – Google-händelsen, inkorgsposten och
+  // Outlooks accepterade ICS-kopia (modulens inbyggda dubblett, 4.6: ICS-UID = Googles iCalUID, saknar eget bokningId).
+  // Medvetet inte "filtrera efter mergeBusy": regel 2 (≥ 90 % överlapp) kan slå ihop en FRÄMMANDE händelse (t.ex. privat
+  // 30 min inuti bokningen) med bokningens post, och den får inte försvinna som hinder bara för att bokningen flyttas.
+  if (opts.undantaBokningId) items = kalUndantaBokning_(items, opts.undantaBokningId);
 
   let out = mergeBusy(items);
   out = applyIgnore(out, config.ignorerade || []);
