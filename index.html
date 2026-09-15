@@ -371,6 +371,9 @@
   .bok-inbox { max-width: 760px; }
   .bok-inbox .agenda-item { cursor: default; flex-direction: column; align-items: stretch; }
   .bok-inbox .agenda-item.is-ny { border-left: 3px solid #34d399; }
+  .bok-inbox .agenda-item.is-andrad { border-left: 3px solid #fbbf24; }
+  .ny-badge.andrad { background: #fbbf24; }
+  .bok-andrad { color: #fbbf24; font-weight: 600; }
   .bok-inbox .agenda-item.is-vantar { border-left: 3px solid #fbbf24; }
   .bok-inbox .agenda-item-top { flex-wrap: wrap; }
   .bok-inbox .bok-when { font-size: 13px; font-weight: 600; color: #f3f4f6; }
@@ -1013,8 +1016,9 @@
 // bokScriptUrl(), som föredrar BOKNINGSINSTALLNINGAR.scriptUrl (klistras in under Bokningar › Inställningar) och annars
 // använder konstanten BOK_SCRIPT_URL. Båda är publika, inga hemligheter. bokAdminApi finns bara här (appen).
 const BOK_SCRIPT_URL = 'https://script.google.com/macros/s/AKfycbxqBn2wQt8pqF0USTj81kiyGHOmV3ICNqxBRYPksJiwBkvkqFjFCHZ1SzYtAo1gRdeROg/exec';   // publik, ej hemlighet – CJ byter efter script-deploy
-const MIN_SCRIPT_VERSION = 1;
+const MIN_SCRIPT_VERSION = 4;     // 4 = steg 2a: bokarens självservice (egen-rebook/egen-cancel/egen-update, hello.egna med kanAndras)
 const PURGE_SCRIPT_VERSION = 3;   // scriptversion med purge på riktigt (M5); äldre script → radering av processer/kunder med bokningar avbryts (Drift-panelen varnar)
+const SJALVSERVICE_SCRIPT_VERSION = 4;   // scriptversion med bokarens självservice (steg 2a); äldre script → bokningssidan saknar Omboka/Ändra/Avboka (Drift-panelen varnar)
 const BOK_TIMEOUT_MS = { hello: 15000, availability: 15000, geocode: 15000, ping: 15000 };   // övriga (skrivande) 45 000
 function bokScriptUrl() {
   const u = (typeof BOKNINGSINSTALLNINGAR === 'object' && BOKNINGSINSTALLNINGAR) ? BOKNINGSINSTALLNINGAR.scriptUrl : '';
@@ -1178,6 +1182,7 @@ function migrateLeads(data) {
       if (typeof ev.kalenderEventId !== 'string') ev.kalenderEventId = '';
       if (typeof ev.bokningRev !== 'number') ev.bokningRev = 0;
       if (typeof ev.notering !== 'string') ev.notering = '';
+      if (typeof ev.bokHistorikN !== 'number' || !isFinite(ev.bokHistorikN) || ev.bokHistorikN < -1) ev.bokHistorikN = -1;   // lästa historikposter i inkorgsposten (steg 2a); -1 = okänd (händelse från app före steg 2a) – sätts till hela historiken vid nästa import utan spegling bakåt
     });
     if (typeof l.bokadAv !== 'string') l.bokadAv = '';
     delete l.next;
@@ -1561,8 +1566,9 @@ function migrateBokning() {
     if (typeof p.sedd !== 'boolean') p.sedd = false;
     if (typeof p.importeradTs !== 'string') p.importeradTs = '';
     if (typeof p.enhetId !== 'string') p.enhetId = '';
-    ['leadId','eventId','kundId','kontaktId','avvisadTs','avvisadOrsak'].forEach(k => { if (typeof p[k] !== 'string') p[k] = ''; });
+    ['leadId','eventId','kundId','kontaktId','avvisadTs','avvisadOrsak','andradAvBokareTs','andradAvBokareTyp'].forEach(k => { if (typeof p[k] !== 'string') p[k] = ''; });
     ['nyProcess','nyKund','mojligDubblett'].forEach(k => { if (typeof p[k] !== 'boolean') p[k] = false; });
+    if (typeof p.historikN !== 'number' || !isFinite(p.historikN) || p.historikN < -1) p.historikN = -1;   // antal lästa historikposter i inkorgsposten (spegling av bokarens självservice, steg 2a); -1 = okänd (post från app före steg 2a: allt dittills speglades via rev/status)
   });
   // Dubblettskydd: samma bokningId på två händelser lokalt → behåll den vars id === 'E_' + bokningId
   // (i andra hand en som inte redan är avbokad/avvisad), den andra får status 'avbokad' + loggpost. Inget raderas.
@@ -2564,7 +2570,7 @@ function renderLeadEvents() {
   }));
 }
 document.getElementById('leadEventAddBtn').addEventListener('click', () => {
-  currentLeadEvents.push({ id: uid(), text: '', datum: '', utford: false, tid: '', langdMin: 0, motestypId: '', adress: '', lat: null, lng: null, bokningId: '', bokadAv: '', status: '', restid: null, kalenderEventId: '', bokningRev: 0, notering: '' });
+  currentLeadEvents.push({ id: uid(), text: '', datum: '', utford: false, tid: '', langdMin: 0, motestypId: '', adress: '', lat: null, lng: null, bokningId: '', bokadAv: '', status: '', restid: null, kalenderEventId: '', bokningRev: 0, notering: '', bokHistorikN: -1 });
   renderLeadEvents();
 });
 document.getElementById('leadKundAddBtn').addEventListener('click', () => {
@@ -4018,6 +4024,7 @@ function bokDriftRader() {   // gemensamma rader för Drift-panelen; statusraden
     const v = bokDrift.pingVersion;
     rader.push({ text: 'Scriptversion ' + v + (v < MIN_SCRIPT_VERSION ? ' – uppdatera scriptet (kräver minst ' + MIN_SCRIPT_VERSION + ')' : '') + ' · ' + (p.konfigurerad ? 'konfigurerad' : 'INTE konfigurerad' + (p.orsak ? ' – ' + p.orsak : '')), kind: (p.konfigurerad && v >= MIN_SCRIPT_VERSION) ? 'ok' : 'warn', omrade: 'script' });
     if (v > 0 && v < PURGE_SCRIPT_VERSION) rader.push({ text: 'Scriptversion ' + v + ' – purge saknas: radering av processer/kunder med bokningar avbryts tills scriptet uppdaterats (Hantera distributioner › Ny version, version ' + PURGE_SCRIPT_VERSION + ')', kind: 'warn', omrade: 'script' });
+    if (v > 0 && v < SJALVSERVICE_SCRIPT_VERSION) rader.push({ text: 'Scriptversion ' + v + ' < ' + SJALVSERVICE_SCRIPT_VERSION + ' – bokarens självservice saknas: bokaren kan inte omboka, ändra eller avboka sina bokningar på bokningssidan förrän scriptet uppdaterats (Hantera distributioner › Ny version, version ' + SJALVSERVICE_SCRIPT_VERSION + ')', kind: 'warn', omrade: 'script' });
     rader.push({ text: 'Maps: ' + (p.mapsNyckel ? 'nyckel finns · ' + p.mapsForbrukningIdag + ' element idag' + (p.mapsDagstak ? ' av ' + p.mapsDagstak : '') : 'ingen nyckel – schablonrestid'), kind: 'info', omrade: 'maps' });
     if (p.mapsVarning) rader.push({ text: 'Maps-varning: ' + p.mapsVarning + ' – schablonrestid används', kind: 'warn', omrade: 'maps' });
     const ics = p.icsStatus;
@@ -4170,7 +4177,8 @@ async function bearbetaInkorg(bokningar) {
     skapaFranPlan(b, safePlan, null);
     out.nya++; sparaKunder = true; sparaLeads = true; sparaImport = true;
   });
-  if (applyInboxChanges(bokningar)) { out.andrat = true; sparaLeads = true; sparaImport = true; }
+  if (applyInboxChanges(bokningar)) { out.andrat = true; sparaLeads = true; sparaImport = true; if (inboxKunderAndrade) sparaKunder = true; }
+  else if (inboxMarkorFlyttad) { sparaLeads = true; sparaImport = true; }   // markören (bokHistorikN/historikN) måste bestå även utan speglad ändring
   if (sparaKunder) saveCustomers(customers);
   if (sparaLeads) saveLeads(leads);
   if (sparaImport) saveBokningImport(BOKNING_IMPORT);
@@ -4235,7 +4243,8 @@ function skapaFranPlan(b, plan, ctx) {
     id: plan.eventId, text: mt ? mt.titel : 'Möte', datum: /^\d{4}-\d{2}-\d{2}$/.test(startP.datum) ? startP.datum : todayStr(), tid: /^\d{2}:\d{2}$/.test(startP.tid) ? startP.tid : '',
     utford: false, langdMin, motestypId: mt ? mt.id : bstr(b.motestypId, 64), adress, lat: bnum(geo.lat), lng: bnum(geo.lng),
     bokningId, bokadAv: bstr(b.bokareId, 64), status: 'bokad', restid, kalenderEventId: bstr(b.kalenderEventId, 200),
-    bokningRev: Number(b.rev) || 0, notering
+    bokningRev: Number(b.rev) || 0, notering,
+    bokHistorikN: Array.isArray(b.historik) ? b.historik.length : 0   // markör för speglingen (8.3) – ligger på händelsen så att den överlever gallringen av importposten
   };
   // Loggposter
   const log = [];
@@ -4271,42 +4280,159 @@ function skapaFranPlan(b, plan, ctx) {
   }
   const befintlig = BOKNING_IMPORT.find(p => p.bokningId === bokningId);
   const post = { bokningId, status: 'importerad', sedd: false, importeradTs: new Date().toISOString(), enhetId, leadId: lead.id, eventId: ev.id, kundId: kund.id, kontaktId: kontakt.id,
-    nyProcess: plan.nyProcess === true, nyKund: plan.nyKund === true, mojligDubblett: plan.mojligDubblett === true, avvisadTs: '', avvisadOrsak: '' };
+    nyProcess: plan.nyProcess === true, nyKund: plan.nyKund === true, mojligDubblett: plan.mojligDubblett === true, avvisadTs: '', avvisadOrsak: '',
+    andradAvBokareTs: '', andradAvBokareTyp: '', historikN: Array.isArray(b.historik) ? b.historik.length : 0 };   // händelsen skapas ur postens aktuella värden – historik före importen speglas inte
   if (befintlig) Object.assign(befintlig, post); else BOKNING_IMPORT.push(post);
 }
-// Spegling av ändringar från brevlådan (8.3): ombokning (rev), avbokad, avvisad.
+// Spegling av ändringar från brevlådan (8.3): ombokning (rev), avbokad, avvisad – samt bokarens självservice (steg 2a).
+// Lästa inkorgsfält: status, rev, start, slut, adress, geo{lat,lng}, restid{foreMin,efterMin,status}, kalenderEventId, notering,
+// kund{namn,orgnr}, kontakt{namn,telefon,epost}, extrafalt, avbokadOrsak, bokareId, historik[].
+// Historikformer som speglas: { ts, typ:'ombokad', av:'bokare', fran, till }, { ts, typ:'avbokad', av:'bokare', orsak? },
+// { ts, typ:'andrad', av:'bokare', falt?:[…] } (falt = fältnycklar som 'kund.namn'/'kontakt.telefon'/'adress'/'notering'/'extrafalt.<id>';
+// saknas listan jämförs uppgifterna lokalt). Posterna läses i ordning från markören BOKNING_IMPORT.historikN (antal redan lästa
+// historikposter) – CJ:s egna ändringar (av 'cj'/'CJ') och scriptets (av 'script') passerar markören utan åtgärd.
+const BOKARE_FALT_ETIKETT = { 'kund.namn': 'kundnamn', kundnamn: 'kundnamn', 'kund.orgnr': 'orgnr', orgnr: 'orgnr', 'kontakt.namn': 'kontaktperson', kontaktperson: 'kontaktperson',
+  'kontakt.telefon': 'telefon', telefon: 'telefon', 'kontakt.epost': 'e-post', epost: 'e-post', adress: 'adress', notering: 'notering', extrafalt: 'extrafält' };
+function bokareFaltEtikett(f) {
+  f = bstr(f, 80);
+  if (BOKARE_FALT_ETIKETT[f]) return BOKARE_FALT_ETIKETT[f];
+  const m = /^extrafalt\.(.+)$/.exec(f);
+  if (m) { const def = BOKNINGSFORMULAR.extrafalt.find(x => x.id === m[1]); return def ? bstr(def.etikett, 60) : m[1]; }
+  return f;
+}
+// Uppgifter ändrade av bokaren (egen-update): händelsens adress/notering uppdateras alltid (datablocket i applyInboxChanges); kundens
+// orgnr och kontaktens telefon/e-post fylls bara i när de är tomma lokalt – annars listas de nya värdena i loggposten och CJ avgör själv.
+// Kund-/kontaktnamn ändras aldrig automatiskt. fore = händelsens adress/notering före speglingen. Returnerar { text, kundAndrad }.
+function bokareAndringText(b, lead, fore, imp, h, namn) {
+  const kundIn = isPlainObject(b.kund) ? b.kund : {}, kontaktIn = isPlainObject(b.kontakt) ? b.kontakt : {};
+  const kund = getCustomerById((imp && imp.kundId) || lead.kundId) || null;
+  const kontakt = kund ? ((kund.kontakter || []).find(c => c.id === (imp && imp.kontaktId)) || leadContact(lead)) : null;
+  const delar = [], sett = new Set();
+  let kundAndrad = false;
+  const lagg = (nyckel, text) => { if (!sett.has(nyckel)) { sett.add(nyckel); delar.push(text); } };
+  const kundnamn = bstr(kundIn.namn, BOK_MAXLEN.kundnamn), orgnrRaw = bstr(kundIn.orgnr, BOK_MAXLEN.orgnr), orgnr = normalizeOrgnr(orgnrRaw) || orgnrRaw;
+  const kNamn = bstr(kontaktIn.namn, BOK_MAXLEN.kontaktperson), tel = bstr(kontaktIn.telefon, BOK_MAXLEN.telefon), epost = bstr(kontaktIn.epost, BOK_MAXLEN.epost);
+  if (kund) {
+    if (kundnamn && normalizeCustomerName(kundnamn) !== normalizeCustomerName(kund.namn)) lagg('kundnamn', 'kundnamn: ' + kundnamn + ' (kunden heter ' + (kund.namn || 'Namnlös kund') + ' i registret – ej ändrat)');
+    if (orgnr && orgnr !== (kund.orgnr || '')) {
+      if (!kund.orgnr) { kund.orgnr = orgnr; kundAndrad = true; lagg('orgnr', 'orgnr: ' + orgnr + ' (överfört till kunden)'); }
+      else lagg('orgnr', 'orgnr: ' + orgnr + ' (kunden har ' + kund.orgnr + ' – ej ändrat)');
+    }
+  }
+  if (kontakt) {
+    if (kNamn && kNamn.trim().toLowerCase() !== String(kontakt.namn || '').trim().toLowerCase()) lagg('kontaktperson', 'kontaktperson: ' + kNamn + ' (kontakten heter ' + (kontakt.namn || '–') + ' – ej ändrat)');
+    if (tel && normalizePhone(tel) !== normalizePhone(kontakt.telefon)) {
+      if (!kontakt.telefon) { kontakt.telefon = tel; kundAndrad = true; lagg('telefon', 'telefon: ' + tel + ' (överfört till kontakten)'); }
+      else lagg('telefon', 'telefon: ' + tel + ' (kontakten har ' + kontakt.telefon + ' – ej ändrat)');
+    }
+    if (epost && normalizeEmail(epost) !== normalizeEmail(kontakt.email)) {
+      if (!kontakt.email) { kontakt.email = epost; kundAndrad = true; lagg('e-post', 'e-post: ' + epost + ' (överfört till kontakten)'); }
+      else lagg('e-post', 'e-post: ' + epost + ' (kontakten har ' + kontakt.email + ' – ej ändrat)');
+    }
+  }
+  const adress = bstr(b.adress, BOK_MAXLEN.adress), notering = bstr(b.notering, BOK_MAXLEN.notering);
+  if (typeof b.adress === 'string' && adress !== (fore.adress || '')) lagg('adress', 'adress: ' + (adress || '(tom)'));
+  if (typeof b.notering === 'string' && notering !== (fore.notering || '')) lagg('notering', 'notering: ' + (notering ? notering.slice(0, 300) + (notering.length > 300 ? '…' : '') : '(tom)'));
+  // Extrafält har inget lokalt fält att jämföra mot – nuvarande värden listas när scriptet uppger dem som ändrade (eller inte uppger något alls)
+  const falt = Array.isArray(h.falt) ? h.falt.filter(f => typeof f === 'string').map(f => f.slice(0, 80)) : [];
+  if (!falt.length || falt.some(f => /^extrafalt/.test(f))) { const xs = extrafaltText(b); if (xs.length) lagg('extrafält', 'extrafält: ' + xs.join(' · ')); }
+  falt.forEach(f => { if (/^extrafalt/.test(f)) return; const et = bokareFaltEtikett(f); if (!sett.has(et)) lagg(et, et + ' (samma som i registret)'); });
+  return { text: 'Uppgifter ändrade av bokaren ' + namn + (delar.length ? ': ' + delar.join('; ') : ' (inga skillnader mot registret)'), kundAndrad };
+}
+let inboxKunderAndrade = false;   // sätts av applyInboxChanges när kund/kontakt fyllts i (bearbetaInkorg sparar då kundregistret)
+let inboxMarkorFlyttad = false;   // sätts av applyInboxChanges när historikmarkören flyttats utan annan ändring (bearbetaInkorg sparar då leads + importposter så att markören består)
 function applyInboxChanges(bokningar) {
   let andrat = false;
+  inboxKunderAndrade = false; inboxMarkorFlyttad = false;
   bokningar.forEach(b => {
     const hit = hittaLokalBokning(b.bokningId);
     if (!hit) return;
     const { lead, ev } = hit;
     if (!Array.isArray(lead.log)) lead.log = [];
-    if (b.status === 'importerad' && (Number(b.rev) || 0) > (Number(ev.bokningRev) || 0)) {
-      const gammal = (ev.datum || '') + ' ' + (ev.tid || '');
+    let imp = BOKNING_IMPORT.find(p => p.bokningId === b.bokningId) || null;
+    const namn = bokarNamn(bstr(b.bokareId, 64) || ev.bokadAv);
+    // Bokarens självservice (steg 2a): nya historikposter med av:'bokare' sedan markören
+    const hist = (Array.isArray(b.historik) ? b.historik : []).filter(isPlainObject);
+    // Markören (antal lästa historikposter) ligger i första hand på händelsen (ev.bokHistorikN – överlever gallringen av importposten),
+    // i andra hand på importposten (imp.historikN). -1 = okänd (migrerad från app före steg 2a): allt dittills speglades via rev/status,
+    // så ingen spegling bakåt. Saknas markör helt (äldre data) används gallringsfönstret: poster äldre än gallringDagar speglades medan importposten fanns.
+    const markor = v => (typeof v === 'number' && isFinite(v) ? v : null);
+    const evN = markor(ev.bokHistorikN), impN = imp ? markor(imp.historikN) : null;
+    let lasta = hist.length;
+    if (evN !== null && evN >= 0) lasta = Math.min(evN, hist.length);
+    else if (impN !== null && impN >= 0) lasta = Math.min(impN, hist.length);
+    else if (evN === -1 || impN === -1) lasta = hist.length;
+    else {
+      const cut = Date.now() - ((Number(BOKNINGSINSTALLNINGAR.gallringDagar) || DEFAULT_BOKNINGSINSTALLNINGAR.gallringDagar) * 86400000);
+      lasta = hist.findIndex(h => Date.parse(bstr(h.ts, 40)) > cut); if (lasta < 0) lasta = hist.length;
+    }
+    const nya = hist.slice(lasta).filter(h => h.av === 'bokare' && ['ombokad', 'avbokad', 'andrad'].includes(h.typ));
+    const mejlfelCj = hist.slice(lasta).filter(h => h.typ === 'mejlfel' && h.till === 'cj').length;   // CJ:s notismejl uteblev (MailApp-kvot/fel) – enda signalen är Inkorg
+    if (!imp && nya.length) {
+      imp = { bokningId: b.bokningId, status: 'importerad', sedd: false, importeradTs: new Date().toISOString(), enhetId, leadId: lead.id, eventId: ev.id, kundId: lead.kundId || '', kontaktId: lead.kontaktId || '',
+        nyProcess: false, nyKund: false, mojligDubblett: false, avvisadTs: '', avvisadOrsak: '', andradAvBokareTs: '', andradAvBokareTyp: '', historikN: lasta };
+      BOKNING_IMPORT.push(imp);
+    }
+    const bokareOmbokad = nya.filter(h => h.typ === 'ombokad').pop() || null, bokareAndrad = nya.filter(h => h.typ === 'andrad').pop() || null;
+    const rev = Number(b.rev) || 0, nyRev = b.status === 'importerad' && rev > (Number(ev.bokningRev) || 0);
+    const gammal = ((ev.datum || '') + ' ' + (ev.tid || '')).trim(), fore = { adress: ev.adress || '', notering: ev.notering || '' };
+    if (nyRev || bokareOmbokad || bokareAndrad) {
       const p = fromIso(bstr(b.start, 40));
       if (/^\d{4}-\d{2}-\d{2}$/.test(p.datum)) { ev.datum = p.datum; ev.tid = p.tid; }
       if (b.start && b.slut) { const d = (Date.parse(bstr(b.slut, 40)) - Date.parse(bstr(b.start, 40))) / 60000; if (isFinite(d) && d > 0) ev.langdMin = Math.round(d); }
-      const adress = bstr(b.adress, BOK_MAXLEN.adress); if (adress) ev.adress = adress;
+      const adress = bstr(b.adress, BOK_MAXLEN.adress); if (adress || (bokareAndrad && typeof b.adress === 'string')) ev.adress = adress;   // bokaren får tömma adressen (mötestyp utan restid)
       const geo = isPlainObject(b.geo) ? b.geo : {}; ev.lat = bnum(geo.lat); ev.lng = bnum(geo.lng);
       const r = isPlainObject(b.restid) ? b.restid : null;
       ev.restid = r ? { foreMin: bnum(r.foreMin) || 0, efterMin: bnum(r.efterMin) || 0, status: ['ok', 'schablon', 'okand'].includes(r.status) ? r.status : 'okand' } : ev.restid;
       const kid = bstr(b.kalenderEventId, 200); if (kid) ev.kalenderEventId = kid;   // rebook kan ha skapat ny händelse (kalenderNyHandelse) – cancel-reserven ska peka rätt
-      ev.bokningRev = Number(b.rev) || 0;
-      lead.log.push({ id: uid(), type: 'text', content: 'Ombokat: ' + gammal.trim() + ' → ' + ev.datum + ' ' + ev.tid, ts: nowLabel() });
+      if (bokareAndrad && typeof b.notering === 'string') ev.notering = bstr(b.notering, BOK_MAXLEN.notering);
+      ev.bokningRev = Math.max(rev, Number(ev.bokningRev) || 0);
+      const ny = ((ev.datum || '') + ' ' + (ev.tid || '')).trim();
+      if (bokareOmbokad) {
+        const fp = bokareOmbokad.fran ? fromIso(bstr(bokareOmbokad.fran, 40)) : null, tp = bokareOmbokad.till ? fromIso(bstr(bokareOmbokad.till, 40)) : null;
+        const franText = fp && /^\d{4}-\d{2}-\d{2}$/.test(fp.datum) ? fp.datum + ' ' + fp.tid : gammal, tillText = tp && /^\d{4}-\d{2}-\d{2}$/.test(tp.datum) ? tp.datum + ' ' + tp.tid : ny;
+        lead.log.push({ id: uid(), type: 'text', content: 'Ombokat av bokaren ' + namn + ': ' + franText + ' → ' + tillText, ts: nowLabel() });
+      } else if (nyRev && (!bokareAndrad || ny !== gammal)) {
+        lead.log.push({ id: uid(), type: 'text', content: 'Ombokat: ' + gammal + ' → ' + ny, ts: nowLabel() });
+      }
+      andrat = true;
+    }
+    if (bokareAndrad) {
+      const r = bokareAndringText(b, lead, fore, imp, bokareAndrad, namn);
+      lead.log.push({ id: uid(), type: 'text', content: r.text, ts: nowLabel() });
+      if (r.kundAndrad) inboxKunderAndrade = true;
+      andrat = true;
+    }
+    if (imp && mejlfelCj) {   // bara med importpost (markören historikN flyttas) – annars skulle loggposten upprepas
+      lead.log.push({ id: uid(), type: 'text', content: 'Notismejlet till CJ kunde inte skickas (' + mejlfelCj + ' st) – ändringen syns bara här och i Inkorg', ts: nowLabel() });
       andrat = true;
     }
     if (b.status === 'avbokad' && ev.status !== 'avbokad') {
       ev.status = 'avbokad';
-      lead.log.push({ id: uid(), type: 'text', content: 'Avbokat av CJ', ts: nowLabel() });
+      const sistAvbokad = hist.filter(h => h.typ === 'avbokad').pop() || null;
+      if (sistAvbokad && sistAvbokad.av === 'bokare') {
+        const orsak = bstr(sistAvbokad.orsak, 500) || bstr(b.avbokadOrsak, 500);
+        lead.log.push({ id: uid(), type: 'text', content: 'Avbokat av bokaren ' + namn + (orsak ? ': ' + orsak : ''), ts: nowLabel() });
+      } else lead.log.push({ id: uid(), type: 'text', content: 'Avbokat av CJ', ts: nowLabel() });
       andrat = true;
     }
     if (b.status === 'avvisad' && ev.status !== 'avvisad') {
       ev.status = 'avvisad';
-      const imp = BOKNING_IMPORT.find(p => p.bokningId === b.bokningId);
       if (imp) { imp.status = 'avvisad'; if (!imp.avvisadTs) imp.avvisadTs = new Date().toISOString(); }
       andrat = true;
     }
+    if (imp) {
+      if (nya.length) {
+        // Markering i Inkorg: osedd igen + "Ändrad av bokaren <tid>"; fliken räknar (updateBokningTabCount)
+        const sist = nya[nya.length - 1], ts = bstr(sist.ts, 40);
+        imp.sedd = false;
+        imp.andradAvBokareTs = !isNaN(Date.parse(ts)) ? ts : new Date().toISOString();
+        imp.andradAvBokareTyp = sist.typ;
+        andrat = true;
+      }
+      if (imp.historikN !== hist.length) { imp.historikN = hist.length; inboxMarkorFlyttad = true; }
+    }
+    if (ev.bokHistorikN !== hist.length) { ev.bokHistorikN = hist.length; inboxMarkorFlyttad = true; }
   });
   return andrat;
 }
@@ -4370,7 +4496,8 @@ function renderBokInkorg(body) {
     if (!isBookingEvent(ev)) return;
     const imp = BOKNING_IMPORT.find(p => p.bokningId === ev.bokningId) || null;
     const post = bokInkorgCache.find(b => b.bokningId === ev.bokningId) || null;
-    rader.push({ typ: 'lokal', lead, ev, imp, post, sort: (imp && imp.importeradTs) || (post && bstr(post.skapad, 40)) || (ev.datum + 'T' + (ev.tid || '00:00')) });
+    const andradTs = imp && imp.andradAvBokareTs && imp.andradAvBokareTs > (imp.importeradTs || '') ? imp.andradAvBokareTs : '';
+    rader.push({ typ: 'lokal', lead, ev, imp, post, sort: andradTs || (imp && imp.importeradTs) || (post && bstr(post.skapad, 40)) || (ev.datum + 'T' + (ev.tid || '00:00')) });
   }));
   const raderade = new Set(BOKNING_IMPORT.filter(p => p.status === 'raderad').map(p => p.bokningId));
   bokInkorgCache.forEach(post => {
@@ -4391,7 +4518,7 @@ function renderBokInkorg(body) {
   </div><div class="bok-inbox">`;
   if (!filtrerade.length) html += '<div class="bok-placeholder">Inga bokningar' + (bokInkorgFilter !== 'alla' ? ' i det här filtret' : ' ännu') + '.</div>';
   filtrerade.forEach(r => { html += r.typ === 'vantar' ? renderInkorgVantar(r.post) : renderInkorgRad(r); });
-  html += '</div><div class="bok-note">Avvisa = bokningen skulle inte ha gjorts (fel/spam); processen kan sedan raderas. Avboka/Omboka finns här och under Kalender. Bokaren meddelas per e-post i alla fall. Bokningar gallras ur inkorgen ' + (Number(BOKNINGSINSTALLNINGAR.gallringDagar) || 30) + ' dagar efter import.</div>';
+  html += '</div><div class="bok-note">Avvisa = bokningen skulle inte ha gjorts (fel/spam); processen kan sedan raderas. Avboka/Omboka finns här och under Kalender. Bokaren meddelas per e-post i alla fall. Bokaren kan själv omboka, ändra uppgifter och avboka på bokningssidan fram till mötets start – sådana ändringar markeras ÄNDRAD här och loggas på processen. Bokningar gallras ur inkorgen ' + (Number(BOKNINGSINSTALLNINGAR.gallringDagar) || 30) + ' dagar efter import.</div>';
   body.innerHTML = html;
   renderBokInkorgToolbarTid();
   body.querySelectorAll('.bok-chip').forEach(c => c.addEventListener('click', () => { bokInkorgFilter = c.dataset.f; renderBokInkorg(body); }));
@@ -4411,18 +4538,20 @@ function renderInkorgRad(r) {
   const kontakt = (kund.kontakter || []).find(c => c.id === (imp && imp.kontaktId)) || leadContact(lead) || {};
   const mt = getMotestypById(ev.motestypId);
   const ny = !!(imp && imp.status === 'importerad' && !imp.sedd);
+  const andrad = !!(imp && imp.andradAvBokareTs);   // bokarens självservice (steg 2a): ombokad/avbokad/uppgifter ändrade via bokningssidan
+  const andradTyp = andrad ? ({ ombokad: 'ombokad', avbokad: 'avbokad', andrad: 'uppgifter ändrade' }[imp.andradAvBokareTyp] || '') : '';
   const done = ev.status === 'avbokad' || ev.status === 'avvisad';
   const bokare = getBokareById(ev.bokadAv);
   const bokadTs = post ? kortTidLabel(bstr(post.skapad, 40)) : (imp ? kortTidLabel(imp.importeradTs) : '');
   const extra = extrafaltText(post);
   const notering = ev.notering || '';
-  return `<div class="agenda-item${ny ? ' is-ny' : ''}${done ? ' is-done' : ''}">
+  return `<div class="agenda-item${ny ? (andrad ? ' is-andrad' : ' is-ny') : ''}${done ? ' is-done' : ''}">
     <div class="agenda-item-top">
-      <span style="display:inline-flex;align-items:center;gap:6px;flex-wrap:wrap">${ny ? '<span class="ny-badge">NY</span>' : ''}<span class="bok-when">${escapeHtml(longDateLabel(ev.datum))}${ev.tid ? ' ' + escapeHtml(eventTimeLabel(ev)) : ''}</span>${mt ? `<span class="mt-badge" style="border-color:${motestypBadgeColor(mt, lead.pipelineId)}">${escapeHtml(mt.titel)}</span>` : `<span class="mt-badge">${escapeHtml(ev.text)}</span>`}${ev.status === 'avvisad' ? '<span class="bok-status-label">Avvisad</span>' : ''}${ev.status === 'avbokad' ? '<span class="bok-status-label">Avbokad</span>' : ''}${imp && imp.mojligDubblett ? '<span class="ev-warn">⚠ möjlig dubblett</span>' : ''}</span>
+      <span style="display:inline-flex;align-items:center;gap:6px;flex-wrap:wrap">${ny ? (andrad ? '<span class="ny-badge andrad">ÄNDRAD</span>' : '<span class="ny-badge">NY</span>') : ''}<span class="bok-when">${escapeHtml(longDateLabel(ev.datum))}${ev.tid ? ' ' + escapeHtml(eventTimeLabel(ev)) : ''}</span>${mt ? `<span class="mt-badge" style="border-color:${motestypBadgeColor(mt, lead.pipelineId)}">${escapeHtml(mt.titel)}</span>` : `<span class="mt-badge">${escapeHtml(ev.text)}</span>`}${ev.status === 'avvisad' ? '<span class="bok-status-label">Avvisad</span>' : ''}${ev.status === 'avbokad' ? '<span class="bok-status-label">Avbokad</span>' : ''}${imp && imp.mojligDubblett ? '<span class="ev-warn">⚠ möjlig dubblett</span>' : ''}</span>
       ${PIPELINES.length > 1 ? plBadge(lead.pipelineId) : ''}
     </div>
     <div class="bok-line">${escapeHtml(kund.namn || 'Namnlös kund')}${kund.orgnr ? ' (' + escapeHtml(kund.orgnr) + ')' : ''}${kontakt.namn ? ' · ' + escapeHtml(kontakt.namn) : ''}${kontakt.telefon ? ` · <a href="tel:${escapeHtml(kontakt.telefon)}" class="card-link" style="color:#60a5fa;text-decoration:none">${escapeHtml(kontakt.telefon)}</a>` : ''}${kontakt.email ? ' · ' + escapeHtml(kontakt.email) : ''}</div>
-    <div class="bok-line muted">${ev.adress ? `<a href="${mapsUrl(ev.adress)}" target="_blank" rel="noopener" style="color:#60a5fa;text-decoration:none">📍 ${escapeHtml(ev.adress)}</a> · ` : ''}Bokad av ${escapeHtml(bokare ? bokare.namn : 'Borttagen bokare')}${bokadTs ? ' ' + escapeHtml(bokadTs) : ''}${ev.restid && ev.restid.status !== 'ok' ? '<span class="ev-warn">⚠ restid ' + (ev.restid.status === 'schablon' ? 'schablon' : 'okänd') + '</span>' : ''}</div>
+    <div class="bok-line muted">${ev.adress ? `<a href="${mapsUrl(ev.adress)}" target="_blank" rel="noopener" style="color:#60a5fa;text-decoration:none">📍 ${escapeHtml(ev.adress)}</a> · ` : ''}Bokad av ${escapeHtml(bokare ? bokare.namn : 'Borttagen bokare')}${bokadTs ? ' ' + escapeHtml(bokadTs) : ''}${andrad ? ' · <span class="bok-andrad">Ändrad av bokaren ' + escapeHtml(kortTidLabel(imp.andradAvBokareTs)) + (andradTyp ? ' (' + andradTyp + ')' : '') + '</span>' : ''}${ev.restid && ev.restid.status !== 'ok' ? '<span class="ev-warn">⚠ restid ' + (ev.restid.status === 'schablon' ? 'schablon' : 'okänd') + '</span>' : ''}</div>
     ${notering || extra.length ? `<div class="bok-line" title="${escapeHtml(notering)}">${notering ? '💬 ' + escapeHtml(notering.slice(0, 160)) + (notering.length > 160 ? '…' : '') : ''}${extra.length ? (notering ? ' · ' : '') + escapeHtml(extra.join(' · ')) : ''}</div>` : ''}
     <div class="bok-actions">
       <button type="button" data-act="oppna" data-id="${escapeHtml(ev.bokningId)}">Öppna process</button>
@@ -5750,6 +5879,7 @@ window.addEventListener('message', ev => {
     case 'klar': embedKlar(d); break;
     case 'valdTid': embedValdTid(d); break;
     case 'bokad': embedBokad(d); break;
+    case 'egenAndrad': embedEgenAndrad(d); break;   // steg 2a: CJ-bokare ombokade/ändrade/avbokade en egen bokning på sidan
     case 'stang': {   // 7.5: sidan bär ingen orsak – före `klar` betyder det E_KEY vid hello, efter `klar` normalt sidans egen Stäng-knapp
       const varKlar = bokEmbed.klar;
       stangBokningEmbed(true);
@@ -5836,6 +5966,23 @@ async function embedValdTid(d) {
   bokKal.cache.clear();
   setBokStatus(problem.length ? 'Ombokad till ' + longDateLabel(ev.datum) + ' ' + ev.tid + ', men ' + problem.join('; ') : 'Ombokad till ' + longDateLabel(ev.datum) + ' ' + ev.tid + (harEpost ? ' – bokaren (' + bokare.namn + ') meddelas per e-post' : ''), problem.length ? 'warn' : 'ok');
   renderBoard(); renderActivity(); renderBookingsIfVisible();
+}
+// Bokarens självservice i embed (steg 2a): sidan skickar { typ:'egenAndrad', atgard:'ombokad'|'avbokad'|'andrad', bokningId } efter
+// egen-rebook/egen-cancel/egen-update. Panelen lämnas öppen; inkorgen läses direkt (tvingad, 'sjalv') så att speglingen
+// (applyInboxChanges, historik av:'bokare') uppdaterar händelsen, loggar på processen och markerar kortet ÄNDRAD.
+function embedEgenAndrad(d) {
+  const e = bokEmbed;
+  if (!e || !e.klar) return;
+  const bokningId = bstr(d.bokningId, 64), atgard = ['ombokad', 'avbokad', 'andrad'].includes(d.atgard) ? d.atgard : 'andrad';
+  if (!BOKNING_ID_RE.test(bokningId)) return;
+  const text = { ombokad: 'Bokningen ombokad', avbokad: 'Bokningen avbokad', andrad: 'Uppgifterna ändrade' }[atgard];
+  bokKal.cache.clear();
+  setBokStatus(text + ' på bokningssidan – hämtar inkorgen…', 'info');
+  importeraBokningar('sjalv').then(() => {
+    const hit = hittaLokalBokning(bokningId);
+    if (hit && (atgard !== 'avbokad' || hit.ev.status === 'avbokad')) setBokStatus(text + ' – processen uppdaterad', 'ok');
+    else setBokStatus(text + ' på bokningssidan – ändringen syns i appen efter nästa import', 'warn');
+  });
 }
 function embedBokad(d) {
   const e = bokEmbed;

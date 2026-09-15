@@ -1,14 +1,16 @@
 /**
  * Pipeline by Redneck Engineering – bokningsmodul, Apps Script-kärna (Code.gs).
  *
- * Milstolpe M5. Specifikation: "[C] Bokningsmodul - specifikation steg 1.md", avsnitt 4 (brevlåda, transport,
- * endpoints, säkerhet), 5 (tillgänglighet – anropas i Availability.gs) och 9 (säkerhet/GDPR).
+ * Milstolpe M5 + steg 2a (bokarens självservice). Specifikation: "[C] Bokningsmodul - specifikation steg 1.md",
+ * avsnitt 4 (brevlåda, transport, endpoints, säkerhet), 5 (tillgänglighet – anropas i Availability.gs), 9 (säkerhet/GDPR)
+ * och 11 (steg 2: bokarens egen ombokning/avbokning – CJ:s beslut 2026-09-15, se "Bokar-endpoints egen-*" nedan).
  *
  * Projektet består av tre filer:
  *   Code.gs          – denna fil: Script Properties, filhantering, doPost/doGet, autentisering, gränser,
  *                      reservation, book, kalenderskrivning, notismejl, hello/ping/geocode/release,
  *                      admin-endpoints setup/config-push/calendars-list/inbox-list/ack/reject (M3),
- *                      calendar-preview/rebook/cancel (M4), purge + dailyMaintenance på riktigt (M5).
+ *                      calendar-preview/rebook/cancel (M4), purge + dailyMaintenance på riktigt (M5),
+ *                      bokar-endpoints egen-rebook/egen-cancel/egen-update (steg 2a, SCRIPT_VERSION 4).
  *   Calendar.gs      – readBusy(fran, till), parseIcs, mergeBusy, applyIgnore, buildBusyList(from, to).
  *   Availability.gs  – computeAvailability(req), dayPlan, placeTravel, geocodeAddress(adress), travelMinutes,
  *                      swedishHolidays.
@@ -25,7 +27,7 @@
 // Konstanter
 // ============================================================
 
-const SCRIPT_VERSION = 3;                       // MIN_SCRIPT_VERSION i index.html/bokning.js jämförs mot denna (4.12); 3 = M5 (purge, dailyMaintenance, nya ping-fält)
+const SCRIPT_VERSION = 4;                       // MIN_SCRIPT_VERSION i index.html/bokning.js jämförs mot denna (4.12); 3 = M5 (purge, dailyMaintenance, nya ping-fält); 4 = steg 2a (egen-rebook/egen-cancel/egen-update, hello.egna med kanAndras)
 const TZ = 'Europe/Stockholm';
 const APP_URL = 'https://speeedfreeak.github.io/telexia-pipeline/';   // länk i notismejlet (4.9)
 const MAX_BODY_BYTES = 16384;                   // body kontrolleras före JSON.parse (4.3)
@@ -69,6 +71,12 @@ const MAX_BOOK_PER_KOD_D = 15;      // dito per dag
 const MAX_BOOK_GLOBAL_D = 40;       // dito globalt per dag (Script Property book_count_<YYYYMMDD>)
 const MAX_GEOCODE_PER_KOD_H = 20;   // E_RATE typ 'geocode' (bara nya adresser räknas, aldrig cache-träffar)
 const MAX_ADRESSER_PER_KOD_D = 20;  // unika adresser per kod och dag, E_RATE typ 'adresser'
+// Bokarens egna ändringar (steg 2a: egen-rebook/egen-cancel/egen-update) räknas som bokningar men i egna räknare
+// (andr:h/andr:d per kod, ingen global dagsräknare – ping.bokningarIdag ska bara räkna nya bokningar). E_RATE typ 'andringar'.
+const MAX_ANDR_PER_KOD_H = MAX_BOOK_PER_KOD_H;
+const MAX_ANDR_PER_KOD_D = MAX_BOOK_PER_KOD_D;
+const MAX_ANDR_GLOBAL_D = MAX_BOOK_GLOBAL_D;   // bokarnas egna ändringar globalt per dag (Script Property andr_count_<YYYYMMDD>) – skyddar MailApp-kvoten (~100 mottagare/dag)
+const ANDRAD_FALT_ORDNING = ['kundnamn', 'orgnr', 'kontaktperson', 'telefon', 'epost', 'adress', 'notering', 'extrafalt'];   // historik.falt i egen-update (statiska namn, aldrig värden)
 
 // Anropsgränser (4.5) – ungefärliga, CacheService utan lås.
 const RL_PER_MIN = 30;
@@ -621,6 +629,24 @@ function countBooking(ctx) {
   const key = 'book_count_' + ymdCompact(idag);
   setProp(key, (parseInt(getProp(key), 10) || 0) + 1);
 }
+// Bokarens egna ändringar (steg 2a): kontroll före arbetet, uppräkning efter lyckad ändring – samma gränser som book per kod
+// plus en global dagsräknare (andr_count_<YYYYMMDD>, MAX_ANDR_GLOBAL_D) så att alla bokares ändringsmejl tillsammans med
+// bokningsmejlen ryms i MailApp:s dagskvot.
+function checkAndringLimits(ctx) {
+  const idag = todayStr();
+  const perH = readCounter('andr:h:' + ctx.kodKey + ':' + hourWindow());
+  const perD = readCounter('andr:d:' + ctx.kodKey + ':' + idag);
+  const global = parseInt(getProp('andr_count_' + ymdCompact(idag)), 10) || 0;
+  if (perH >= MAX_ANDR_PER_KOD_H || perD >= MAX_ANDR_PER_KOD_D || global >= MAX_ANDR_GLOBAL_D)
+    fel('E_RATE', 'För många ändringar – kontakta CJ', { typ: 'andringar' });
+}
+function countAndring(ctx) {
+  const idag = todayStr();
+  bumpCounter('andr:h:' + ctx.kodKey + ':' + hourWindow(), TTL_H_S);
+  bumpCounter('andr:d:' + ctx.kodKey + ':' + idag, TTL_D_S);
+  const key = 'andr_count_' + ymdCompact(idag);
+  setProp(key, (parseInt(getProp(key), 10) || 0) + 1);
+}
 
 // Adressnyckel för gränsräkning: gemener, utan skiljetecken, ett mellanslag, utan "sverige" (samma princip som cache-filen, 4.1).
 function limitAdressNyckel(adress) {
@@ -820,6 +846,11 @@ function geoForBooking(adress, ctx) {
 // Räknar om en enskild dag (färsk kalenderläsning i book/reserve) och returnerar slotten för klockslaget, eller null.
 // inbox (valfri) = redan läst inkorg – book skickar den så att inkorgsfilen läses en gång under låset.
 function findSlot(bokare, config, typ, adress, st, reservationId, undantaBokningId, farsk, inbox) {
+  return findDagOchSlot(bokare, config, typ, adress, st, reservationId, undantaBokningId, farsk, inbox).slot;
+}
+// Som findSlot men returnerar även dagen: { dag, slot } – egen-update behöver skilja "dagen är inte öppen (t.ex. inom
+// framförhållningen) → restiden kan inte verifieras" från "luckan finns men rymmer inte restiden".
+function findDagOchSlot(bokare, config, typ, adress, st, reservationId, undantaBokningId, farsk, inbox) {
   const data = computeAvailability({
     bokare: bokare, config: config, typ: typ, motestypId: typ.id,
     adress: typ.restid ? (adress || '') : '',
@@ -827,9 +858,9 @@ function findSlot(bokare, config, typ, adress, st, reservationId, undantaBokning
     reservationId: reservationId || '', undantaBokningId: undantaBokningId || '',
     farsk: !!farsk, intern: true, inbox: inbox || null
   });
-  const dag = (data && Array.isArray(data.dagar) ? data.dagar : []).find(d => d.datum === st.datum);
-  if (!dag || dag.status !== 'oppen') return null;
-  return (Array.isArray(dag.slots) ? dag.slots : []).find(s => s.tid === st.tid) || null;
+  const dag = (data && Array.isArray(data.dagar) ? data.dagar : []).find(d => d.datum === st.datum) || null;
+  if (!dag || dag.status !== 'oppen') return { dag: dag, slot: null };
+  return { dag: dag, slot: (Array.isArray(dag.slots) ? dag.slots : []).find(s => s.tid === st.tid) || null };
 }
 function blockLen(block) {
   if (!Array.isArray(block) || block.length !== 2) return 0;
@@ -944,18 +975,40 @@ function handleHello(req, ctx) {
 // Bokarens egna bokningar med slut ≥ idag − 7 dagar, sorterade på start. Kundnamn får visas för ägaren (beslut 16).
 function egnaBokningar(bokare, idag) {
   const grans = addDays(idag, -7);
+  const nuMs = Date.now();
   return readInbox().bokningar
     .filter(b => b.bokareId === bokare.id && typeof b.slut === 'string' && fromIso(b.slut).datum >= grans)
     .sort((x, y) => String(x.start).localeCompare(String(y.start)))
-    .map(b => ({
-      bokningId: str(b.bokningId), start: str(b.start), slut: str(b.slut),
-      kundNamn: str(b.kund && b.kund.namn), kontaktNamn: str(b.kontakt && b.kontakt.namn), adress: str(b.adress),
-      motestypId: str(b.motestypId), status: egenStatus(b)
-    }));
+    .map(b => egenExport(b, nuMs));
+}
+// Egna-formatet (4.4 + steg 2a): utöver M2-fälten även hela kund-/kontakt-/notering-/extrafält-uppsättningen (för sidans
+// ändringsformulär – ägaren får se sina egna uppgifter), rev och kanAndras = status bokad/ombokad och start > nu. Aldrig
+// geo, kalenderEventId, plan, importeradAv eller historik (inget om CJ:s enheter/kalender når bokaren).
+function egenExport(b, nuMs) {
+  const kund = isPlainObject(b.kund) ? b.kund : {}, kontakt = isPlainObject(b.kontakt) ? b.kontakt : {};
+  const extrafalt = {};
+  if (isPlainObject(b.extrafalt)) Object.keys(b.extrafalt).forEach(id => { if (typeof b.extrafalt[id] === 'string') extrafalt[id] = b.extrafalt[id]; });
+  return {
+    bokningId: str(b.bokningId), start: str(b.start), slut: str(b.slut),
+    kundNamn: str(kund.namn), kontaktNamn: str(kontakt.namn), adress: str(b.adress),
+    motestypId: str(b.motestypId), status: egenStatus(b),
+    kund: { namn: str(kund.namn), orgnr: str(kund.orgnr) },
+    kontakt: { namn: str(kontakt.namn), telefon: str(kontakt.telefon), epost: str(kontakt.epost) },
+    notering: str(b.notering), extrafalt: extrafalt,
+    rev: Number(b.rev) || 0,
+    kanAndras: egenKanAndras(b, nuMs)
+  };
 }
 function egenStatus(b) {
   if (b.status === 'avbokad' || b.status === 'avvisad') return b.status;
   return (Array.isArray(b.historik) ? b.historik : []).some(h => h && h.typ === 'ombokad') ? 'ombokad' : 'bokad';
+}
+// Bokaren får omboka/ändra/avboka fram till mötets starttid (CJ:s beslut 2 – ingen tidsgräns före starten).
+function egenStartMs(b) { const ms = Date.parse(str(b.start)); return isNaN(ms) ? NaN : ms; }
+function egenKanAndras(b, nuMs) {
+  if (REBOOK_STATUSAR.indexOf(str(b.status)) < 0) return false;
+  const ms = egenStartMs(b);
+  return !isNaN(ms) && ms > (nuMs === undefined ? Date.now() : nuMs);
 }
 
 // ============================================================
@@ -1042,6 +1095,16 @@ function handleRelease(req, ctx) {
 // Hård indatavalidering före låset. Samlar alla fältfel och kastar E_VALIDATION med details.falt (statiska texter).
 // initialFalt = redan funna fel (starttiden, parseStartField) så att klienten får alla fältfel i ett svar.
 function validateBookInput(req, config, bokare, typ, initialFalt) {
+  const v = validateBookFalt(req, config, bokare, typ, initialFalt);
+  const falt = v.falt;
+  const clientBokningId = typeof req.clientBokningId === 'string' && CLIENT_BOKNING_ID_RE.test(req.clientBokningId) ? req.clientBokningId : '';
+  if (!clientBokningId) falt.clientBokningId = 'Ogiltig förfrågan – ladda om sidan';
+  if (Object.keys(falt).length) valideringsfel(falt);
+  return Object.assign(v.varden, { clientBokningId: clientBokningId });
+}
+// Fältreglerna (3.5, A24) utan clientBokningId – delas av book och egen-update (steg 2a). Returnerar { falt, varden } utan att
+// kasta; varden = { kund:{ namn, orgnr }, kontakt:{ namn, telefon, epost }, adress, notering, extrafalt } (normaliserade).
+function validateBookFalt(req, config, bokare, typ, initialFalt) {
   const falt = Object.assign({}, isPlainObject(initialFalt) ? initialFalt : {});
   const karna = config.formular.karna || {};
   const kravs = namn => isPlainObject(karna[namn]) && karna[namn].synlig !== false && karna[namn].obligatorisk === true;
@@ -1101,14 +1164,13 @@ function validateBookInput(req, config, bokare, typ, initialFalt) {
     defs.forEach(def => { if (def.obligatorisk === true && !extrafalt[def.id] && !falt[def.id]) falt[def.id] = 'Obligatoriskt'; });
   }
 
-  const clientBokningId = typeof req.clientBokningId === 'string' && CLIENT_BOKNING_ID_RE.test(req.clientBokningId) ? req.clientBokningId : '';
-  if (!clientBokningId) falt.clientBokningId = 'Ogiltig förfrågan – ladda om sidan';
-
-  if (Object.keys(falt).length) valideringsfel(falt);
   return {
-    kund: { namn: kundnamn, orgnr: orgnr },
-    kontakt: { namn: kontaktNamn, telefon: telefon, epost: epost },
-    adress: adress, notering: notering, extrafalt: extrafalt, clientBokningId: clientBokningId
+    falt: falt,
+    varden: {
+      kund: { namn: kundnamn, orgnr: orgnr },
+      kontakt: { namn: kontaktNamn, telefon: telefon, epost: epost },
+      adress: adress, notering: notering, extrafalt: extrafalt
+    }
   };
 }
 
@@ -1191,9 +1253,10 @@ function handleBook(req, ctx) {
 // Kalenderskrivning (4.7) – Calendar advanced service v3
 // ============================================================
 
-function createBookingEvent(config, bokare, typ, bokning, calId) {
+// Hela händelseresursen för en inkorgspost (4.7). Används av createBookingEvent (insert) och – fält för fält – av
+// patchBookingEvent/patchBookingDetails (rebook, egen-update), så att titel/plats/beskrivning alltid byggs på ett ställe.
+function bookingEventResource(config, bokare, typ, bokning) {
   const inst = config.installningar;
-  const kalenderId = calId || bokningarKalenderId(inst);
   const s = v => String(v || '').replace(/[<>]/g, ' ');   // aldrig HTML i kalender/Outlook
   const kontakt = isPlainObject(bokning.kontakt) ? bokning.kontakt : {};
   const kund = isPlainObject(bokning.kund) ? bokning.kund : {};
@@ -1214,6 +1277,11 @@ function createBookingEvent(config, bokare, typ, bokning, calId) {
   };
   // Telexia-adressen som gäst → Outlook får inbjudan/uppdatering/avbokning. Tom adress → ingen gäst (API:t avvisar tom e-post).
   if (inst.telexiaEpost) resurs.attendees = [{ email: String(inst.telexiaEpost) }];
+  return resurs;
+}
+function createBookingEvent(config, bokare, typ, bokning, calId) {
+  const kalenderId = calId || bokningarKalenderId(config.installningar);
+  const resurs = bookingEventResource(config, bokare, typ, bokning);
   let ev = null;
   try { ev = Calendar.Events.insert(resurs, kalenderId, { sendUpdates: 'all' }); }
   catch (e) { ev = null; }
@@ -1226,41 +1294,97 @@ function createBookingEvent(config, bokare, typ, bokning, calId) {
 // ============================================================
 
 function notifyCj(config, bokare, typ, bokning) {
-  const inst = config.installningar;
-  if (!inst.notisEpost) return;
   const s = v => String(v || '').replace(/[<>]/g, ' ');
   const p = fromIso(bokning.start), slutTid = fromIso(bokning.slut).tid;
-  const rs = bokning.restid && bokning.restid.status;
-  // Raden väljs på mötestypens restid-flagga (inkorgspostens status är 'ok' med 0/0 för typer utan restid, 4.1).
-  let restidRad = 'OBS: restid okänd – kontrollera adressen';
-  if (typ.restid !== true) restidRad = 'ingen (möte utan restid)';
-  else if (rs === 'ok') restidRad = 'ok (' + bokning.restid.foreMin + ' min före, ' + bokning.restid.efterMin + ' min efter)';
-  else if (rs === 'schablon') restidRad = 'schablon – Maps gav inget svar';
   const subject = 'Ny bokning: ' + s(typ.titel) + ' ' + p.datum + ' ' + p.tid;
-  const body = [
+  const rader = [
     'Ny bokning i Pipeline.',
     '',
     'Kund: ' + s(bokning.kund && bokning.kund.namn),
     'Bokare: ' + s(bokare.namn) + (bokare.organisation ? ' (' + s(bokare.organisation) + ')' : ''),
     'Mötestyp: ' + s(typ.titel),
     'Tid: ' + longDateLabel(p.datum) + ' kl ' + p.tid + '–' + slutTid,
-    'Restid: ' + restidRad,
-    '',
-    'Öppna Pipeline: ' + APP_URL,
-    'Bokningsnummer: ' + bokning.bokningId
-  ].join('\n');
-  try { MailApp.sendEmail({ to: String(inst.notisEpost), subject: subject, body: body, name: 'Pipeline bokning' }); }
-  catch (e) { loggaMejlfel(bokning.bokningId); }
+    'Restid: ' + restidRadForMejl(typ, bokning)
+  ];
+  return skickaCjMejl(config, subject, rader, bokning.bokningId);
 }
-// Mejlfel fäller aldrig bokningen – historikposten skrivs best effort under lås.
-function loggaMejlfel(bokningId) {
+// Restidsraden i CJ:s notismejl. Raden väljs på mötestypens restid-flagga (inkorgspostens status är 'ok' med 0/0 för typer
+// utan restid, 4.1).
+function restidRadForMejl(typ, bokning) {
+  const rs = bokning.restid && bokning.restid.status;
+  if (typ.restid !== true) return 'ingen (möte utan restid)';
+  if (rs === 'ok') return 'ok (' + bokning.restid.foreMin + ' min före, ' + bokning.restid.efterMin + ' min efter)';
+  if (rs === 'schablon') return 'schablon – Maps gav inget svar';
+  return 'OBS: restid okänd – kontrollera adressen';
+}
+// Gemensam avsändning av notismejl till CJ (notisEpost): plain text, rader + länk + bokningsnummer. Ingen notisEpost → false.
+// Mejlfel fäller aldrig anropet (historik 'mejlfel' med till:'cj' – appen loggar att notisen uteblev, best effort). Slut på
+// MailApp:s dagskvot (getRemainingDailyQuota 0) loggas som mejlfel utan sändningsförsök. Returnerar true när mejlet lämnade MailApp.
+function skickaCjMejl(config, subject, rader, bokningId) {
+  const inst = config.installningar;
+  if (!inst.notisEpost) return false;
+  const body = rader.concat(['', 'Öppna Pipeline: ' + APP_URL, 'Bokningsnummer: ' + String(bokningId)]).join('\n');
+  try {
+    if (mailKvotSlut()) throw new Error('MailApp: dagskvoten är slut');
+    MailApp.sendEmail({ to: String(inst.notisEpost), subject: subject, body: body, name: 'Pipeline bokning' }); return true;
+  }
+  catch (e) { loggaMejlfel(bokningId, 'cj'); return false; }
+}
+// MailApp:s dagskvot (~100 mottagare/dag för ett vanligt Google-konto). Går kontrollen inte att göra antas kvot finnas.
+function mailKvotSlut() {
+  try { return typeof MailApp.getRemainingDailyQuota === 'function' && MailApp.getRemainingDailyQuota() <= 0; }
+  catch (e) { return false; }
+}
+// Notismejl till CJ vid bokarens egen ändring (steg 2a, beslut 3). Minimerat som notifyCj: bokare, kund, mötestyp, tid (gammal → ny
+// vid ombokning), restidsstatus, ändrade fält som STATISKA namn – aldrig fritext från bokaren (orsaken mejlas inte, bara "angiven"
+// eller inte; nya fältvärden finns i Inkorg efter nästa import). info = { typ:'ombokad'|'avbokad'|'andrad', fran?, falt?, orsakAngiven?, kalenderFel? }.
+function notifyCjAndring(config, bokare, typ, bokning, info) {
+  const s = v => String(v || '').replace(/[<>]/g, ' ');
+  const p = fromIso(bokning.start), slutTid = fromIso(bokning.slut).tid;
+  const tidRad = longDateLabel(p.datum) + ' kl ' + p.tid + '–' + slutTid;
+  const bas = [
+    'Kund: ' + s(bokning.kund && bokning.kund.namn),
+    'Bokare: ' + s(bokare.namn) + (bokare.organisation ? ' (' + s(bokare.organisation) + ')' : ''),
+    'Mötestyp: ' + s(typ.titel)
+  ];
+  let subject = '', rader = [];
+  if (info.typ === 'ombokad') {
+    const g = info.fran ? fromIso(info.fran) : { datum: '', tid: '' };
+    subject = 'Ombokning: ' + s(typ.titel) + ' ' + p.datum + ' ' + p.tid;
+    rader = ['Bokaren har ombokat ett möte. Kalenderhändelsen är flyttad.', ''].concat(bas, [
+      'Tidigare tid: ' + (g.datum ? longDateLabel(g.datum) + ' kl ' + g.tid : '(okänd)'),
+      'Ny tid: ' + tidRad,
+      'Restid: ' + restidRadForMejl(typ, bokning)
+    ]);
+  } else if (info.typ === 'avbokad') {
+    subject = 'Avbokning: ' + s(typ.titel) + ' ' + p.datum + ' ' + p.tid;
+    rader = ['Bokaren har avbokat ett möte. ' + (info.kalenderFel ? 'OBS: kalenderhändelsen kunde inte tas bort – kontrollera kalendern.' : 'Kalenderhändelsen är borttagen.'), ''].concat(bas, [
+      'Tid: ' + tidRad,
+      'Orsak: ' + (info.orsakAngiven ? 'angiven – se Inkorg i Pipeline' : 'ingen angiven')
+    ]);
+  } else {
+    subject = 'Ändrade uppgifter: ' + s(typ.titel) + ' ' + p.datum + ' ' + p.tid;
+    const falt = Array.isArray(info.falt) ? info.falt : [];
+    rader = ['Bokaren har ändrat uppgifter på ett möte. Nya värden finns i Inkorg efter nästa import.', ''].concat(bas, [
+      'Tid: ' + tidRad,
+      'Ändrade fält: ' + (falt.length ? falt.join(', ') : '(inga)'),
+      'Restid: ' + restidRadForMejl(typ, bokning)
+    ]);
+  }
+  return skickaCjMejl(config, subject, rader, bokning.bokningId);
+}
+// Mejlfel fäller aldrig bokningen – historikposten skrivs best effort under lås. till:'cj' när CJ:s notismejl uteblev (appens
+// spegling loggar det på processen); utelämnat = mejl till bokaren.
+function loggaMejlfel(bokningId, till) {
   try {
     withScriptLock(() => {
       const inbox = readInbox();
       const b = findBokningInInbox(inbox, bokningId);
       if (!b) return;
       if (!Array.isArray(b.historik)) b.historik = [];
-      b.historik.push({ ts: nowIso(), typ: 'mejlfel', av: 'script' });
+      const h = { ts: nowIso(), typ: 'mejlfel', av: 'script' };
+      if (till) h.till = String(till);
+      b.historik.push(h);
       writeInbox(inbox);
     }, 5000);
   } catch (e) { /* best effort */ }
@@ -1280,6 +1404,185 @@ function handleGeocode(req, ctx) {
   if (bokare) checkAdressLimits(ctx, adress);
   const g = geoForBooking(adress, bokare ? ctx : null);
   return { status: g.status === 'ok' ? 'ok' : 'okand', lat: g.lat, lng: g.lng, formaterad: g.formaterad };
+}
+
+// ============================================================
+// Bokar-endpoints egen-rebook / egen-cancel / egen-update (steg 2a, CJ:s beslut 2026-09-15) – autentiseras med bokarkod k.
+// Bokaren får OMBOKA, AVBOKA och ÄNDRA UPPGIFTER på sina EGNA bokningar ända fram till mötets starttid. CJ meddelas per
+// e-post (notisEpost) vid varje åtgärd (notifyCjAndring – aldrig bokarens fritext), kunden meddelas av bokaren själv.
+// Outlook uppdateras via sendUpdates:'all' som i admin-rebook/cancel. Kärnorna delas med admin-varianterna
+// (rebookForbered/rebookUtfor, cancelUtfor, validateBookFalt, patchEllerSkapa).
+//
+// Gemensamt: kod → E_KEY (anropsgränser i authBokare); bokningId-format → E_VALIDATION; posten måste tillhöra bokaren
+// (bokareId === bokare.id) – annan bokares eller okänd post → E_NOT_FOUND (aldrig E_ADMIN/E_STATE: avslöjar inte att den finns);
+// status ny/importerad (annars E_STATE, details.status = egna-status 'avbokad'|'avvisad'); start > nu (annars E_STATE
+// "Mötet har redan börjat", details.passerad:true). Kontrollen görs före låset (validering/cache-värmning) och på nytt under
+// låset. Handlingsgränser per kod som book men i egna räknare (checkAndringLimits → E_RATE typ 'andringar'). Svar:
+// { bokning: <egna-format med kanAndras>, rev: <postens rev>, kalenderFel } (+ andrade:[…] i egen-update).
+// ============================================================
+
+function egenKontroll(b, bokare) {
+  if (!b || b.bokareId !== bokare.id) fel('E_NOT_FOUND');
+  if (REBOOK_STATUSAR.indexOf(str(b.status)) < 0) fel('E_STATE', undefined, { status: egenStatus(b) });
+  const ms = egenStartMs(b);
+  if (isNaN(ms) || ms <= Date.now()) fel('E_STATE', 'Mötet har redan börjat', { status: egenStatus(b), passerad: true });
+  return b;
+}
+// Ingång för alla tre: autentisering, bokningId, posten (utan lås) med ägar-/status-/tidskontroll. → { bokare, config, bokningId, post0 }.
+function egenStart(req, ctx) {
+  const a = authBokare(req, ctx);
+  const bokningId = bokningIdField(req.bokningId);
+  const post0 = egenKontroll(findBokningInInbox(readInbox(), bokningId), a.bokare);
+  return { bokare: a.bokare, config: a.config, bokningId: bokningId, post0: post0 };
+}
+// Mötestypen för notismejlet: bokningens typ även om den är inaktiv/borttagen ur config (titel = id som reserv).
+function egenTypForMejl(config, post) {
+  const t = config.motestyper.find(x => x.id === post.motestypId) || null;
+  return t ? Object.assign({}, t, motestypExport(t)) : { id: str(post.motestypId), titel: str(post.motestypId), restid: false };
+}
+function egenSvar(bokning, kalenderFel) {
+  return { bokning: egenExport(bokning, Date.now()), rev: Number(bokning.rev) || 0, kalenderFel: kalenderFel === true };
+}
+
+// ---------- egen-rebook ----------
+// In:  { k, bokningId, start, adress?, reservationId? } – start som i rebook (ISO med offset eller { datum, tid }; samma regler som
+//      book: raster, öppen dag, framförhållning, horisont, paus → E_PAUSED); adress = ny adress (typ med restid; utelämnad →
+//      befintlig; tom vid restid → E_VALIDATION falt.adress); reservationId undantas bara om reservationen är bokarens.
+// Ut:  { bokning, rev, kalenderFel:false }
+// Bokningens egen mötestyp används (även inaktiv – resolveMotestyp med undantaPost); typbyte finns inte för bokaren. Ny adress
+// (skiljer sig från postens) räknas mot adress-/geokodgränserna (checkAdressLimits) och geokodas; ren tidsflytt räknas inte.
+// Restiden räknas om ur den färska luckan. Historik
+// { typ:'ombokad', av:'bokare', fran, till }. Mejl till CJ med gammal → ny tid.
+function handleEgenRebook(req, ctx) {
+  const e = egenStart(req, ctx), config = e.config, bokare = e.bokare, bokningId = e.bokningId;
+  const typ = resolveMotestyp(config, bokare, str(e.post0.motestypId), e.post0);
+  checkAndringLimits(ctx);
+  const forb = rebookForbered(req, config, bokare, typ, e.post0, ctx);
+  pausCheck(config.installningar, forb.st.datum);
+  const r = rebookUtfor(config, bokare, typ, bokningId, forb, { av: 'bokare', orsak: '', motestypFran: '', kontroll: b => egenKontroll(b, bokare) });
+  countAndring(ctx);
+  notifyCjAndring(config, bokare, typ, r.bokning, { typ: 'ombokad', fran: r.fran });
+  return egenSvar(r.bokning, false);
+}
+
+// ---------- egen-cancel ----------
+// In:  { k, bokningId, orsak? } (orsak ≤ 500 tecken – sparas på posten/historiken för Inkorg, mejlas ALDRIG)
+// Ut:  { bokning, rev, kalenderFel }
+// Under lås: cancelUtfor (Events.remove sendUpdates 'all'; 404/410 = ok; annat fel → status sätts ändå + historik 'kalenderfel'
+// + kalenderFel:true), status 'avbokad', rev+1, historik { typ:'avbokad', av:'bokare', orsak }. Mejl till CJ ("orsak angiven"/"ingen").
+function handleEgenCancel(req, ctx) {
+  const e = egenStart(req, ctx), config = e.config, bokare = e.bokare, bokningId = e.bokningId;
+  const orsak = strField(req.orsak, 'orsak', ORSAK_MAX, false);
+  checkAndringLimits(ctx);
+  let bokning = null, kal = null;
+  withScriptLock(() => {
+    const inbox = readInbox();
+    const b = egenKontroll(findBokningInInbox(inbox, bokningId), bokare);
+    kal = cancelUtfor(config, inbox, b, { av: 'bokare', orsak: orsak, revUpp: true });
+    bokning = b;
+  });
+  countAndring(ctx);
+  notifyCjAndring(config, bokare, egenTypForMejl(config, bokning), bokning, { typ: 'avbokad', orsakAngiven: !!orsak, kalenderFel: kal.fel });
+  return egenSvar(bokning, kal.fel);
+}
+
+// ---------- egen-update ----------
+// In:  { k, bokningId, kund:{ namn, orgnr }, kontakt:{ namn, telefon, epost }, adress?, notering?, extrafalt? } – HELA uppsättningen
+//      som i book (utelämnat fält = tomt), samma validering (validateBookFalt: maxlängder, orgnr-Luhn, adress tvingas vid restid,
+//      e-post utan restid, extrafältens typregler) → E_VALIDATION details.falt. extrafalt._kundId (CJ-bokare) bevaras om det inte skickas.
+// Ut:  { bokning, rev, kalenderFel:false, andrade:[ 'kundnamn'|'orgnr'|'kontaktperson'|'telefon'|'epost'|'adress'|'notering'|'extrafalt' ] }
+// Inget skiljer sig → andrade:[] utan lås, skrivning eller mejl (rev oförändrad). Ny adress på typ med restid: adress-/geokodgränser,
+// geokodning (ctx) och omräknad restid ur den färska luckan på bokningens tid (undantaBokningId = bokningId): luckan rymmer inte
+// restiden → E_SLOT_TAKEN "Tiden rymmer inte restiden till den nya adressen – omboka i stället" (inget ändrat); dagen inte öppen
+// (t.ex. inom framförhållningen) → restiden kan inte verifieras → restid.status 'okand' med schablonminuter (CJ flaggas i mejl/app).
+// Kalendern: patchBookingDetails (bara summary/location/description som ändrats; borta → ny händelse). Historik { typ:'andrad',
+// av:'bokare', falt:[…] }, rev+1, andradAt. Mejl till CJ med de ändrade fältens NAMN (aldrig värden).
+function handleEgenUpdate(req, ctx) {
+  const e = egenStart(req, ctx), config = e.config, bokare = e.bokare, bokningId = e.bokningId, post0 = e.post0, inst = config.installningar;
+  const typ = resolveMotestyp(config, bokare, str(post0.motestypId), post0);
+  const v = validateBookFalt(req, config, bokare, typ, null);
+  if (Object.keys(v.falt).length) valideringsfel(v.falt);
+  const nytt = v.varden;
+  if (isPlainObject(post0.extrafalt) && typeof post0.extrafalt._kundId === 'string' && post0.extrafalt._kundId && !nytt.extrafalt._kundId) nytt.extrafalt._kundId = post0.extrafalt._kundId;
+  bevaraDoldaExtrafalt(config, post0, nytt.extrafalt);
+  if (!egenAndradeFalt(post0, nytt).length) return Object.assign(egenSvar(post0, false), { andrade: [] });
+  checkAndringLimits(ctx);
+  const restidBerakning = typ.restid === true && nytt.adress !== str(post0.adress);
+  let geo = null;
+  if (restidBerakning) {
+    checkAdressLimits(ctx, nytt.adress);
+    geo = geoForBooking(nytt.adress, ctx);
+    if (typeof readIcs === 'function') { try { readIcs(config, { farsk: false }); } catch (e2) { /* avgörs under låset */ } }
+    try { findSlot(bokare, config, typ, nytt.adress, fromIso(post0.start), '', bokningId, false); } catch (e2) { if (errorCode(e2) === 'E_RATE') throw e2; }
+  }
+  let bokning = null, andrade = [];
+  withScriptLock(() => {
+    const inbox = readInbox();
+    const b = egenKontroll(findBokningInInbox(inbox, bokningId), bokare);
+    andrade = egenAndradeFalt(b, nytt);
+    if (!andrade.length) { bokning = b; return; }
+    let restid = b.restid;
+    if (restidBerakning) {
+      const ds = findDagOchSlot(bokare, config, typ, nytt.adress, fromIso(b.start), '', bokningId, true, inbox);
+      if (ds.dag && ds.dag.status === 'oppen' && ds.slot) {
+        if (ds.slot.status !== 'ledig') fel('E_SLOT_TAKEN', 'Tiden rymmer inte restiden till den nya adressen – omboka i stället');
+        restid = restidFromSlot(ds.slot, typ, geo);
+      } else {
+        const schablon = Number(inst.schablonRestidMin) || 0;
+        restid = { foreMin: schablon, efterMin: schablon, status: 'okand' };
+      }
+    }
+    const fore = deepClone(b);
+    const uppdaterad = Object.assign({}, b, { kund: nytt.kund, kontakt: nytt.kontakt, adress: nytt.adress, notering: nytt.notering, extrafalt: nytt.extrafalt });
+    const kal = patchBookingDetails(config, bokare, typ, b, uppdaterad);   // E_CALENDAR → inget ändrat
+    const ts = nowIso();
+    b.kund = nytt.kund; b.kontakt = nytt.kontakt; b.adress = nytt.adress; b.notering = nytt.notering; b.extrafalt = nytt.extrafalt;
+    if (restidBerakning) { b.geo = geo; b.restid = restid; }
+    b.kalenderEventId = kal.eventId;
+    b.rev = (Number(b.rev) || 0) + 1; b.andradAt = ts;
+    if (!Array.isArray(b.historik)) b.historik = [];
+    b.historik.push({ ts: ts, typ: 'andrad', av: 'bokare', falt: andrade });
+    try { writeInbox(inbox); }
+    catch (e2) {
+      // Kalendern är redan ändrad – försök återställa titel/plats/beskrivning (best effort) så att kalender och inkorg inte går isär.
+      try { patchBookingDetails(config, bokare, typ, b, Object.assign(fore, { kalenderEventId: kal.eventId })); } catch (e3) { /* best effort */ }
+      fel('E_INTERNAL', 'Ändringen kunde inte sparas – inget har ändrats');
+    }
+    if (restidBerakning) clearBusyCacheFor(b);
+    bokning = b;
+  });
+  if (andrade.length) {
+    countAndring(ctx);
+    notifyCjAndring(config, bokare, typ, bokning, { typ: 'andrad', falt: andrade });
+  }
+  return Object.assign(egenSvar(bokning, false), { andrade: andrade });
+}
+// Extrafält som CJ gömt (synlig:false) eller tagit bort ur formuläret EFTER bokningen finns kvar på posten men inte i sidans
+// Ändra-formulär (validateBookFalt godtar dem inte heller). De bärs över oförändrade – som _kundId – så att en ändring av t.ex.
+// telefon inte tyst raderar värdet eller rapporterar 'extrafalt' som ändrat.
+function bevaraDoldaExtrafalt(config, post0, extrafalt) {
+  if (!isPlainObject(post0.extrafalt)) return;
+  const synliga = (config.formular.extrafalt || []).filter(d => isPlainObject(d) && typeof d.id === 'string' && d.synlig !== false).map(d => d.id);
+  Object.keys(post0.extrafalt).forEach(id => {
+    if (id === '_kundId' || (id in extrafalt) || synliga.indexOf(id) >= 0) return;
+    if (typeof post0.extrafalt[id] === 'string') extrafalt[id] = post0.extrafalt[id];
+  });
+}
+// Vilka fält som skiljer sig mellan posten och de validerade nya värdena, i ANDRAD_FALT_ORDNING (statiska namn – aldrig värden).
+function egenAndradeFalt(b, nytt) {
+  const kund = isPlainObject(b.kund) ? b.kund : {}, kontakt = isPlainObject(b.kontakt) ? b.kontakt : {};
+  const extraNorm = o => { const r = {}; if (isPlainObject(o)) Object.keys(o).sort().forEach(k => { if (typeof o[k] === 'string' && o[k] !== '') r[k] = o[k]; }); return JSON.stringify(r); };   // tomt värde = saknat fält (sidan utelämnar tomma extrafält)
+  const diff = {
+    kundnamn: str(kund.namn) !== nytt.kund.namn,
+    orgnr: str(kund.orgnr) !== nytt.kund.orgnr,
+    kontaktperson: str(kontakt.namn) !== nytt.kontakt.namn,
+    telefon: str(kontakt.telefon) !== nytt.kontakt.telefon,
+    epost: str(kontakt.epost) !== nytt.kontakt.epost,
+    adress: str(b.adress) !== nytt.adress,
+    notering: str(b.notering) !== nytt.notering,
+    extrafalt: extraNorm(b.extrafalt) !== extraNorm(nytt.extrafalt)
+  };
+  return ANDRAD_FALT_ORDNING.filter(f => diff[f]);
 }
 
 // ============================================================
@@ -1579,7 +1882,7 @@ function notifyBokareAvvisad(config, bokning, orsak) {
     '',
     'Bokningsnummer: ' + String(bokning.bokningId)
   ].join('\n');
-  try { MailApp.sendEmail({ to: epost, subject: subject, body: body, name: 'Pipeline bokning' }); return true; }
+  try { if (mailKvotSlut()) throw new Error('MailApp: dagskvoten är slut'); MailApp.sendEmail({ to: epost, subject: subject, body: body, name: 'Pipeline bokning' }); return true; }
   catch (e) { loggaMejlfel(bokning.bokningId); return false; }
 }
 
@@ -1727,69 +2030,95 @@ function previewExport(x, saknas, dodaPoster) {
 const REBOOK_STATUSAR = ['ny', 'importerad', 'bokad', 'ombokad'];
 function handleRebook(req, ctx) {
   authAdmin(req, ctx);
-  const bokningId = typeof req.bokningId === 'string' ? req.bokningId : '';
-  if (!BOKNING_ID_RE.test(bokningId)) valideringsfel({ bokningId: 'Ogiltigt värde' });
-  const startIso = rebookStartIso(req.start);
+  const bokningId = bokningIdField(req.bokningId);
   const orsak = strField(req.orsak, 'orsak', ORSAK_MAX, false);
-  const nyAdress = req.adress === undefined || req.adress === null ? null : strField(req.adress, 'adress', MAXLEN.adress, false);
   if (req.motestypId !== undefined && req.motestypId !== null && (typeof req.motestypId !== 'string' || !req.motestypId || req.motestypId.length > 64)) valideringsfel({ motestypId: 'Okänd mötestyp' });
-  const config = loadConfig(ctx), inst = config.installningar;
+  const config = loadConfig(ctx);
 
   // Posten läses utan lås för validering och cache-värmning; avgörs på nytt under låset.
   const post0 = findBokningInInbox(readInbox(), bokningId);
   if (!post0) fel('E_NOT_FOUND');
-  if (REBOOK_STATUSAR.indexOf(str(post0.status)) < 0) fel('E_STATE', undefined, { status: str(post0.status) });
+  rebookStatusKontroll(post0);
   const bokare = rebookBokare(config, post0);
   const typbyte = typeof req.motestypId === 'string' && req.motestypId !== str(post0.motestypId);
   const typ = typbyte ? resolveMotestyp(config, bokare, req.motestypId, null) : resolveMotestyp(config, bokare, str(post0.motestypId), post0);
+  const forb = rebookForbered(req, config, bokare, typ, post0, null);
+  const r = rebookUtfor(config, bokare, typ, bokningId, forb, {
+    av: 'cj', orsak: orsak, motestypFran: typbyte ? str(post0.motestypId) : '', kontroll: rebookStatusKontroll
+  });
+  const bokning = r.bokning;
+  const mejlSkickat = notifyBokareOmbokad(config, bokning, r.fran, orsak);
+  return {
+    bokningId: bokningId, start: bokning.start, slut: bokning.slut, adress: bokning.adress, geo: bokning.geo, restid: bokning.restid,
+    motestypId: bokning.motestypId, kalenderEventId: bokning.kalenderEventId, kalenderNyHandelse: r.kal.ny === true,
+    rev: Number(bokning.rev) || 0, mejlSkickat: mejlSkickat, bokning: inboxExport(bokning)
+  };
+}
+function bokningIdField(v) {
+  const bokningId = typeof v === 'string' ? v : '';
+  if (!BOKNING_ID_RE.test(bokningId)) valideringsfel({ bokningId: 'Ogiltigt värde' });
+  return bokningId;
+}
+function rebookStatusKontroll(b) { if (REBOOK_STATUSAR.indexOf(str(b.status)) < 0) fel('E_STATE', undefined, { status: str(b.status) }); }
+// Ombokningens förberedelse FÖRE låset (delas av admin-rebook och egen-rebook): starttid (samma regler som book), ny/behållen
+// adress (tvingas vid restid), sluttid, honorerad reservation, geokodning (ctx = bokare → räknas mot bokarens timgräns; null = admin),
+// ICS och dagsberäkning utan färsk kalenderläsning (cache-värmning, 4.8). → { st, adress, slutIso, reservationId, geo }.
+function rebookForbered(req, config, bokare, typ, post0, ctx) {
+  const inst = config.installningar;
+  const startIso = rebookStartIso(req.start);
+  const nyAdress = req.adress === undefined || req.adress === null ? null : strField(req.adress, 'adress', MAXLEN.adress, false);
   const st = parseStartField(startIso, inst, typ);
   const adress = nyAdress !== null ? nyAdress : str(post0.adress);
   if (typ.restid && !adress) valideringsfel({ adress: 'Obligatoriskt' });
   const slutIso = toIsoWithOffset(st.datum, minToTid(tidToMin(st.tid) + typ.langdMin));
   const reservationId = rebookReservationId(req.reservationId, config, post0);
-
-  // Före låset (4.8): geokodning, ICS och dagsberäkning utan färsk kalenderläsning värmer cacherna.
-  const geo = typ.restid ? geoForBooking(adress, null) : { lat: null, lng: null, formaterad: '', status: 'saknas' };
+  // Adress-/geokodgränserna gäller NYA adresser: en ren tidsflytt (adress utelämnad eller samma som postens) räknas inte (cache-träff).
+  if (ctx && typ.restid && nyAdress !== null && limitAdressNyckel(nyAdress) !== limitAdressNyckel(str(post0.adress))) checkAdressLimits(ctx, adress);
+  const geo = typ.restid ? geoForBooking(adress, ctx) : { lat: null, lng: null, formaterad: '', status: 'saknas' };
   if (typeof readIcs === 'function') { try { readIcs(config, { farsk: false }); } catch (e) { /* avgörs under låset */ } }
-  try { findSlot(bokare, config, typ, adress, st, reservationId, bokningId, false); } catch (e) { if (errorCode(e) === 'E_RATE') throw e; }
-
+  try { findSlot(bokare, config, typ, adress, st, reservationId, str(post0.bokningId), false); } catch (e) { if (errorCode(e) === 'E_RATE') throw e; }
+  return { st: st, adress: adress, slutIso: slutIso, reservationId: reservationId, geo: geo };
+}
+// Ombokningens kärna UNDER låset (delas av admin-rebook och egen-rebook): posten läses på nytt, opts.kontroll(b) avgör att den
+// fortfarande får ombokas (status; för bokaren även ägarskap och start > nu), färsk luckkontroll med egen post undantagen →
+// E_SLOT_TAKEN, Calendar.Events.patch (borta → ny händelse; annat fel → E_CALENDAR, inget ändrat), posten start/slut/adress/geo/
+// restid[/motestypId], rev+1, andradAt, historik { typ:'ombokad', av: opts.av, fran, till[, orsak, motestypFran] } – status
+// oförändrad. Misslyckad inkorgsskrivning → händelsen flyttas tillbaka (best effort) → E_INTERNAL. Busy-cachen töms för båda
+// dagarna. → { bokning, fran, kal }.
+function rebookUtfor(config, bokare, typ, bokningId, forb, opts) {
+  const st = forb.st, adress = forb.adress, slutIso = forb.slutIso, geo = forb.geo;
   let bokning = null, fran = '', kal = null;
   withScriptLock(() => {
     const inbox = readInbox();
     const b = findBokningInInbox(inbox, bokningId);
     if (!b) fel('E_NOT_FOUND');
-    if (REBOOK_STATUSAR.indexOf(str(b.status)) < 0) fel('E_STATE', undefined, { status: str(b.status) });
-    const slot = findSlot(bokare, config, typ, adress, st, reservationId, bokningId, true, inbox);   // färsk läsning, egen post undantagen
+    opts.kontroll(b);
+    const slot = findSlot(bokare, config, typ, adress, st, forb.reservationId, bokningId, true, inbox);   // färsk läsning, egen post undantagen
     if (!slot || slot.status !== 'ledig') fel('E_SLOT_TAKEN');
     const ts = nowIso();
-    fran = str(b.start); const franSlut = str(b.slut);
+    fran = str(b.start); const franSlut = str(b.slut), franAdress = str(b.adress);
     const nytt = { start: st.iso, slut: slutIso, adress: adress, motestypId: typ.id };
     kal = patchBookingEvent(config, bokare, typ, b, nytt);                 // E_CALENDAR → inget ändrat
     b.start = st.iso; b.slut = slutIso; b.adress = adress; b.geo = geo; b.restid = restidFromSlot(slot, typ, geo);
-    if (typbyte) b.motestypId = typ.id;
+    if (opts.motestypFran) b.motestypId = typ.id;
     b.kalenderEventId = kal.eventId;
     b.rev = (Number(b.rev) || 0) + 1; b.andradAt = ts;
     if (!Array.isArray(b.historik)) b.historik = [];
-    const h = { ts: ts, typ: 'ombokad', av: 'cj', fran: fran, till: st.iso };
-    if (orsak) h.orsak = orsak;
-    if (typbyte) h.motestypFran = str(post0.motestypId);
+    const h = { ts: ts, typ: 'ombokad', av: opts.av, fran: fran, till: st.iso };
+    if (opts.orsak) h.orsak = opts.orsak;
+    if (opts.motestypFran) h.motestypFran = opts.motestypFran;
     b.historik.push(h);
     try { writeInbox(inbox); }
     catch (e) {
       // Kalendern är redan flyttad – försök flytta tillbaka (best effort) så att kalender och inkorg inte går isär.
-      try { patchBookingEvent(config, bokare, typ, Object.assign({}, b, { kalenderEventId: kal.eventId }), { start: fran, slut: franSlut, adress: str(post0.adress), motestypId: str(b.motestypId) }); } catch (e2) { /* best effort */ }
+      try { patchBookingEvent(config, bokare, typ, Object.assign({}, b, { kalenderEventId: kal.eventId }), { start: fran, slut: franSlut, adress: franAdress, motestypId: str(b.motestypId) }); } catch (e2) { /* best effort */ }
       fel('E_INTERNAL', 'Ombokningen kunde inte sparas – inget har ändrats');
     }
     clearBusyCacheFor({ start: fran, slut: franSlut });
     clearBusyCacheFor(b);
     bokning = b;
   });
-  const mejlSkickat = notifyBokareOmbokad(config, bokning, fran, orsak);
-  return {
-    bokningId: bokningId, start: bokning.start, slut: bokning.slut, adress: bokning.adress, geo: bokning.geo, restid: bokning.restid,
-    motestypId: bokning.motestypId, kalenderEventId: bokning.kalenderEventId, kalenderNyHandelse: kal.ny === true,
-    rev: Number(bokning.rev) || 0, mejlSkickat: mejlSkickat, bokning: inboxExport(bokning)
-  };
+  return { bokning: bokning, fran: fran, kal: kal };
 }
 // start för rebook: ISO med offset eller { datum, tid } → ISO-sträng (parseStartField gör resten).
 function rebookStartIso(v) {
@@ -1819,23 +2148,29 @@ function rebookReservationId(v, config, post) {
 // Flyttar bokningens kalenderhändelse (4.7): Events.patch({ start, end, location[, summary, extendedProperties] }, sendUpdates 'all').
 // Händelsen borta (404/410) eller inget id → ny händelse via createBookingEvent (ny:true). Annat fel → E_CALENDAR (inget ändrat).
 function patchBookingEvent(config, bokare, typ, bokning, nytt) {
-  const inst = config.installningar;
-  const calId = bokningarKalenderId(inst);
-  const s = v => String(v || '').replace(/[<>]/g, ' ');
   const uppdaterad = Object.assign({}, bokning, { start: nytt.start, slut: nytt.slut, adress: nytt.adress, motestypId: nytt.motestypId });
+  const hel = bookingEventResource(config, bokare, typ, uppdaterad);
+  const resurs = { start: hel.start, end: hel.end, location: hel.location };
+  if (nytt.motestypId !== str(bokning.motestypId)) { resurs.summary = hel.summary; resurs.extendedProperties = hel.extendedProperties; }
+  return patchEllerSkapa(config, bokare, typ, uppdaterad, resurs);
+}
+// Uppdaterar titel/plats/beskrivning på bokningens händelse efter bokarens ändrade uppgifter (egen-update, steg 2a) – bara de
+// fält som faktiskt skiljer sig mellan gammal och ny post patchas (sendUpdates 'all' → Outlook-kopian uppdateras). Inget skiljer
+// sig → inget kalenderanrop ({ eventId oförändrat, ny:false, patchad:false }). Borta/inget id → ny händelse som i rebook.
+function patchBookingDetails(config, bokare, typ, bokning, uppdaterad) {
+  const fore = bookingEventResource(config, bokare, typ, bokning), efter = bookingEventResource(config, bokare, typ, uppdaterad);
+  const resurs = {};
+  ['summary', 'location', 'description'].forEach(k => { if (fore[k] !== efter[k]) resurs[k] = efter[k]; });
+  if (!Object.keys(resurs).length && str(bokning.kalenderEventId)) return { eventId: str(bokning.kalenderEventId), ny: false, patchad: false };
+  return Object.assign(patchEllerSkapa(config, bokare, typ, uppdaterad, resurs), { patchad: true });
+}
+// Calendar.Events.patch(resurs, sendUpdates 'all') på postens händelse (4.7). Händelsen borta (404/410) eller inget id → ny händelse
+// via createBookingEvent för den uppdaterade posten (ny:true). Annat fel → E_CALENDAR (inget ändrat).
+function patchEllerSkapa(config, bokare, typ, uppdaterad, resurs) {
+  const calId = bokningarKalenderId(config.installningar);
   const skapaNy = () => { const ev = createBookingEvent(config, bokare, typ, uppdaterad, calId); return { eventId: str(ev && ev.id), ny: true }; };
-  const eventId = str(bokning.kalenderEventId);
+  const eventId = str(uppdaterad.kalenderEventId);
   if (!eventId) return skapaNy();
-  const resurs = {
-    start: { dateTime: nytt.start, timeZone: TZ },
-    end:   { dateTime: nytt.slut,  timeZone: TZ },
-    location: s(nytt.adress)
-  };
-  if (nytt.motestypId !== str(bokning.motestypId)) {
-    const kund = isPlainObject(bokning.kund) ? bokning.kund : {};
-    resurs.summary = s(typ.titel) + ': ' + s(kund.namn);
-    resurs.extendedProperties = { private: { bokningId: String(bokning.bokningId), bokareId: String(bokning.bokareId || ''), pipelineId: String(bokning.pipelineId || ''), motestypId: String(nytt.motestypId) } };
-  }
   let ev = null, gone = false;
   try { ev = Calendar.Events.patch(resurs, calId, eventId, { sendUpdates: 'all' }); }
   catch (e) { if (calendarEventGone(e)) gone = true; else fel('E_CALENDAR'); }
@@ -1867,7 +2202,7 @@ function notifyBokareOmbokad(config, bokning, franIso, orsak) {
     '',
     'Bokningsnummer: ' + String(bokning.bokningId)
   ].join('\n');
-  try { MailApp.sendEmail({ to: epost, subject: subject, body: body, name: 'Pipeline bokning' }); return true; }
+  try { if (mailKvotSlut()) throw new Error('MailApp: dagskvoten är slut'); MailApp.sendEmail({ to: epost, subject: subject, body: body, name: 'Pipeline bokning' }); return true; }
   catch (e) { loggaMejlfel(bokning.bokningId); return false; }
 }
 
@@ -1908,17 +2243,9 @@ function handleCancel(req, ctx) {
       }
       fel('E_NOT_FOUND');
     }
-    if (REBOOK_STATUSAR.indexOf(str(b.status)) < 0) fel('E_STATE', undefined, { status: str(b.status) });
-    const ts = nowIso();
-    kal = removeBookingEvent(config, b.kalenderEventId);
-    b.status = 'avbokad';
-    b.avbokadTs = ts; b.avbokadOrsak = orsak; b.andradAt = ts;
-    if (!Array.isArray(b.historik)) b.historik = [];
-    b.historik.push({ ts: ts, typ: 'avbokad', av: 'cj', orsak: orsak });
-    if (kal.fel) b.historik.push({ ts: ts, typ: 'kalenderfel', av: 'script' });
-    writeInbox(inbox);
+    rebookStatusKontroll(b);
+    kal = cancelUtfor(config, inbox, b, { av: 'cj', orsak: orsak });
     rev = Number(inbox.rev) || 0;
-    clearBusyCacheFor(b);
     bokning = b;
   });
   const mejlSkickat = bokning ? notifyBokareAvbokad(config, bokning, orsak) : false;
@@ -1927,6 +2254,23 @@ function handleCancel(req, ctx) {
     kalenderBorttagen: kal.borttagen, kalenderFel: kal.fel, mejlSkickat: mejlSkickat, rev: rev, postSaknas: postSaknas,
     bokning: bokning ? inboxExport(bokning) : null
   };
+}
+// Avbokningens kärna UNDER låset (delas av admin-cancel och egen-cancel): Calendar.Events.remove (sendUpdates 'all'; 404/410 =
+// redan borta = ok; annat fel → status sätts ändå + historik 'kalenderfel' + kalenderFel:true, 4.7), status 'avbokad',
+// avbokadTs/avbokadOrsak/andradAt, historik { typ:'avbokad', av: opts.av, orsak }, inkorgen skrivs (rev+1), busy-cachen töms.
+// Posten raderas aldrig (8.3). Anroparen har redan kontrollerat status (och för bokaren ägarskap/starttid). → { borttagen, fel }.
+function cancelUtfor(config, inbox, b, opts) {
+  const ts = nowIso();
+  const kal = removeBookingEvent(config, b.kalenderEventId);
+  b.status = 'avbokad';
+  b.avbokadTs = ts; b.avbokadOrsak = opts.orsak || ''; b.andradAt = ts;
+  if (opts.revUpp) b.rev = (Number(b.rev) || 0) + 1;
+  if (!Array.isArray(b.historik)) b.historik = [];
+  b.historik.push({ ts: ts, typ: 'avbokad', av: opts.av, orsak: opts.orsak || '' });
+  if (kal.fel) b.historik.push({ ts: ts, typ: 'kalenderfel', av: 'script' });
+  writeInbox(inbox);
+  clearBusyCacheFor(b);
+  return kal;
 }
 // Mejl till bokaren efter avbokning (4.9, A25): kundnamn, tid, orsak, "Du kontaktar kunden.". Aldrig kontaktuppgifter.
 function notifyBokareAvbokad(config, bokning, orsak) {
@@ -1951,7 +2295,7 @@ function notifyBokareAvbokad(config, bokning, orsak) {
     '',
     'Bokningsnummer: ' + String(bokning.bokningId)
   ].join('\n');
-  try { MailApp.sendEmail({ to: epost, subject: subject, body: body, name: 'Pipeline bokning' }); return true; }
+  try { if (mailKvotSlut()) throw new Error('MailApp: dagskvoten är slut'); MailApp.sendEmail({ to: epost, subject: subject, body: body, name: 'Pipeline bokning' }); return true; }
   catch (e) { loggaMejlfel(bokning.bokningId); return false; }
 }
 
@@ -2131,6 +2475,9 @@ const HANDLERS = {
   'release': handleRelease,
   'book': handleBook,
   'geocode': handleGeocode,
+  'egen-rebook': handleEgenRebook,
+  'egen-cancel': handleEgenCancel,
+  'egen-update': handleEgenUpdate,
   'setup': handleSetup,
   'config-push': handleConfigPush,
   'calendars-list': handleCalendarsList,
@@ -2206,13 +2553,13 @@ function dailyMaintenance() {
   console.log(JSON.stringify(rad));
   return rad;
 }
-// Räknare maps_elements_<YYYYMMDD>/book_count_<YYYYMMDD> äldre än 7 dagar. → antal borttagna.
+// Räknare maps_elements_<YYYYMMDD>/book_count_<YYYYMMDD>/andr_count_<YYYYMMDD> äldre än 7 dagar. → antal borttagna.
 function gallraRaknare(idag) {
   const props = PropertiesService.getScriptProperties();
   const grans = ymdCompact(addDays(idag, -7));
   let n = 0;
   Object.keys(props.getProperties()).forEach(k => {
-    const m = /^(maps_elements_|book_count_)(\d{8})$/.exec(k);
+    const m = /^(maps_elements_|book_count_|andr_count_)(\d{8})$/.exec(k);
     if (m && m[2] < grans) { props.deleteProperty(k); n++; }
   });
   return n;
