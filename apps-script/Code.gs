@@ -25,7 +25,7 @@
 // Konstanter
 // ============================================================
 
-const SCRIPT_VERSION = 1;                       // MIN_SCRIPT_VERSION i index.html/bokning.js jämförs mot denna (4.12)
+const SCRIPT_VERSION = 2;                       // MIN_SCRIPT_VERSION i index.html/bokning.js jämförs mot denna (4.12)
 const TZ = 'Europe/Stockholm';
 const APP_URL = 'https://speeedfreeak.github.io/telexia-pipeline/';   // länk i notismejlet (4.9)
 const MAX_BODY_BYTES = 16384;                   // body kontrolleras före JSON.parse (4.3)
