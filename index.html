@@ -463,7 +463,9 @@
   .bok-sok-list { border: 1px solid #2a2e37; border-radius: 6px; background: #1a1d27; max-height: 220px; overflow-y: auto; margin-top: 4px; }
   .bok-sok-item { padding: 7px 10px; font-size: 12px; color: #e5e7eb; cursor: pointer; border-bottom: 1px solid #20242f; }
   .bok-sok-item:last-child { border-bottom: none; }
-  .bok-sok-item:hover { background: #20242f; }
+  .bok-sok-item:hover, .bok-sok-item.is-aktiv { background: #20242f; }
+  .bok-sok-item .bok-sok-detalj { display: block; font-size: 11px; color: #9ca3af; }
+  #bsBasForslag .bok-sok-item { min-height: 44px; display: flex; flex-direction: column; justify-content: center; padding: 8px 12px; font-size: 13px; }   /* ≥ 44 px träffyta på mobil (PWA); kundsökningens rader orörda */
   #bkPanel .bok-panel { margin-bottom: 10px; max-width: 900px; }
   #bkPanel select { padding: 7px 9px; border: 1px solid #2a2e37; border-radius: 6px; font-size: 13px; background: #1a1d27; color: #e5e7eb; font-family: inherit; }
   #bokningEmbed { background: #161922; border: 1px solid #262b36; border-radius: 10px; padding: 10px 12px; margin: 12px 20px 0; }
@@ -1019,7 +1021,8 @@ const BOK_SCRIPT_URL = 'https://script.google.com/macros/s/AKfycbxqBn2wQt8pqF0US
 const MIN_SCRIPT_VERSION = 4;     // 4 = steg 2a: bokarens självservice (egen-rebook/egen-cancel/egen-update, hello.egna med kanAndras)
 const PURGE_SCRIPT_VERSION = 3;   // scriptversion med purge på riktigt (M5); äldre script → radering av processer/kunder med bokningar avbryts (Drift-panelen varnar)
 const SJALVSERVICE_SCRIPT_VERSION = 4;   // scriptversion med bokarens självservice (steg 2a); äldre script → bokningssidan saknar Omboka/Ändra/Avboka (Drift-panelen varnar)
-const BOK_TIMEOUT_MS = { hello: 15000, availability: 15000, geocode: 15000, ping: 15000 };   // övriga (skrivande) 45 000
+const ADRESSFORSLAG_SCRIPT_VERSION = 5;   // scriptversion med adressförslag (steg 2b, 'adressforslag'); äldre script → fritext utan fel (Drift-panelen visar "Adressförslag: av")
+const BOK_TIMEOUT_MS = { hello: 15000, availability: 15000, geocode: 15000, ping: 15000, adressforslag: 10000 };   // övriga (skrivande) 45 000
 function bokScriptUrl() {
   const u = (typeof BOKNINGSINSTALLNINGAR === 'object' && BOKNINGSINSTALLNINGAR) ? BOKNINGSINSTALLNINGAR.scriptUrl : '';
   return /^https:\/\/script\.google\.com\/macros\/s\/[A-Za-z0-9_-]+\/exec$/.test(String(u || '')) ? u : BOK_SCRIPT_URL;
@@ -3947,6 +3950,7 @@ async function testaAnslutning() {
   const d = ping.data || {}, v = Number(ping.scriptVersion) || 0;
   bsLogg('Scriptversion ' + v + (v < MIN_SCRIPT_VERSION ? ' – uppdatera scriptet' : '') + ' · ' + (d.konfigurerad ? 'konfigurerad' : 'INTE konfigurerad (setup saknas)' + (d.orsak ? ' – ' + bstr(d.orsak, 200) : '')), d.konfigurerad && v >= MIN_SCRIPT_VERSION ? 'ok' : 'warn');
   bsLogg('Maps: ' + (d.mapsNyckel ? 'nyckel finns · ' + (Number(d.mapsForbrukningIdag) || 0) + ' element idag' : 'ingen nyckel – schablonrestid') + (d.mapsVarning ? ' · ' + bstr(d.mapsVarning, 200) : ''), d.mapsVarning ? 'warn' : '');
+  { const af = adressforslagStatus(normPing(d), v); bsLogg('Adressförslag (Places): ' + (af.pa ? 'på' : 'av – ' + af.orsak), af.pa ? 'ok' : ''); }
   const ics = isPlainObject(d.icsStatus) ? d.icsStatus : null;
   if (ics) bsLogg('Outlook-ICS: ' + (ics.ok ? 'ok' : 'kunde inte läsas') + (ics.hamtadTs ? ' · hämtad ' + kortTidLabel(bstr(ics.hamtadTs, 40)) : '') + ' · ' + (Number(ics.antal) || 0) + ' händelser, ' + (Number(ics.medPlats) || 0) + ' med plats, ' + (Number(ics.preliminara) || 0) + ' preliminära', ics.ok ? '' : 'warn');
   if (!bokAnsluten()) { bsLogg('Modulen är inte ansluten – kör "Anslut".', 'warn'); return; }
@@ -4017,6 +4021,15 @@ function sparaKalKollAvstamning(res) {
   res.varningar.forEach(v => { const m = /saknas i inkorgen:\s*(\d+)/i.exec(v); if (m) antal = Math.max(antal, Number(m[1]) || 0); });
   bokSenasteKalKoll = { ts: res.hamtadTs, fran: res.fran, till: res.till, varningar: res.varningar.slice(), saknasIds, saknasAntal: antal };
 }
+// Places-status (steg 2b): scriptet skriver "Places API ej aktiverat" i samma CacheService-slot ('maps:varning') som övriga Maps-varningar
+// när Places API (New) svarar REQUEST_DENIED/403. Då är restiden opåverkad (Geocoding/Distance Matrix fungerar) – bara förslagen stängs av.
+function placesVarning(p) { return !!(p && p.mapsVarning && /places/i.test(p.mapsVarning)); }
+function adressforslagStatus(p, v) {   // → { pa, orsak } för Drift-panelen och Testa-loggen; v = scriptversion ur kuvertet
+  if (v > 0 && v < ADRESSFORSLAG_SCRIPT_VERSION) return { pa: false, orsak: 'kräver scriptversion ' + ADRESSFORSLAG_SCRIPT_VERSION + ' (Hantera distributioner › Ny version)' };
+  if (!p || !p.mapsNyckel) return { pa: false, orsak: 'ingen Maps-nyckel' };
+  if (placesVarning(p)) return { pa: false, orsak: 'Places API ej aktiverat i Google Cloud-projektet' };
+  return { pa: true, orsak: '' };
+}
 function bokDriftRader() {   // gemensamma rader för Drift-panelen; statusraden plockar bara varningarna (kind 'warn'/'err')
   const rader = [], p = bokDrift.ping, s = BOKNINGSINSTALLNINGAR;
   if (bokDrift.pingFel) rader.push({ text: 'Scriptet svarar inte: ' + bokDrift.pingFel, kind: 'err', omrade: 'script' });
@@ -4026,7 +4039,8 @@ function bokDriftRader() {   // gemensamma rader för Drift-panelen; statusraden
     if (v > 0 && v < PURGE_SCRIPT_VERSION) rader.push({ text: 'Scriptversion ' + v + ' – purge saknas: radering av processer/kunder med bokningar avbryts tills scriptet uppdaterats (Hantera distributioner › Ny version, version ' + PURGE_SCRIPT_VERSION + ')', kind: 'warn', omrade: 'script' });
     if (v > 0 && v < SJALVSERVICE_SCRIPT_VERSION) rader.push({ text: 'Scriptversion ' + v + ' < ' + SJALVSERVICE_SCRIPT_VERSION + ' – bokarens självservice saknas: bokaren kan inte omboka, ändra eller avboka sina bokningar på bokningssidan förrän scriptet uppdaterats (Hantera distributioner › Ny version, version ' + SJALVSERVICE_SCRIPT_VERSION + ')', kind: 'warn', omrade: 'script' });
     rader.push({ text: 'Maps: ' + (p.mapsNyckel ? 'nyckel finns · ' + p.mapsForbrukningIdag + ' element idag' + (p.mapsDagstak ? ' av ' + p.mapsDagstak : '') : 'ingen nyckel – schablonrestid'), kind: 'info', omrade: 'maps' });
-    if (p.mapsVarning) rader.push({ text: 'Maps-varning: ' + p.mapsVarning + ' – schablonrestid används', kind: 'warn', omrade: 'maps' });
+    if (p.mapsVarning) rader.push({ text: 'Maps-varning: ' + p.mapsVarning + (placesVarning(p) ? ' – adressförslag avstängda' : ' – schablonrestid används'), kind: 'warn', omrade: 'maps' });
+    { const af = adressforslagStatus(p, v); rader.push({ text: 'Adressförslag (Places): ' + (af.pa ? 'på' : 'av – ' + af.orsak), kind: 'info', omrade: 'maps' }); }
     const ics = p.icsStatus;
     if (!s.outlookIcsUrl) rader.push({ text: 'Outlook-ICS: ingen länk angiven (Kalendrar)', kind: 'info', omrade: 'ics' });
     else if (!ics) rader.push({ text: 'Outlook-ICS: status saknas i svaret', kind: 'info', omrade: 'ics' });
@@ -4959,7 +4973,8 @@ function renderBokInstallningar(body) {
   <div class="bok-panel">
     <div class="section-title">Basadress</div>
     <div class="field"><label>Adress (utgångspunkt för restid till första/efter sista mötet)</label>
-      <div class="bok-inline"><input type="text" id="bsBasadress" maxlength="200" autocomplete="off"><button type="button" class="btn ghost" id="bsTestaAdressBtn">Testa adress</button></div>
+      <div class="bok-inline"><input type="text" id="bsBasadress" maxlength="200" autocomplete="off" role="combobox" aria-autocomplete="list" aria-expanded="false" aria-controls="bsBasForslag" aria-haspopup="listbox"><button type="button" class="btn ghost" id="bsTestaAdressBtn">Testa adress</button></div>
+      <div id="bsBasForslag" class="bok-sok-list" role="listbox" aria-label="Adressförslag" style="display:none"></div>
       <div class="hint" id="bsBasHint" style="margin-top:4px"></div>
       <div class="hint">Visas aldrig för bokaren – men en illvillig bokare kan härleda ungefärligt läge ur restidsblocken; välj hellre kontor än hem.</div></div>
     <label class="check-row"><input type="checkbox" id="bsRestidTillForsta"> Räkna restid från basadressen till dagens första möte</label>
@@ -5047,6 +5062,7 @@ function renderBokInstallningar(body) {
   hamtaBokDrift(false).catch(() => {});   // ping (oautentiserat, 15 s timeout) – cachat 5 min
   body.querySelector('#bsVisaNyckelBtn').addEventListener('click', () => visaNyckelPanel(!bsNyckelSynlig));
   body.querySelector('#bsTestaAdressBtn').addEventListener('click', testaBasadress);
+  kopplaBasadressForslag(body);
   body.querySelector('#bsHamtaKalendrarBtn').addEventListener('click', hamtaKalendrar);
   body.querySelector('#bsIcsVisaBtn').addEventListener('click', e => {
     const el = document.getElementById('bsIcsMask');
@@ -5142,13 +5158,122 @@ function visaNyckelPanel(visa) {
     s.adminNyckel = genereraAdminNyckel(); saveBokningsinstallningar(s, false); visaNyckelPanel(true); uppdateraAnslutKnappar(); renderBokStatus();
   });
 }
+// ---------- Adressförslag på basadressfältet (steg 2b, spec 11 "Adress-autocomplete via scriptet") ----------
+// bokAdminApi('adressforslag', { q, sessionToken }) → data { forslag:[{ text, placeId, huvud, detalj }], kalla:'places'|'ingen' }.
+// Helt valfritt: äldre script (okänd åtgärd → E_VALIDATION), ingen Maps-nyckel/dagstak nått/Places ej aktiverat (kalla 'ingen') eller
+// kodgräns (E_RATE) → listan döljs tyst och fältet fungerar som fritext. Som på sajten (bokning.js hamtaForslag): kalla 'ingen', E_RATE,
+// E_NETWORK, E_ABORT och E_INTERNAL ger en tyst paus på 60 s (pausTill) och sedan nytt försök – bara "Okänd åtgärd" (script < 5) stänger av
+// förslagen för renderingen. Debounce 300 ms, min 3 tecken, max 5 förslag, tangentbord (pil upp/ner, Enter, Esc; pil ner öppnar listan
+// igen efter Esc), aria-combobox, blur döljer listan efter 150 ms så ett klick på ett förslag hinner registreras på pekskärm.
+// Ett valt förslag geokodas direkt (testaBasadress med placeId) – samma beteende som sajtens "Tolkad som"; placeId nollas när texten ändras efter valet.
+// sessionToken = crypto.randomUUID() per adressfält-session (Places session-prissättning); ny efter val och efter geokodning.
+const AC_PLACEID_RE = /^[A-Za-z0-9_-]{10,300}$/;
+const AC_DEBOUNCE_MS = 300, AC_MIN_TECKEN = 3, AC_MAX_FORSLAG = 5, AC_PAUS_MS = 60000, AC_BLUR_MS = 150;
+let bsBasAc = nyBasAc();
+function nyBasAc() { return { placeId: '', sessionToken: acToken(), timer: null, blurTimer: null, seq: 0, aktiv: -1, forslag: [], senasteQ: '', avstangd: false, pausTill: 0 }; }
+function acToken() {
+  try { if (typeof crypto !== 'undefined' && crypto.randomUUID) return crypto.randomUUID(); } catch (e) {}
+  return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, c => { const r = Math.random() * 16 | 0; return (c === 'x' ? r : (r & 3 | 8)).toString(16); });
+}
+function basAcNySession() { bsBasAc.placeId = ''; bsBasAc.sessionToken = acToken(); bsBasAc.senasteQ = ''; }
+function basAcDolj() {
+  const lista = document.getElementById('bsBasForslag'), inp = document.getElementById('bsBasadress');
+  bsBasAc.aktiv = -1; bsBasAc.forslag = [];
+  if (lista) { lista.style.display = 'none'; lista.innerHTML = ''; }
+  if (inp) { inp.setAttribute('aria-expanded', 'false'); inp.removeAttribute('aria-activedescendant'); }
+}
+function basAcRita() {
+  const lista = document.getElementById('bsBasForslag'), inp = document.getElementById('bsBasadress');
+  if (!lista || !inp) return;
+  if (!bsBasAc.forslag.length) { basAcDolj(); return; }
+  lista.innerHTML = bsBasAc.forslag.map((f, i) => `<div class="bok-sok-item${i === bsBasAc.aktiv ? ' is-aktiv' : ''}" role="option" id="bsBasForslag-${i}" aria-selected="${i === bsBasAc.aktiv}" data-i="${i}">${escapeHtml(f.huvud || f.text)}${f.detalj ? `<span class="bok-sok-detalj">${escapeHtml(f.detalj)}</span>` : ''}</div>`).join('');
+  lista.style.display = 'block';
+  inp.setAttribute('aria-expanded', 'true');
+  if (bsBasAc.aktiv >= 0) inp.setAttribute('aria-activedescendant', 'bsBasForslag-' + bsBasAc.aktiv); else inp.removeAttribute('aria-activedescendant');
+  lista.querySelectorAll('.bok-sok-item').forEach(it => {
+    it.addEventListener('mousedown', e => e.preventDefault());   // behåll fokus i fältet så blur inte hinner dölja listan före klicket
+    it.addEventListener('click', () => basAcValj(Number(it.dataset.i)));
+  });
+}
+function basAcValj(i) {
+  const f = bsBasAc.forslag[i], inp = document.getElementById('bsBasadress');
+  if (!f || !inp) return;
+  inp.value = f.text.slice(0, 200);
+  basAcDolj();
+  bsBasAc.placeId = f.placeId; bsBasAc.sessionToken = acToken(); bsBasAc.senasteQ = '';   // valet avslutar Places-sessionen; placeId följer med geokodningen
+  if (!bokAnsluten()) {   // utan brevlåda kan inget geokodas – fallback-hint som förut
+    const hint = document.getElementById('bsBasHint');
+    if (hint) hint.textContent = 'Förslag valt – anslut brevlådan och klicka "Testa adress" för att geokoda (spara sedan inställningarna)';
+    return;
+  }
+  testaBasadress();   // geokoda direkt med placeId (som sajtens "Tolkad som"); den döljer listan och startar ny session själv
+}
+function normForslag(d) {   // defensiv validering av scriptets svar (8.2): text krävs, placeId bara om giltigt, max 5
+  const ut = [];
+  (isPlainObject(d) && Array.isArray(d.forslag) ? d.forslag : []).forEach(f => {
+    if (!isPlainObject(f) || ut.length >= AC_MAX_FORSLAG) return;
+    const text = bstr(f.text, 200).trim();
+    if (!text) return;
+    const placeId = bstr(f.placeId, 300);
+    ut.push({ text, placeId: AC_PLACEID_RE.test(placeId) ? placeId : '', huvud: bstr(f.huvud, 120).trim(), detalj: bstr(f.detalj, 160).trim() });
+  });
+  return ut;
+}
+async function basAcHamta(q) {
+  const seq = ++bsBasAc.seq;
+  let r;
+  try { r = await bokAdminApi('adressforslag', { q, sessionToken: bsBasAc.sessionToken }); } catch (e) { r = null; }
+  if (seq !== bsBasAc.seq) return;   // äldre svar – man har hunnit skriva vidare
+  const inp = document.getElementById('bsBasadress');
+  if (!inp || document.activeElement !== inp || inp.value.trim().slice(0, 120) !== q) return;   // fältet lämnat eller texten ändrad – rita inte
+  if (!r || !r.ok) {
+    // Okänd åtgärd (script < 5) → stäng av för den här renderingen; E_RATE/E_NETWORK/E_ABORT/E_INTERNAL → tyst paus 60 s (som sajten); övrigt → dölj tyst
+    const code = r && r.error ? r.error.code : '';
+    if (code === 'E_VALIDATION' && r.error.details && r.error.details.falt && r.error.details.falt.action) bsBasAc.avstangd = true;
+    else if (code === 'E_RATE' || code === 'E_NETWORK' || code === 'E_ABORT' || code === 'E_INTERNAL') bsBasAc.pausTill = Date.now() + AC_PAUS_MS;
+    basAcDolj(); return;
+  }
+  const d = r.data || {};
+  if (d.kalla !== 'places') { bsBasAc.pausTill = Date.now() + AC_PAUS_MS; basAcDolj(); return; }   // ingen nyckel, dagstak/kodgräns nått, Places ej aktiverat eller tillfällig spärr → fritext; nytt försök efter en minut
+  bsBasAc.forslag = normForslag(d); bsBasAc.aktiv = -1;
+  basAcRita();
+}
+function kopplaBasadressForslag(body) {
+  const inp = body.querySelector('#bsBasadress');
+  if (!inp) return;
+  bsBasAc = nyBasAc();
+  inp.addEventListener('input', () => {
+    bsBasAc.placeId = '';   // skriver man vidare efter ett val gäller texten, inte platsen
+    clearTimeout(bsBasAc.timer);
+    const q = inp.value.trim().slice(0, 120);
+    if (q.length < AC_MIN_TECKEN || bsBasAc.avstangd || Date.now() < bsBasAc.pausTill || !bokAnsluten()) { basAcDolj(); return; }
+    if (q === bsBasAc.senasteQ) return;
+    bsBasAc.timer = setTimeout(() => { bsBasAc.senasteQ = q; basAcHamta(q).catch(() => basAcDolj()); }, AC_DEBOUNCE_MS);
+  });
+  inp.addEventListener('keydown', e => {
+    const n = bsBasAc.forslag.length;
+    if (e.key === 'Escape') { if (n) { e.preventDefault(); basAcDolj(); } return; }
+    if (!n) {   // pil ner öppnar listan igen efter Esc (samma q stoppas annars av senasteQ)
+      const q = inp.value.trim().slice(0, 120);
+      if (e.key === 'ArrowDown' && q.length >= AC_MIN_TECKEN && !bsBasAc.avstangd && Date.now() >= bsBasAc.pausTill && bokAnsluten()) { e.preventDefault(); clearTimeout(bsBasAc.timer); bsBasAc.senasteQ = q; basAcHamta(q).catch(() => basAcDolj()); }
+      return;
+    }
+    if (e.key === 'ArrowDown') { e.preventDefault(); bsBasAc.aktiv = (bsBasAc.aktiv + 1) % n; basAcRita(); }
+    else if (e.key === 'ArrowUp') { e.preventDefault(); bsBasAc.aktiv = bsBasAc.aktiv <= 0 ? n - 1 : bsBasAc.aktiv - 1; basAcRita(); }
+    else if (e.key === 'Enter') { e.preventDefault(); if (bsBasAc.aktiv >= 0) basAcValj(bsBasAc.aktiv); else basAcDolj(); }   // Enter utan markering väljer inget – texten gäller
+  });
+  inp.addEventListener('blur', () => { clearTimeout(bsBasAc.timer); bsBasAc.seq++; clearTimeout(bsBasAc.blurTimer); bsBasAc.blurTimer = setTimeout(basAcDolj, AC_BLUR_MS); });   // seq++ gör pågående svar inaktuella; kort fördröjning så ett klick på ett förslag hinner registreras (pekskärm)
+  inp.addEventListener('focus', () => clearTimeout(bsBasAc.blurTimer));
+}
 async function testaBasadress() {
   const adress = document.getElementById('bsBasadress').value.trim().slice(0, 200);
   const hint = document.getElementById('bsBasHint');
   if (!adress) { hint.textContent = 'Ange en adress'; return; }
   if (!bokAnsluten()) { hint.textContent = 'Anslut brevlådan först – geokodningen görs av scriptet'; return; }
   hint.textContent = 'Testar…';
-  const r = await bokAdminApi('geocode', { adress });
+  const placeId = bsBasAc.placeId;   // satt av förslagslistan (steg 2b) – exakt geokodning via place_id; tom = adresstext som förut
+  basAcDolj(); basAcNySession();   // Places-sessionen avslutas i och med geokodningen; nästa inmatning startar en ny
+  const r = await bokAdminApi('geocode', AC_PLACEID_RE.test(placeId) ? { adress, placeId } : { adress });
   if (!r.ok) { hint.textContent = 'Fel: ' + bokFelText(r); return; }
   const d = r.data || {};
   if (d.status === 'ok' && bnum(d.lat) !== null && bnum(d.lng) !== null) {

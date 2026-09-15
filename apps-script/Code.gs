@@ -10,10 +10,11 @@
  *                      reservation, book, kalenderskrivning, notismejl, hello/ping/geocode/release,
  *                      admin-endpoints setup/config-push/calendars-list/inbox-list/ack/reject (M3),
  *                      calendar-preview/rebook/cancel (M4), purge + dailyMaintenance på riktigt (M5),
- *                      bokar-endpoints egen-rebook/egen-cancel/egen-update (steg 2a, SCRIPT_VERSION 4).
+ *                      bokar-endpoints egen-rebook/egen-cancel/egen-update (steg 2a, SCRIPT_VERSION 4),
+ *                      adressforslag + placeId-stöd i geokodningen (steg 2b, SCRIPT_VERSION 5).
  *   Calendar.gs      – readBusy(fran, till), parseIcs, mergeBusy, applyIgnore, buildBusyList(from, to).
- *   Availability.gs  – computeAvailability(req), dayPlan, placeTravel, geocodeAddress(adress), travelMinutes,
- *                      swedishHolidays.
+ *   Availability.gs  – computeAvailability(req), dayPlan, placeTravel, geocodeAddress(adress, { placeId }), hamtaAdressforslag(q, token),
+ *                      travelMinutes, swedishHolidays.
  *
  * Regler som gäller hela filen (spec 4.1, 4.3, 9):
  *   - Inga hemligheter i koden. MAPS_API_KEY, ADMIN_KEY och fil-id:n finns bara i Script Properties.
@@ -27,7 +28,7 @@
 // Konstanter
 // ============================================================
 
-const SCRIPT_VERSION = 4;                       // MIN_SCRIPT_VERSION i index.html/bokning.js jämförs mot denna (4.12); 3 = M5 (purge, dailyMaintenance, nya ping-fält); 4 = steg 2a (egen-rebook/egen-cancel/egen-update, hello.egna med kanAndras)
+const SCRIPT_VERSION = 5;                       // MIN_SCRIPT_VERSION i index.html/bokning.js jämförs mot denna (4.12); 3 = M5 (purge, dailyMaintenance, nya ping-fält); 4 = steg 2a (egen-rebook/egen-cancel/egen-update, hello.egna med kanAndras); 5 = steg 2b (adressforslag via Places, placeId i geokodning – valfritt: MIN_SCRIPT_VERSION förblir 4)
 const TZ = 'Europe/Stockholm';
 const APP_URL = 'https://speeedfreeak.github.io/telexia-pipeline/';   // länk i notismejlet (4.9)
 const MAX_BODY_BYTES = 16384;                   // body kontrolleras före JSON.parse (4.3)
@@ -40,6 +41,10 @@ const KUND_ID_RE = /^[A-Za-z0-9_-]{1,64}$/;     // extrafalt._kundId (CJ-bokare,
 const FIL_ID_RE = /^[A-Za-z0-9_-]{1,128}$/;     // Drive-fil-id (setup/Script Properties) – bara teckenklass, ingen längdgissning
 const ENHET_ID_RE = /^[A-Za-z0-9_-]{1,64}$/;    // enhetId i ack (appens telexia_pipeline_device_v1)
 const PLAN_ID_RE = /^[A-Za-z0-9_-]{1,64}$/;     // id:n i ack-planen (leadId/eventId/kundId/kontaktId)
+const PLACE_ID_RE = /^[A-Za-z0-9_-]{10,300}$/;  // Google place-id från adressforslag (steg 2b) – valfritt bredvid adress i availability/reserve/book/geocode/egen-update/egen-rebook/rebook
+const SESSION_TOKEN_RE = /^[A-Za-z0-9_-]{8,36}$/;   // Places-sessionstoken (klientens crypto.randomUUID(), 36 tecken). Googles gräns: URL-/filnamnssäker base64, högst 36 tecken (annars INVALID_ARGUMENT) – ogiltig → E_VALIDATION
+const ADRESSFORSLAG_Q_MIN = 3;                  // q kortare än så → tom lista utan anrop (7.x: sidan frågar först vid 3 tecken)
+const ADRESSFORSLAG_Q_MAX = 120;
 const INBOX_STATUSAR = ['ny', 'importerad', 'avvisad', 'avbokad'];
 const INBOX_LIST_DEFAULT = 200;
 const INBOX_LIST_MAX = 500;
@@ -71,6 +76,10 @@ const MAX_BOOK_PER_KOD_D = 15;      // dito per dag
 const MAX_BOOK_GLOBAL_D = 40;       // dito globalt per dag (Script Property book_count_<YYYYMMDD>)
 const MAX_GEOCODE_PER_KOD_H = 20;   // E_RATE typ 'geocode' (bara nya adresser räknas, aldrig cache-träffar)
 const MAX_ADRESSER_PER_KOD_D = 20;  // unika adresser per kod och dag, E_RATE typ 'adresser'
+// Adressförslag (steg 2b): egna räknare per kod (ac:m/ac:d, även admin som 'admin') – utanför RL_PER_MIN/RL_PER_H eftersom
+// autocomplete skickar ett anrop per tangenttryck (debounce 300 ms). Varje anrop räknas, även cache-träffar. E_RATE typ 'adressforslag'.
+const MAX_ADRESSFORSLAG_PER_KOD_M = 60;
+const MAX_ADRESSFORSLAG_PER_KOD_D = 600;
 // Bokarens egna ändringar (steg 2a: egen-rebook/egen-cancel/egen-update) räknas som bokningar men i egna räknare
 // (andr:h/andr:d per kod, ingen global dagsräknare – ping.bokningarIdag ska bara räkna nya bokningar). E_RATE typ 'andringar'.
 const MAX_ANDR_PER_KOD_H = MAX_BOOK_PER_KOD_H;
@@ -578,7 +587,9 @@ function badKod() {
 }
 
 // Returnerar { bokare, config }; sätter ctx.bokareId/ctx.kodKey; tillämpar anropsgränser per kod.
-function authBokare(req, ctx) {
+// opts.anropsgrans === false (adressforslag, steg 2b): de allmänna räknarna rl:<kod>:m/h rörs inte – endpointen har egna gränser
+// (MAX_ADRESSFORSLAG_PER_KOD_M/D), annars skulle ett adressfälts tangenttryck äta upp bokarens 30 anrop/min för availability/book.
+function authBokare(req, ctx, opts) {
   const k = req.k;
   if (typeof k !== 'string' || !KOD_RE.test(k)) badKod();
   const config = loadConfig(ctx);
@@ -586,8 +597,10 @@ function authBokare(req, ctx) {
   if (!bokare) badKod();
   ctx.bokareId = String(bokare.id || '');
   ctx.kodKey = kodKey(bokare);
-  if (bumpCounter('rl:' + ctx.kodKey + ':m' + minuteWindow(), 120) > RL_PER_MIN) fel('E_RATE', undefined, { typ: 'anrop' });
-  if (bumpCounter('rl:' + ctx.kodKey + ':h' + hourWindow(), TTL_H_S) > RL_PER_H) fel('E_RATE', undefined, { typ: 'anrop' });
+  if (!(opts && opts.anropsgrans === false)) {
+    if (bumpCounter('rl:' + ctx.kodKey + ':m' + minuteWindow(), 120) > RL_PER_MIN) fel('E_RATE', undefined, { typ: 'anrop' });
+    if (bumpCounter('rl:' + ctx.kodKey + ':h' + hourWindow(), TTL_H_S) > RL_PER_H) fel('E_RATE', undefined, { typ: 'anrop' });
+  }
   return { bokare: bokare, config: config };
 }
 
@@ -673,6 +686,13 @@ function checkAdressLimits(ctx, adress) {
 function geocodeTimKey(ctx) { return 'geo:h:' + ctx.kodKey + ':' + hourWindow(); }
 // Stegas efter geokodning när geocodeAddress rapporterar nyttAnrop:true (ett riktigt Geocoding-API-anrop).
 function countGeocodeCall(ctx) { if (ctx && ctx.kodKey) bumpCounter(geocodeTimKey(ctx), TTL_H_S); }
+// Adressförslag (steg 2b): 60/min och 600/dag per kod (admin räknas som koden 'admin'), räknas upp vid varje anrop – även
+// cache-träffar och tomma svar – så att gränsen är en ren anropsgräns. Nås den → E_RATE typ 'adressforslag' (sidan döljer listan tyst).
+function checkAdressforslagLimits(kod) {
+  const idag = todayStr();
+  if (bumpCounter('ac:m:' + kod + ':' + minuteWindow(), 120) > MAX_ADRESSFORSLAG_PER_KOD_M) fel('E_RATE', undefined, { typ: 'adressforslag' });
+  if (bumpCounter('ac:d:' + kod + ':' + idag, TTL_D_S) > MAX_ADRESSFORSLAG_PER_KOD_D) fel('E_RATE', undefined, { typ: 'adressforslag' });
+}
 
 // ============================================================
 // Reservationer (4.8, 5.11) – lever bara i CacheService.
@@ -746,6 +766,12 @@ function strField(v, namn, max, obligatorisk) {
   if (s.length > max) valideringsfel({ [namn]: 'För långt värde' });
   if (obligatorisk && !s) valideringsfel({ [namn]: 'Obligatoriskt' });
   return s;
+}
+// Valfritt place-id (steg 2b) bredvid adress: utelämnat/tomt → ''; fel typ eller mönster → E_VALIDATION falt.placeId (statisk text).
+function placeIdField(v) {
+  if (v === undefined || v === null || v === '') return '';
+  if (typeof v !== 'string' || !PLACE_ID_RE.test(v)) valideringsfel({ placeId: 'Ogiltigt värde' });
+  return v;
 }
 function datumField(v, namn) {
   if (typeof v !== 'string' || !DATUM_RE.test(v) || isNaN(new Date(v + 'T12:00:00Z').getTime())) valideringsfel({ [namn]: 'Ogiltigt datum' });
@@ -826,13 +852,14 @@ function bokningarKalenderId(inst) {
 
 // Geokodning via Availability.gs (cachekedja + Maps). Fel → 'okand' (schablon), aldrig avbruten bokning.
 // ctx (bokare) → timräknaren MAX_GEOCODE_PER_KOD_H stegas bara när ett riktigt API-anrop gjordes (nyttAnrop).
+// placeId (valfritt, steg 2b – redan validerat med placeIdField/validateBookFalt) → Geocoding med place_id (exakt; samma Geocoding-SKU).
 // Anropas före låset i reserve/book och före computeAvailability i availability: värmer CacheService så att
-// geocodeAddress inuti beräkningen/låset blir cache-träff.
-function geoForBooking(adress, ctx) {
+// geocodeAddress inuti beräkningen/låset (som bara har adressen) blir cache-träff.
+function geoForBooking(adress, ctx, placeId) {
   const tom = { lat: null, lng: null, formaterad: '', status: 'okand' };
   if (!adress) return Object.assign(tom, { status: 'saknas' });
   try {
-    const g = geocodeAddress(adress);
+    const g = geocodeAddress(adress, placeId ? { placeId: placeId } : undefined);
     if (g && g.nyttAnrop === true) countGeocodeCall(ctx);
     if (g && g.status === 'ok' && typeof g.lat === 'number' && typeof g.lng === 'number')
       return { lat: g.lat, lng: g.lng, formaterad: str(g.formaterad), status: 'ok' };
@@ -1022,13 +1049,14 @@ function handleAvailability(req, ctx) {
   if (daysBetween(from, to) > 14) valideringsfel({ to: 'Högst 14 dagar per förfrågan' });
   if (from > horisontTomDatum(inst)) valideringsfel({ from: 'Utanför bokningshorisonten' });
   const adress = strField(req.adress, 'adress', MAXLEN.adress, false);
+  const placeId = placeIdField(req.placeId);
   const undanta = honoredUndanta(req.undantaBokningId, bokare);
   const typ = resolveMotestyp(config, bokare, req.motestypId, undanta ? undanta.post : null);
   const egen = getReservation(req.reservationId);
   const reservationId = egen && egen.bokareId === bokare.id ? egen.id : '';
   if (typ.restid && adress) {
     checkAdressLimits(ctx, adress);
-    geoForBooking(adress, ctx);   // geokodar (räknar ev. API-anrop mot timgränsen) → cache-träff i computeAvailability
+    geoForBooking(adress, ctx, placeId);   // geokodar (räknar ev. API-anrop mot timgränsen) → cache-träff i computeAvailability
   }
   return computeAvailability({
     bokare: bokare, config: config, typ: typ, motestypId: typ.id,
@@ -1049,10 +1077,11 @@ function handleReserve(req, ctx) {
   const st = parseStartField(req.start, inst, typ);
   pausCheck(inst, st.datum);
   const adress = typ.restid ? strField(req.adress, 'adress', MAXLEN.adress, false) : '';
+  const placeId = placeIdField(req.placeId);
   let plats = null;
   if (typ.restid && adress) {
     checkAdressLimits(ctx, adress);
-    const g = geoForBooking(adress, ctx);
+    const g = geoForBooking(adress, ctx, placeId);
     plats = { text: adress, lat: g.lat, lng: g.lng, geokodad: g.status === 'ok' };
   }
   const slutIso = toIsoWithOffset(st.datum, minToTid(tidToMin(st.tid) + typ.langdMin));
@@ -1127,6 +1156,11 @@ function validateBookFalt(req, config, bokare, typ, initialFalt) {
 
   // Adress tvingas vid restid, e-post utan restid – oavsett formulärets inställning (3.5, A24).
   const adress = text(req.adress, 'adress', MAXLEN.adress, typ.restid === true || kravs('adress'));
+  // placeId (steg 2b, valfritt): från adressforslag – bara mönstret kontrolleras; används för geokodning, sparas inte på posten.
+  let placeId = '';
+  if (req.placeId !== undefined && req.placeId !== null && req.placeId !== '') {
+    if (typeof req.placeId === 'string' && PLACE_ID_RE.test(req.placeId)) placeId = req.placeId; else falt.placeId = 'Ogiltigt värde';
+  }
   const kontaktNamn = text(kontakt.namn, 'kontaktperson', MAXLEN.kontaktperson, kravs('kontaktperson'));
   const telefon = text(kontakt.telefon, 'telefon', MAXLEN.telefon, kravs('telefon'));
   if (!falt.telefon && kravs('telefon') && normalizePhone(telefon).length < 8) falt.telefon = 'Ange ett giltigt telefonnummer';
@@ -1169,7 +1203,7 @@ function validateBookFalt(req, config, bokare, typ, initialFalt) {
     varden: {
       kund: { namn: kundnamn, orgnr: orgnr },
       kontakt: { namn: kontaktNamn, telefon: telefon, epost: epost },
-      adress: adress, notering: notering, extrafalt: extrafalt
+      adress: adress, notering: notering, extrafalt: extrafalt, placeId: placeId
     }
   };
 }
@@ -1189,7 +1223,7 @@ function handleBook(req, ctx) {
   // Geokodning och dagsberäkning (utan färsk kalenderläsning) FÖRE låset värmer cacherna: geocodeAddress, ICS,
   // ankare och Distance Matrix blir cache-träffar inuti låset, som då bara gör Calendar.Events.list + Drive.
   // updateCacheFile (Availability.gs) tar INGET lås – nästla aldrig withScriptLock.
-  const geo = typ.restid ? geoForBooking(input.adress, ctx) : { lat: null, lng: null, formaterad: '', status: 'saknas' };
+  const geo = typ.restid ? geoForBooking(input.adress, ctx, input.placeId) : { lat: null, lng: null, formaterad: '', status: 'saknas' };
   const egenFore = getReservation(reservationId);
   warmSlotCaches(bokare, config, typ, input.adress, st, egenFore && egenFore.bokareId === bokare.id ? egenFore.id : ownReservationId(ctx));
 
@@ -1401,9 +1435,37 @@ function handleGeocode(req, ctx) {
   else badKod();
   const adress = strField(req.adress, 'adress', MAXLEN.adress, true);
   if (adress.length < 3) valideringsfel({ adress: 'Ange en adress' });
+  const placeId = placeIdField(req.placeId);
   if (bokare) checkAdressLimits(ctx, adress);
-  const g = geoForBooking(adress, bokare ? ctx : null);
+  const g = geoForBooking(adress, bokare ? ctx : null, placeId);
   return { status: g.status === 'ok' ? 'ok' : 'okand', lat: g.lat, lng: g.lng, formaterad: g.formaterad };
+}
+
+// ============================================================
+// Endpoint: adressforslag (steg 2b) – k eller adminKey. Autocomplete via Places API (New) i Availability.gs (hamtaAdressforslag).
+// In:  { k | adminKey, q, sessionToken? } – q trimmad 3–120 tecken (< 3 → { forslag:[], kalla:'ingen' } utan anrop och utan fel;
+//      > 120 eller fel typ → E_VALIDATION falt.q); sessionToken = klientens UUID (SESSION_TOKEN_RE, ≤ 36 tecken) – skickas vidare till
+//      Places (sessionering – ger ingen rabatt så länge sessionen inte avslutas med Place Details (New), se README), aldrig till Geocoding.
+// Ut:  { forslag:[{ text, placeId, huvud, detalj }], kalla:'places'|'ingen'[, varning:'places'] } – max 5 förslag; ingen nyckel,
+//      dagstak (MAPS_DAILY_CAP) eller Places-fel → tom lista med kalla 'ingen' (sidan/appen faller tillbaka på fritext, aldrig felruta);
+//      403/REQUEST_DENIED → varning:'places' + maps:varning "Places API ej aktiverat" (ping.mapsVarning; skrivs inte över en
+//      Geocoding/Distance Matrix-varning) och places:nekad 60 s (inga nya Places-anrop under tiden, samma svar).
+// Gränser: egna räknare 60/min och 600/dag per kod (E_RATE typ 'adressforslag'), utanför de allmänna anropsgränserna
+// (authBokare med anropsgrans:false); varje Places-anrop räknas som 1 element mot MAPS_DAILY_CAP. Cache 6 h per normaliserad q.
+// Loggraden bär bara action/bokareId/ok/code/ms – aldrig q eller förslag.
+// ============================================================
+
+function handleAdressforslag(req, ctx) {
+  let kod = '';
+  if (typeof req.k === 'string' && req.k) { authBokare(req, ctx, { anropsgrans: false }); kod = ctx.kodKey; }
+  else if (typeof req.adminKey === 'string' && req.adminKey) { authAdmin(req, ctx); kod = 'admin'; }
+  else badKod();
+  const q = strField(req.q, 'q', ADRESSFORSLAG_Q_MAX, false);
+  const sessionToken = req.sessionToken === undefined || req.sessionToken === null || req.sessionToken === '' ? '' : req.sessionToken;
+  if (sessionToken && (typeof sessionToken !== 'string' || !SESSION_TOKEN_RE.test(sessionToken))) valideringsfel({ sessionToken: 'Ogiltigt värde' });
+  checkAdressforslagLimits(kod);
+  if (q.length < ADRESSFORSLAG_Q_MIN) return { forslag: [], kalla: 'ingen' };
+  return hamtaAdressforslag(q, sessionToken);
 }
 
 // ============================================================
@@ -1511,7 +1573,7 @@ function handleEgenUpdate(req, ctx) {
   let geo = null;
   if (restidBerakning) {
     checkAdressLimits(ctx, nytt.adress);
-    geo = geoForBooking(nytt.adress, ctx);
+    geo = geoForBooking(nytt.adress, ctx, nytt.placeId);
     if (typeof readIcs === 'function') { try { readIcs(config, { farsk: false }); } catch (e2) { /* avgörs under låset */ } }
     try { findSlot(bokare, config, typ, nytt.adress, fromIso(post0.start), '', bokningId, false); } catch (e2) { if (errorCode(e2) === 'E_RATE') throw e2; }
   }
@@ -2067,14 +2129,21 @@ function rebookForbered(req, config, bokare, typ, post0, ctx) {
   const inst = config.installningar;
   const startIso = rebookStartIso(req.start);
   const nyAdress = req.adress === undefined || req.adress === null ? null : strField(req.adress, 'adress', MAXLEN.adress, false);
+  const placeId = nyAdress !== null ? placeIdField(req.placeId) : '';   // placeId hör till en NY adress (steg 2b); ren tidsflytt ignorerar det
   const st = parseStartField(startIso, inst, typ);
   const adress = nyAdress !== null ? nyAdress : str(post0.adress);
   if (typ.restid && !adress) valideringsfel({ adress: 'Obligatoriskt' });
   const slutIso = toIsoWithOffset(st.datum, minToTid(tidToMin(st.tid) + typ.langdMin));
   const reservationId = rebookReservationId(req.reservationId, config, post0);
-  // Adress-/geokodgränserna gäller NYA adresser: en ren tidsflytt (adress utelämnad eller samma som postens) räknas inte (cache-träff).
-  if (ctx && typ.restid && nyAdress !== null && limitAdressNyckel(nyAdress) !== limitAdressNyckel(str(post0.adress))) checkAdressLimits(ctx, adress);
-  const geo = typ.restid ? geoForBooking(adress, ctx) : { lat: null, lng: null, formaterad: '', status: 'saknas' };
+  // Adress-/geokodgränserna gäller NYA adresser: en ren tidsflytt (adress utelämnad eller samma som postens) räknas inte.
+  const sammaAdress = nyAdress === null || limitAdressNyckel(nyAdress) === limitAdressNyckel(str(post0.adress));
+  if (ctx && typ.restid && !sammaAdress) checkAdressLimits(ctx, adress);
+  // Ren tidsflytt utan nytt placeId: postens egen geokodning (exakt – ev. via place_id vid bokningen) återanvänds och primar
+  // körningens memo, så att findSlot inte geokodar adresstexten på nytt (steg 2b: place_id-resultat cachas inte under texten).
+  let geo;
+  if (!typ.restid) geo = { lat: null, lng: null, formaterad: '', status: 'saknas' };
+  else if (sammaAdress && !placeId && post0.geo && geoPrimeMemo_(adress, post0.geo)) geo = { lat: post0.geo.lat, lng: post0.geo.lng, formaterad: str(post0.geo.formaterad), status: 'ok' };
+  else geo = geoForBooking(adress, ctx, placeId);
   if (typeof readIcs === 'function') { try { readIcs(config, { farsk: false }); } catch (e) { /* avgörs under låset */ } }
   try { findSlot(bokare, config, typ, adress, st, reservationId, str(post0.bokningId), false); } catch (e) { if (errorCode(e) === 'E_RATE') throw e; }
   return { st: st, adress: adress, slutIso: slutIso, reservationId: reservationId, geo: geo };
@@ -2475,6 +2544,7 @@ const HANDLERS = {
   'release': handleRelease,
   'book': handleBook,
   'geocode': handleGeocode,
+  'adressforslag': handleAdressforslag,
   'egen-rebook': handleEgenRebook,
   'egen-cancel': handleEgenCancel,
   'egen-update': handleEgenUpdate,

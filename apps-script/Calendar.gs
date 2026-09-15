@@ -613,7 +613,10 @@ function kalUnik(arr) { return arr.filter((x, i) => x && arr.indexOf(x) === i); 
 /**
  * mergeBusy(list) → ny lista utan dubbletter (spec 4.6 "Dubblettsammanslagning").
  * Den sammanslagna posten får vinnarens identitet, unionen av tiden (hellre för mycket hinder än dubbelbokning),
- * plats från den som har plats, cooldown = max, räknas om någon räknas, `sammanslagenMed` = förlorarnas id.
+ * plats från den som har plats – en redan geokodad plats (inkorgspostens geo, lat/lng från bokningens geokodning) före en ren
+ * platstext (kalenderhändelsens location), så att bokningens ankare inte geokodas om per text (steg 2b: place_id-resultatet cachas
+ * inte under adresstexten – utan denna regel gjorde varje bokad adress ett extra Geocoding-anrop som ankare);
+ * cooldown = max, räknas om någon räknas, `sammanslagenMed` = förlorarnas id.
  */
 function mergeBusy(list) {
   const items = (list || []).map(x => Object.assign({}, x, {
@@ -629,7 +632,7 @@ function mergeBusy(list) {
       const v = kalVinnare(other, cur), l = v === other ? cur : other;
       const merged = Object.assign({}, v, {
         startMin: Math.min(v.startMin, l.startMin), slutMin: Math.max(v.slutMin, l.slutMin),
-        plats: v.hasPlace ? v.plats : (l.hasPlace ? l.plats : v.plats),
+        plats: v.plats.geokodad ? v.plats : (l.plats.geokodad ? l.plats : (v.hasPlace ? v.plats : (l.hasPlace ? l.plats : v.plats))),
         hasPlace: v.hasPlace || l.hasPlace,
         cooldownMin: Math.max(v.cooldownMin | 0, l.cooldownMin | 0),
         ignore: v.ignore && l.ignore, preliminar: v.preliminar && l.preliminar, raknad: v.raknad || l.raknad,

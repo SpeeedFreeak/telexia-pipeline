@@ -8,8 +8,9 @@
 //      (module.exports längst ned) – testfallen i spec 5.14 finns i runAvailabilityTests().
 //   2. Wrappers mot Google-tjänster: CacheService, Script Properties (via Code.gs), Drive-cachefilen, Geocoding API,
 //      Distance Matrix. Isolerade så att de rena funktionerna aldrig rör dem.
-//   3. Ingångar som Code.gs anropar: computeAvailability(req) (kastar ApiError-kompatibla fel), geocodeAddress(adress),
-//      travelMinutes(a, b, restidCfg), readIcsReserv()/writeIcsReserv(obj) (Calendar.gs), swedishHolidays(year).
+//   3. Ingångar som Code.gs anropar: computeAvailability(req) (kastar ApiError-kompatibla fel), geocodeAddress(adress, opts?),
+//      hamtaAdressforslag(q, sessionToken) (steg 2b, Places API (New) Autocomplete), travelMinutes(a, b, restidCfg),
+//      readIcsReserv()/writeIcsReserv(obj) (Calendar.gs), swedishHolidays(year).
 //
 // Delas med andra filer (deklareras INTE här – dubbla const/function i Apps Script bryter projektet):
 //   Code.gs      tidshjälpen APP_TZ, SV_WEEKDAYS, SV_MONTHS, tzParts, todayStr, addDays, weekdayOf, tzOffsetMinutes,
@@ -31,6 +32,12 @@ const AVAIL_CACHE_TTL_GEO_OK_S = 21600;
 const AVAIL_CACHE_TTL_GEO_OKAND_S = 3600;      // ej tolkad adress: kort cache så upprepade anrop inte kostar
 const AVAIL_MAPS_BLOCK_S = 60;                 // OVER_QUERY_LIMIT → inga nya Maps-anrop i 60 s (CacheService maps:block)
 const AVAIL_MAPS_VARNING_S = 21600;            // maps:varning (ping läser den ur CacheService; 6 h är CacheService-max, spec säger 24 h)
+const AVAIL_AC_CACHE_S = 21600;                // adressförslag per normaliserad fråga (steg 2b säger 24 h – CacheService-max är 6 h)
+const AVAIL_AC_ANTAL = 5;                      // högst 5 förslag per svar (bokningssidan visar max 5)
+const AVAIL_AC_TEXT_MAX = 160;                 // klippning av förslagstexter (text/huvud/detalj) – 5 förslag × (3×160 + placeId ≤ 300) < 5 KB per cachepost
+const AVAIL_PLACE_ID_RE = /^[A-Za-z0-9_-]{10,300}$/;   // samma mönster som PLACE_ID_RE i Code.gs (deklareras inte om där)
+const AVAIL_PLACES_URL = 'https://places.googleapis.com/v1/places:autocomplete';
+const AVAIL_PLACES_VARNING = 'Places API ej aktiverat';   // maps:varning-text (statisk – ping visar den i Drift-panelen)
 const AVAIL_STATISKA_FEL = {                   // E_VALIDATION-texter är statiska och ekar aldrig indata (spec 9.6)
   datum: 'Ogiltigt datumintervall',
   horisont: 'Datumet ligger utanför bokningshorisonten',
@@ -506,7 +513,11 @@ function mapsHanteraToppstatus(status, errorMessage) {
 // annars tiotals Drive-omgångar.
 let AVAIL_FIL_MEMO = null;
 let AVAIL_GEOKOD_PENDING = {};
-function availResetMemo_() { AVAIL_FIL_MEMO = null; AVAIL_GEOKOD_PENDING = {}; }
+// AVAIL_GEO_MEMO: körningens geokodningsresultat per normaliserad adressnyckel. Behövs för placeId-flödet (steg 2b): reserve/book/
+// availability geokodar med placeId FÖRE låset/beräkningen, och computeAvailability/findSlot/warmSlotCaches (som bara har adressen)
+// träffar memot i samma körning utan att resultatet cachas under den skrivna adressen (se geocodeAddress).
+let AVAIL_GEO_MEMO = {};
+function availResetMemo_() { AVAIL_FIL_MEMO = null; AVAIL_GEOKOD_PENDING = {}; AVAIL_GEO_MEMO = {}; }
 // Skriver körningens nya geokodposter till cache-filen (färsk läsning + en skrivning). → true om filen skrevs. Kastar aldrig.
 function availFlushGeokod_() {
   const nycklar = Object.keys(AVAIL_GEOKOD_PENDING);
@@ -557,51 +568,203 @@ function normalizeAdressKey(adress) {
     .replace(/\bsverige\b/g, ' ')
     .replace(/\s+/g, ' ').trim();
 }
-// geocodeAddress(adress) → { status:'ok', lat, lng, formaterad } | { status:'okand' } | { status:'saknas' }.
-// Cachekedja: CacheService geo:<hash> → cache-filens geokod[nyckel] → Geocoding API (region=se, components=country:SE).
+// geocodeAddress(adress, opts?) → { status:'ok', lat, lng, formaterad } | { status:'okand' } | { status:'saknas' }.
+// Cachekedja (adress): körningens memo (AVAIL_GEO_MEMO) → CacheService geo:<hash(nyckel)> → cache-filens geokod[nyckel]
+// → Geocoding API (region=se, components=country:SE). Resultatet cachas under den skrivna adressens nyckel (Google tolkade texten).
+// opts.placeId (steg 2b, från adressforslag): Geocoding API anropas med place_id=… i stället för address=… – exakt träff, ingen
+// tolkning (samma Geocoding-SKU som adressgeokodning – vinsten är exakthet, inte pris). Kedja: memo → CacheService geo:pid:<hash(placeId)>
+// (6 h) → API. Resultatet cachas ALDRIG under den SKRIVNA adressens nyckel (varken CacheService eller cache-filen): adress och placeId
+// kommer båda från klienten och scriptet kan inte verifiera att texten hör till id:t – annars kunde en bokare (eller en klientbugg)
+// skicka { adress:'Kungsgatan 1, Stockholm', placeId:<id för Kiruna> } och binda den adresstexten till fel koordinater för ALLA bokare
+// (cache-filen läses för alltid). I stället cachas: (a) geo:pid (id → koordinater är Googles sanning), (b) den FORMATERADE adressens
+// nyckel (Googles egen text) i CacheService och cache-filen – steg 2b: "cache-nyckeln i cache-filen blir den formaterade adressen",
+// (c) körningens memo under den skrivna nyckeln så att computeAvailability/findSlot/warmSlotCaches i SAMMA request (som bara har
+// adressen) träffar utan nytt anrop; nästa request (availability → reserve → book) bär placeId igen → geo:pid-träff.
+// Inaktuellt place-id (Google: place-id:n kan bli inaktuella; INVALID_REQUEST/NOT_FOUND) → adressgeokodning i samma anrop (ett
+// element till) – det resultatet är Googles tolkning av texten och cachas som vanlig adressgeokodning.
 // Per-kod-gränserna (20 geokodningar/h, 20 adresser/dag) kontrolleras av Code.gs (checkAdressLimits) före anropet;
 // här räknas bara dagstaket MAPS_DAILY_CAP. Kastar aldrig – fel ger 'okand' (schablon).
-function geocodeAddress(adress) {
+function geocodeAddress(adress, opts) {
+  const placeId = opts && typeof opts.placeId === 'string' && AVAIL_PLACE_ID_RE.test(opts.placeId) ? opts.placeId : '';
   const key = normalizeAdressKey(adress);
   if (!key) return { status: 'saknas' };
+  const memo = AVAIL_GEO_MEMO[key];
+  if (memo && (memo.status === 'ok' || (memo.status === 'okand' && !placeId))) return memo;
+  if (placeId) return geocodeViaPlaceId_(adress, key, placeId);
   const cacheKey = 'geo:' + sha256hex(key);
   const hit = cacheGetJson(cacheKey);
-  if (hit && (hit.status === 'ok' || hit.status === 'okand')) return hit;
+  if (hit && (hit.status === 'ok' || hit.status === 'okand')) { AVAIL_GEO_MEMO[key] = hit; return hit; }
   const fil = readCacheFileSafe();
   const post = fil && fil.geokod ? fil.geokod[key] : null;
   if (post && post.status === 'ok' && typeof post.lat === 'number' && typeof post.lng === 'number') {
     const ut = { status: 'ok', lat: post.lat, lng: post.lng, formaterad: String(post.formaterad || '') };
     cachePutJson(cacheKey, ut, AVAIL_CACHE_TTL_GEO_OK_S);
+    AVAIL_GEO_MEMO[key] = ut;
     return ut;
   }
   if (!mapsKanAnropa(1)) return { status: 'okand' };
   const svar = geocodeViaApi(adress);
   if (svar.status === 'ok') {
     cachePutJson(cacheKey, svar, AVAIL_CACHE_TTL_GEO_OK_S);
-    const post = { lat: svar.lat, lng: svar.lng, formaterad: svar.formaterad, status: 'ok', ts: availNowIso() };
-    AVAIL_GEOKOD_PENDING[key] = post;                                                     // skrivs av availFlushGeokod_ (doPost)
-    if (AVAIL_FIL_MEMO && AVAIL_FIL_MEMO.geokod && typeof AVAIL_FIL_MEMO.geokod === 'object') AVAIL_FIL_MEMO.geokod[key] = post;
+    AVAIL_GEO_MEMO[key] = svar;
+    geoSparaPost_(key, svar);
   } else if (svar.status === 'okand') {
     cachePutJson(cacheKey, { status: 'okand' }, AVAIL_CACHE_TTL_GEO_OKAND_S);
+    AVAIL_GEO_MEMO[key] = { status: 'okand' };
   }
   // nyttAnrop:true = Geocoding-API:t anropades (Code.gs räknar MAX_GEOCODE_PER_KOD_H bara på sådana; cachas aldrig).
   return Object.assign({ nyttAnrop: true }, svar);
 }
+// place_id-grenen av geocodeAddress (se kommentaren ovan). key = den skrivna adressens normaliserade nyckel (bara memo).
+function geocodeViaPlaceId_(adress, key, placeId) {
+  const pidKey = 'geo:pid:' + sha256hex(placeId);
+  const hit = cacheGetJson(pidKey);
+  if (hit && hit.status === 'ok' && typeof hit.lat === 'number' && typeof hit.lng === 'number') { AVAIL_GEO_MEMO[key] = hit; return hit; }
+  if (!mapsKanAnropa(1)) return { status: 'okand' };
+  const svar = geocodeViaApi(adress, placeId);
+  // Ogiltigt/inaktuellt place-id → en gång till med adressen som förut (vanlig kedja; nyttAnrop gäller redan place_id-anropet).
+  if (svar.placeIdOgiltigt === true) return Object.assign({ nyttAnrop: true }, geocodeAddress(adress));
+  if (svar.status === 'ok') {
+    const ut = { status: 'ok', lat: svar.lat, lng: svar.lng, formaterad: svar.formaterad };
+    cachePutJson(pidKey, ut, AVAIL_CACHE_TTL_GEO_OK_S);
+    AVAIL_GEO_MEMO[key] = ut;
+    const fk = normalizeAdressKey(svar.formaterad);
+    if (fk) {   // Googles formaterade adress → vanlig adresspost (den texten hör bevisligen till koordinaterna)
+      cachePutJson('geo:' + sha256hex(fk), ut, AVAIL_CACHE_TTL_GEO_OK_S);
+      AVAIL_GEO_MEMO[fk] = ut;
+      geoSparaPost_(fk, ut);
+    }
+  }
+  return Object.assign({ nyttAnrop: true }, svar);
+}
+// Primar körningens geokodmemo med en redan känd geokodning – inkorgspostens geo vid ren tidsflytt i rebook/egen-rebook (bokningens
+// egen, exakta geokodning) – så att findSlot/computeAvailability (som bara har adressen) träffar utan Geocoding-anrop. Skriver
+// inget i CacheService eller cache-filen (posten kan ha geokodats via placeId – adresstexten binds inte till koordinaterna).
+// → true om memot primades (geo.status 'ok' med numeriska lat/lng), annars false (anroparen geokodar som vanligt).
+function geoPrimeMemo_(adress, geo) {
+  const key = normalizeAdressKey(adress);
+  if (!key || !geo || geo.status !== 'ok' || typeof geo.lat !== 'number' || typeof geo.lng !== 'number' || !isFinite(geo.lat) || !isFinite(geo.lng)) return false;
+  AVAIL_GEO_MEMO[key] = { status: 'ok', lat: geo.lat, lng: geo.lng, formaterad: String(geo.formaterad || '') };
+  return true;
+}
+// Ny geokodpost till cache-filen (skrivs samlat av availFlushGeokod_ i doPost) + körningens fil-memo.
+function geoSparaPost_(k, svar) {
+  const post = { lat: svar.lat, lng: svar.lng, formaterad: svar.formaterad, status: 'ok', ts: availNowIso() };
+  AVAIL_GEOKOD_PENDING[k] = post;
+  if (AVAIL_FIL_MEMO && AVAIL_FIL_MEMO.geokod && typeof AVAIL_FIL_MEMO.geokod === 'object') AVAIL_FIL_MEMO.geokod[k] = post;
+}
 // Rent API-anrop. Räknar 1 element mot dagstaket oavsett utfall. Fel/undantag → 'okand' (ingen cache).
-function geocodeViaApi(adress) {
-  const url = 'https://maps.googleapis.com/maps/api/geocode/json?address=' + encodeURIComponent(String(adress).slice(0, 200)) +
-    '&region=se&components=country:SE&language=sv&key=' + encodeURIComponent(mapsApiKey());
+// placeId (valfri, redan validerad) → place_id=… (Geocoding API:s "place ID lookup": bara place_id, language och key –
+// region/components hör till adressgeokodning); annars address=… som förut. Nyckeln ligger i URL:en (Geocoding API tar den
+// bara så) och loggas aldrig.
+function geocodeViaApi(adress, placeId) {
+  const url = 'https://maps.googleapis.com/maps/api/geocode/json?' +
+    (placeId ? 'place_id=' + encodeURIComponent(String(placeId)) + '&language=sv'
+             : 'address=' + encodeURIComponent(String(adress).slice(0, 200)) + '&region=se&components=country:SE&language=sv') +
+    '&key=' + encodeURIComponent(mapsApiKey());
   let json = null;
   try {
     addMapsElements(1);
     const res = UrlFetchApp.fetch(url, { muteHttpExceptions: true, followRedirects: true });
     json = JSON.parse(res.getContentText());
   } catch (e) { return { status: 'okand' }; }
-  if (!json || mapsHanteraToppstatus(json.status, json.error_message)) return { status: 'okand' };
+  if (!json) return { status: 'okand' };
+  // place_id som Google inte känner igen svarar INVALID_REQUEST/NOT_FOUND (inaktuellt id) – ingen "Nyckeln avvisad"-varning,
+  // geocodeAddress faller tillbaka på adressgeokodning.
+  if (placeId && (json.status === 'INVALID_REQUEST' || json.status === 'NOT_FOUND' || json.status === 'ZERO_RESULTS')) return { status: 'okand', placeIdOgiltigt: true };
+  if (mapsHanteraToppstatus(json.status, json.error_message)) return { status: 'okand' };
   const r = json.status === 'OK' && Array.isArray(json.results) && json.results[0];
   const loc = r && r.geometry && r.geometry.location;
   if (!loc || typeof loc.lat !== 'number' || typeof loc.lng !== 'number') return { status: 'okand' };
   return { status: 'ok', lat: loc.lat, lng: loc.lng, formaterad: String(r.formatted_address || '').replace(/[<>]/g, ' ').slice(0, 200) };
+}
+
+// --- Adressförslag via Places API (New) Autocomplete (steg 2b) ---
+// hamtaAdressforslag(q, sessionToken) → { forslag:[{ text, placeId, huvud, detalj }], kalla:'places'|'ingen'[, varning:'places'] }.
+// Kedja: CacheService ac:<hash(normaliserad q)> (6 h) → Places (räknas som 1 element mot MAPS_DAILY_CAP, som geokodning).
+// Ingen nyckel, dagstak nått, block (429, 60 s) eller fel → { forslag:[], kalla:'ingen' } – aldrig ett fel till klienten (sidan
+// faller tillbaka på fritext). 403/PERMISSION_DENIED (Places API (New) inte aktiverat, eller nyckeln API-begränsad utan Places)
+// → dessutom varning:'places', CacheService maps:varning = AVAIL_PLACES_VARNING (ping.mapsVarning → Drift-panelen; en befintlig
+// Geocoding/Distance Matrix-varning "Nyckeln avvisad …" skrivs INTE över – den är allvarligare och gäller även restiden) och
+// places:nekad i 60 s: under tiden svarar scriptet samma sak utan nytt Places-anrop (varje klients minutförsök skulle annars göra
+// ett nekat anrop som räknas mot MAPS_DAILY_CAP). q som normaliseras till tomt (t.ex. 'Sverige', '...') → tom lista med kalla
+// 'places' när nyckel finns (= vanligt "inga träffar"; 'ingen' får klienterna att pausa/stänga av förslagen).
+// Per-kod-gränserna (60/min, 600/dag) kontrolleras av Code.gs (handleAdressforslag) före anropet. Kastar aldrig; q loggas aldrig.
+function hamtaAdressforslag(q, sessionToken) {
+  const key = normalizeAdressKey(q);
+  if (!key) return { forslag: [], kalla: mapsApiKey() ? 'places' : 'ingen' };
+  const cacheKey = 'ac:' + sha256hex(key);
+  const hit = cacheGetJson(cacheKey);
+  if (hit && Array.isArray(hit.forslag)) return { forslag: hit.forslag, kalla: 'places' };
+  if (availCache().get('places:nekad')) return { forslag: [], kalla: 'ingen', varning: 'places' };
+  if (!mapsApiKey() || availCache().get('places:block') || !mapsKanAnropa(1)) return { forslag: [], kalla: 'ingen' };
+  const svar = placesAutocomplete_(q, sessionToken);
+  if (svar.status === 'ok') {
+    cachePutJson(cacheKey, { forslag: svar.forslag }, AVAIL_AC_CACHE_S);
+    return { forslag: svar.forslag, kalla: 'places' };
+  }
+  if (svar.status === 'nekad') {
+    try {
+      const nu = availCache().get('maps:varning');
+      if (!nu || nu === AVAIL_PLACES_VARNING) mapsSetVarning(AVAIL_PLACES_VARNING);
+      availCache().put('places:nekad', '1', AVAIL_MAPS_BLOCK_S);
+    } catch (e) {}
+    return { forslag: [], kalla: 'ingen', varning: 'places' };
+  }
+  if (svar.status === 'kvot') { try { availCache().put('places:block', '1', AVAIL_MAPS_BLOCK_S); } catch (e) {} }
+  return { forslag: [], kalla: 'ingen' };
+}
+// Rent API-anrop mot Places API (New) – isolerat så att det kan stubbas. Räknar 1 element mot dagstaket oavsett utfall.
+// → { status:'ok', forslag:[…] } | { status:'nekad' } (403/PERMISSION_DENIED/REQUEST_DENIED) | { status:'kvot' } (429) | { status:'fel' }.
+// Fältnamn enligt Googles dokumentation (Places API (New) › "Autocomplete (New)" › Place Autocomplete requests/responses):
+//   POST https://places.googleapis.com/v1/places:autocomplete, header X-Goog-Api-Key: <nyckel> (aldrig i URL:en),
+//   Content-Type: application/json, body { input, includedRegionCodes:['se'], languageCode:'sv', sessionToken? }
+//   (sessionToken = klientens UUID, ≤ 36 tecken; samma token för alla tangenttryck i en session. OBS: sessionen avslutas bara av
+//   Place Details (New)/Address Validation – Geocoding gör det inte, så i dagens design faktureras varje anrop per förfrågan; se README).
+//   Svar: { suggestions:[ { placePrediction:{ place:'places/<id>', placeId, text:{ text, matches }, structuredFormat:{ mainText:{ text },
+//   secondaryText:{ text } }, types:[…] } } ] } – tomt objekt {} utan träffar. Fel: HTTP 4xx/5xx med { error:{ code, message,
+//   status:'PERMISSION_DENIED'|'INVALID_ARGUMENT'|'RESOURCE_EXHAUSTED'|… } }. Ingen X-Goog-FieldMask krävs för autocomplete.
+//   Googles feltext ekas aldrig till klienten (statisk varning) och loggas inte.
+function placesAutocomplete_(q, sessionToken) {
+  const body = { input: String(q).slice(0, 120), includedRegionCodes: ['se'], languageCode: 'sv' };
+  if (typeof sessionToken === 'string' && sessionToken) body.sessionToken = sessionToken;
+  let code = 0, json = null;
+  try {
+    addMapsElements(1);
+    const res = UrlFetchApp.fetch(AVAIL_PLACES_URL, {
+      method: 'post', contentType: 'application/json', payload: JSON.stringify(body),
+      headers: { 'X-Goog-Api-Key': mapsApiKey() }, muteHttpExceptions: true, followRedirects: false
+    });
+    code = Number(res.getResponseCode()) || 0;
+    json = JSON.parse(res.getContentText() || '{}');
+  } catch (e) { return { status: 'fel' }; }
+  const felStatus = json && json.error ? String(json.error.status || '') : '';
+  if (code === 403 || felStatus === 'PERMISSION_DENIED' || (json && json.status === 'REQUEST_DENIED')) return { status: 'nekad' };
+  if (code === 429 || felStatus === 'RESOURCE_EXHAUSTED' || (json && json.status === 'OVER_QUERY_LIMIT')) return { status: 'kvot' };
+  if (code !== 200 || !json || typeof json !== 'object') return { status: 'fel' };
+  const rensa = v => String(v || '').replace(/[<>]/g, ' ').replace(/[\u0000-\u001F\u007F]/g, '').replace(/\s+/g, ' ').trim().slice(0, AVAIL_AC_TEXT_MAX);
+  const forslag = [];
+  (Array.isArray(json.suggestions) ? json.suggestions : []).forEach(s => {
+    const p = s && s.placePrediction;
+    if (!p || forslag.length >= AVAIL_AC_ANTAL) return;
+    const placeId = typeof p.placeId === 'string' ? p.placeId : (typeof p.place === 'string' ? p.place.replace(/^places\//, '') : '');
+    if (!AVAIL_PLACE_ID_RE.test(placeId)) return;
+    const text = rensa(p.text && p.text.text);
+    if (!text) return;
+    const sf = p.structuredFormat || {};
+    forslag.push({ text: text, placeId: placeId, huvud: rensa(sf.mainText && sf.mainText.text) || text, detalj: rensa(sf.secondaryText && sf.secondaryText.text) });
+  });
+  return { status: 'ok', forslag: forslag };
+}
+// Körs i Apps Script-editorn efter att Places API (New) aktiverats (README, nyckelguiden): loggar status och antal förslag –
+// aldrig nyckeln eller förslagstexterna. Förväntat { status:'ok', antal > 0 }. Räknar 1 element mot MAPS_DAILY_CAP.
+function debugPlaces(q) {
+  const svar = placesAutocomplete_(String(q || 'Storgatan 1'), '');
+  let varning = ''; try { varning = availCache().get('maps:varning') || ''; } catch (e) {}
+  console.log(JSON.stringify({ status: svar.status, antal: svar.status === 'ok' ? svar.forslag.length : 0, nyckel: !!mapsApiKey(), varning: varning }));
+  if (svar.status === 'nekad') console.log('Places API (New) är inte aktiverat i Cloud-projektet eller inte tillåtet på nyckeln (403 PERMISSION_DENIED).');
+  if (!mapsApiKey()) console.log('MAPS_API_KEY saknas i Script Properties.');
+  return svar.status;
 }
 
 // --- Restid via Distance Matrix (spec 5.8, A2) ---
