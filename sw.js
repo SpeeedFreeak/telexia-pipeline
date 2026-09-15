@@ -1,4 +1,4 @@
-const CACHE_NAME = 'telexia-pipeline-v3';
+const CACHE_NAME = 'telexia-pipeline-v4';
 const ASSETS = [
   './',
   './index.html',
@@ -24,6 +24,8 @@ self.addEventListener('activate', (event) => {
 });
 
 self.addEventListener('fetch', (event) => {
+  // Bara egen origin: Drive-API-svar (kunddata) och CDN ska aldrig hamna i Cache Storage
+  if (new URL(event.request.url).origin !== self.location.origin) return;
   if (event.request.method !== 'GET') return;
   event.respondWith(
     fetch(event.request, { cache: 'no-store' })

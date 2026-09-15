@@ -2,6 +2,13 @@
 <html lang="sv">
 <head>
 <meta charset="UTF-8">
+<!-- CSP (spec 9 regel 7): inline-script måste tillåtas (enfilsprincipen) — policyn begränsar främst utflöde.
+     Tesseract.js (OCR) skapar en blob-worker som importScripts från cdn.jsdelivr.net, hämtar wasm-kärnan därifrån
+     och språkdata från tessdata.projectnaptha.com; wasm kräver 'wasm-unsafe-eval'. child-src är fallback för worker-src
+     i äldre Safari (< 15.5) så blob-workern inte blockeras där. -->
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval' https://cdn.jsdelivr.net; worker-src 'self' blob:; child-src 'self' blob:; connect-src 'self' https://www.googleapis.com https://script.google.com https://script.googleusercontent.com https://cdn.jsdelivr.net https://tessdata.projectnaptha.com blob: data:; img-src 'self' data: blob:; style-src 'self' 'unsafe-inline'; frame-src https://redneckengineering.se; object-src 'none'; base-uri 'none'; form-action 'none'">
+<meta name="referrer" content="no-referrer">
+<meta name="robots" content="noindex, nofollow">
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
 <title>Pipeline</title>
 <link rel="manifest" href="manifest.json">
@@ -196,6 +203,7 @@
   .tag-row input[type="color"] { width: 34px; height: 30px; padding: 2px; border: 1px solid #2a2e37; border-radius: 6px; background: #1a1d27; cursor: pointer; }
   .tag-row button { font-size: 12px; padding: 4px 7px; border-radius: 5px; border: 1px solid #2a2e37; background: #1a1d27; color: #d1d5db; cursor: pointer; }
   .tag-row button.danger { color: #f87171; border-color: #7f1d1d; }
+  .tag-row .tag-locked-hint { font-size: 10px; color: #6b7280; line-height: 1.2; flex: 0 1 auto; }
 
   .tag-picker { display: flex; flex-wrap: wrap; gap: 6px; }
   .tag-chip {
@@ -237,6 +245,19 @@
   .agenda-done-btn:hover { border-color: #34d399; color: #34d399; }
   .agenda-item.is-done .agenda-done-btn { border-color: #34d399; color: #34d399; }
 
+  /* Bokningsmodul: tid, mötestyp, notering, NY-badge, restidsvarning (agenda + kort) */
+  .ev-time { font-size: 11px; font-weight: 700; color: #93c5fd; margin-right: 6px; white-space: nowrap; }
+  .mt-badge {
+    display: inline-block; font-size: 10px; font-weight: 600; padding: 1px 7px; border-radius: 10px; margin-left: 6px;
+    background: #1a1d27; border: 1px solid #3b82f6; color: #cbd5e1; white-space: nowrap; vertical-align: middle;
+  }
+  .ny-badge {
+    display: inline-block; font-size: 10px; font-weight: 700; padding: 1px 6px; border-radius: 8px; margin-left: 6px;
+    background: #34d399; color: #0f1115; white-space: nowrap; vertical-align: middle;
+  }
+  .ev-warn { font-size: 10px; font-weight: 600; color: #fbbf24; margin-left: 6px; white-space: nowrap; }
+  .ev-note { display: block; font-size: 11px; color: #9ca3af; margin-top: 4px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
   /* Process edit modal — clearer visual border per request */
   .modal.modal-blue { border: 2px solid #3b82f6; box-shadow: 0 0 0 1px rgba(59,130,246,0.25), 0 8px 24px rgba(0,0,0,0.5); }
   /* Quick-add customer modal stacks on top of the process modal */
@@ -260,8 +281,19 @@
   }
   .contact-row { flex-wrap: wrap; align-items: stretch; }
   .contact-row input { flex: 1 1 calc(50% - 3px); width: auto; min-width: 0; }
-  .event-row input[type="text"] { flex: 1 1 auto; min-width: 0; }
+  /* Händelserad: text på egen rad, datum/tid/Utförd/✕ på rad två (alla bredder – modalen är 460 px och tidsfältet
+     skulle annars krympa textfältet till ~58 px på desktop) */
+  .event-row { flex-wrap: wrap; }
+  .event-row input[type="text"] { flex: 1 1 100%; min-width: 0; }
   .event-row input[type="date"] { flex: 0 0 130px; }
+  .event-row input[type="time"] { flex: 0 0 90px; }
+  .event-row input[readonly] { opacity: 0.7; cursor: default; }
+  /* Bokade händelser (bokningsmodulen): etikett + hint på egna rader, avbokad/avvisad genomstruken */
+  .event-row.event-bokad { flex-wrap: wrap; }
+  .event-row .event-booking-label { flex: 1 1 100%; font-size: 11px; font-weight: 600; color: #93c5fd; }
+  .event-row .event-booking-hint { flex: 1 1 100%; font-size: 10px; color: #6b7280; }
+  .event-row.event-avbokad input[type="text"], .event-row.event-avbokad input[type="date"], .event-row.event-avbokad input[type="time"] { text-decoration: line-through; opacity: 0.45; }
+  .event-row.event-avbokad .event-booking-label { color: #f87171; text-decoration: line-through; }
   .event-row label.event-done { display: flex; align-items: center; gap: 4px; font-size: 11px; color: #9ca3af; flex-shrink: 0; white-space: nowrap; }
   .contact-row button, .event-row button { flex-shrink: 0; font-size: 12px; padding: 4px 7px; border-radius: 5px; border: 1px solid #2a2e37; background: #1a1d27; color: #f87171; cursor: pointer; }
   .contact-row button { flex: 0 0 auto; margin-left: auto; }
@@ -333,6 +365,11 @@
     .contact-row { padding: 10px; }
     .contact-row input { font-size: 15px; padding: 9px 10px; }
     .contact-row button { padding: 7px 12px; font-size: 13px; }
+    .event-row input[type="date"] { flex: 1 1 auto; }
+    .event-row input[type="time"] { flex: 0 0 110px; }
+    .ev-time, .ev-note, .event-row .event-booking-label { font-size: 12px; }
+    .mt-badge, .ny-badge, .ev-warn { font-size: 11px; }
+    .tag-row .tag-locked-hint { font-size: 11px; }
   }
 </style>
 </head>
@@ -506,6 +543,11 @@
     <h2 id="customerModalTitle">Kund</h2>
     <input type="hidden" id="customerId">
     <div class="field"><label>Kundnamn</label><input type="text" id="customerNamn"></div>
+    <div class="field">
+      <label>Organisationsnummer</label>
+      <input type="text" id="customerOrgnr" placeholder="NNNNNN-NNNN" maxlength="13" inputmode="numeric" autocomplete="off">
+      <div class="hint" id="customerOrgnrHint" style="display:none;margin:4px 0 0;color:#fca5a5">Ogiltigt organisationsnummer</div>
+    </div>
     <div class="field"><label>Adress</label><input type="text" id="customerAdress" placeholder="Gata, postnummer, ort"></div>
     <div class="field">
       <label>Kontaktpersoner</label>
@@ -549,6 +591,11 @@
       <span class="ai-status" id="custQuickOcrStatus"></span>
     </div>
     <div class="field" style="margin-top:10px"><label>Kundnamn</label><input type="text" id="custQuickNamn"></div>
+    <div class="field">
+      <label>Organisationsnummer</label>
+      <input type="text" id="custQuickOrgnr" placeholder="NNNNNN-NNNN" maxlength="13" inputmode="numeric" autocomplete="off">
+      <div class="hint" id="custQuickOrgnrHint" style="display:none;margin:4px 0 0;color:#fca5a5">Ogiltigt organisationsnummer</div>
+    </div>
     <div class="field"><label>Adress</label><input type="text" id="custQuickAdress"></div>
     <div class="field-row">
       <div class="field"><label>Kontaktperson</label><input type="text" id="custQuickKontakt"></div>
@@ -736,9 +783,33 @@ function mapsUrl(address) {
 const LEADS_KEY = 'telexia_pipeline_leads_v1';
 const Q_KEY = 'telexia_pipeline_questions_v1';
 
-function todayStr() {
-  const d = new Date();
-  return d.toISOString().slice(0,10);
+// ---------- Tidshjälp (Europe/Stockholm) — spec 3.4 ----------
+// formatToParts (inte format()) så att vi inte beror på locale-skiljetecken.
+const APP_TZ = 'Europe/Stockholm';
+function tzParts(d) {
+  const p = {};
+  new Intl.DateTimeFormat('sv-SE', { timeZone: APP_TZ, year:'numeric', month:'2-digit', day:'2-digit', hour:'2-digit', minute:'2-digit', hourCycle:'h23' })
+    .formatToParts(d).forEach(x => { p[x.type] = x.value; });
+  return { datum: `${p.year}-${p.month}-${p.day}`, tid: `${p.hour}:${p.minute}` };
+}
+function todayStr() { return tzParts(new Date()).datum; }
+function nowTimeStr() { return tzParts(new Date()).tid; }
+function addDays(dateStr, n) { const d = new Date(dateStr + 'T12:00:00Z'); d.setUTCDate(d.getUTCDate() + n); return d.toISOString().slice(0, 10); }
+function weekdayOf(dateStr) { return new Date(dateStr + 'T12:00:00Z').getUTCDay(); }   // 0 = söndag
+function tzOffsetMinutes(dateStr, tid) {
+  const guess = new Date(`${dateStr}T${tid}:00Z`);
+  const p = tzParts(guess);
+  const asUtc = Date.UTC(+p.datum.slice(0,4), +p.datum.slice(5,7)-1, +p.datum.slice(8,10), +p.tid.slice(0,2), +p.tid.slice(3,5));
+  return Math.round((asUtc - guess.getTime()) / 60000);
+}
+function toIsoWithOffset(dateStr, tid) {
+  const off = tzOffsetMinutes(dateStr, tid), s = off < 0 ? '-' : '+', a = Math.abs(off);
+  return `${dateStr}T${tid}:00${s}${String(Math.floor(a/60)).padStart(2,'0')}:${String(a%60).padStart(2,'0')}`;
+}
+function fromIso(iso) { return tzParts(new Date(iso)); }
+function longDateLabel(dateStr) {   // 'torsdag 24 september 2026' – SV_WEEKDAYS/SV_MONTHS definieras vid agendan
+  const d = new Date(dateStr + 'T12:00:00Z');
+  return `${SV_WEEKDAYS[d.getUTCDay()]} ${d.getUTCDate()} ${SV_MONTHS[d.getUTCMonth()]} ${d.getUTCFullYear()}`.toLowerCase();
 }
 function nowLabel() {
   return new Date().toLocaleString('sv-SE', { dateStyle: 'short', timeStyle: 'short' });
@@ -763,6 +834,23 @@ function migrateLeads(data) {
         l.events.push({ id: uid(), text: l.next || '', datum: l.nextDate || '', utford: !!l.nextDone });
       }
     }
+    // Bokningsmodul (spec 3.1): nya händelsefält med bakåtkompatibla defaults
+    l.events.forEach(ev => {
+      if (typeof ev.tid !== 'string') ev.tid = '';
+      if (typeof ev.langdMin !== 'number' || isNaN(ev.langdMin)) ev.langdMin = 0;
+      if (typeof ev.motestypId !== 'string') ev.motestypId = '';
+      if (typeof ev.adress !== 'string') ev.adress = '';
+      if (typeof ev.lat !== 'number') ev.lat = null;
+      if (typeof ev.lng !== 'number') ev.lng = null;
+      if (typeof ev.bokningId !== 'string') ev.bokningId = '';
+      if (typeof ev.bokadAv !== 'string') ev.bokadAv = '';
+      if (!['bokad','avbokad','avvisad','hallet','noshow'].includes(ev.status)) ev.status = '';
+      if (!ev.restid || typeof ev.restid !== 'object') ev.restid = null;
+      if (typeof ev.kalenderEventId !== 'string') ev.kalenderEventId = '';
+      if (typeof ev.bokningRev !== 'number') ev.bokningRev = 0;
+      if (typeof ev.notering !== 'string') ev.notering = '';
+    });
+    if (typeof l.bokadAv !== 'string') l.bokadAv = '';
     delete l.next;
     delete l.nextDate;
     delete l.nextDone;
@@ -788,16 +876,60 @@ function loadCustomersRaw() {
 }
 function getCustomerById(id) { return customers.find(c => c.id === id); }
 function customerProcessCount(id) { return leads.filter(l => l.kundId === id).length; }
+
+// ---------- Orgnr och matchning (spec 3.3) ----------
+function luhnOk(d) {                  // svenska orgnr/personnummer: 10 siffror, kontrollsiffra sist
+  let s = 0;
+  for (let i = 0; i < d.length; i++) { let n = +d[i]; if ((d.length - i) % 2 === 0) { n *= 2; if (n > 9) n -= 9; } s += n; }
+  return s % 10 === 0;
+}
+function normalizeOrgnr(s) {          // '5560160680', '556016-0680', '165560160680' → '556016-0680'; ogiltigt/fel kontrollsiffra → ''
+  let d = String(s || '').replace(/\D/g, '');
+  if (d.length === 12 && d.startsWith('16')) d = d.slice(2);
+  if (d.length !== 10 || !luhnOk(d)) return '';
+  return d.slice(0, 6) + '-' + d.slice(6);
+}
+function normalizeCustomerName(n) {
+  return String(n || '').toLowerCase().replace(/\b(aktiebolag|ab|hb|kb|ek\.? för\.?|publ)\b/g, '').replace(/[^a-z0-9åäö]+/g, ' ').trim();
+}
+function normalizePhone(s) { let d = String(s || '').replace(/\D/g, ''); if (d.startsWith('0046')) d = d.slice(4); if (d.startsWith('46')) d = '0' + d.slice(2); return d; }
+function normalizeEmail(s) { return String(s || '').trim().toLowerCase(); }
+function findCustomerByOrgnr(orgnr) { const o = normalizeOrgnr(orgnr); return o ? customers.find(c => c.orgnr === o) : null; }
+function findCustomersByName(namn) { const n = normalizeCustomerName(namn); return n ? customers.filter(c => normalizeCustomerName(c.namn) === n) : []; }
+function findContact(kund, telefon, epost) {
+  const t = normalizePhone(telefon), e = normalizeEmail(epost);
+  return (kund.kontakter || []).find(c => (t && normalizePhone(c.telefon) === t) || (e && normalizeEmail(c.email) === e)) || null;
+}
+// Orgnr-fält i kundmodalen/snabbskapa: visar "Ogiltigt organisationsnummer" live.
+function bindOrgnrField(inputId, hintId) {
+  const input = document.getElementById(inputId), hint = document.getElementById(hintId);
+  const check = () => { const raw = input.value.trim(); hint.style.display = (raw && !normalizeOrgnr(raw)) ? 'block' : 'none'; };
+  input.addEventListener('input', check);
+  return check;
+}
+// Läser orgnr-fältet: normaliserat om giltigt; ogiltigt → CJ får välja att spara råsträngen ändå; null = avbryt sparandet.
+// previousRaw = kundens redan sparade orgnr: är fältet oförändrat ställs ingen fråga (befintliga kunder blockeras inte, spec 3.3).
+function readOrgnrField(inputId, previousRaw) {
+  const raw = document.getElementById(inputId).value.trim();
+  if (!raw) return '';
+  const n = normalizeOrgnr(raw);
+  if (n) return n;
+  if (typeof previousRaw === 'string' && raw === previousRaw.trim()) return raw;
+  return confirm('Ogiltigt organisationsnummer – spara ändå?') ? raw : null;
+}
 // Splitter ut kund/kontakt-fält som tidigare låg inbäddade på varje lead till egna
 // Kund-poster i registret, och kopplar processen via kundId. Körs vid varje load
 // men är no-op per lead så fort kundId finns.
 function migrateToCustomers(leadsData, customersData) {
   customersData = customersData || [];
+  // Bokningsmodul (spec 3.3): orgnr-fält med default '' (anropas både på localStorage- och Drive-vägen)
+  customersData.forEach(k => { if (typeof k.orgnr !== 'string') k.orgnr = ''; });
   leadsData.forEach(l => {
     if (l.kundId) return;
     const kund = {
       id: uid(),
       namn: l.kund || '',
+      orgnr: '',
       adress: l.adress || '',
       kontakter: [{ id: uid(), namn: l.kontakt || '', telefon: l.telefon || '', email: l.email || '', roll: '' }],
       log: []
@@ -867,8 +999,261 @@ function savePipelines(p) {
   localStorage.setItem(PIPELINES_KEY, JSON.stringify(p));
   touchSavedLabel();
   scheduleDrivePush();
+  touchBokningConfig();   // pipelines ingår i bokningskonfigen (spec 3.5)
 }
 let PIPELINES = loadPipelines();
+
+// ---------- Bokningsmodul: lagringsnycklar och globala poster (spec 3.5) ----------
+// Samma mönster som loadPipelines/savePipelines. Nya nycklar – befintliga röres inte.
+const BOKARE_KEY = 'telexia_pipeline_bookers_v1';
+const MOTESTYPER_KEY = 'telexia_pipeline_meetingtypes_v1';
+const BOKNINGSFORMULAR_KEY = 'telexia_pipeline_bookingform_v1';
+const BOKNINGSINSTALLNINGAR_KEY = 'telexia_pipeline_bookingsettings_v1';
+const KALENDER_IGNORERA_KEY = 'telexia_pipeline_calendar_ignore_v1';
+const BOKNING_IMPORT_KEY = 'telexia_pipeline_booking_import_v1';
+const ENHET_KEY = 'telexia_pipeline_device_v1';   // per enhet, synkas ej
+
+const DEFAULT_BOKNINGSFORMULAR = {
+  version: 1,
+  karna: {
+    kundnamn: { synlig: true, obligatorisk: true }, orgnr: { synlig: true, obligatorisk: true },
+    adress: { synlig: true, obligatorisk: false }, kontaktperson: { synlig: true, obligatorisk: true },
+    telefon: { synlig: true, obligatorisk: true }, epost: { synlig: true, obligatorisk: false },
+    notering: { synlig: true, obligatorisk: false }
+  },
+  extrafalt: []
+};
+
+const DEFAULT_BOKNINGSINSTALLNINGAR = {
+  version: 1,
+  adminNyckel: '', brevladaFiler: { config: '', inbox: '', cache: '' },
+  senastSyncTs: '', senastSyncRev: 0, senasteKonfigAndringTs: '',
+  bokningSidaUrl: 'https://redneckengineering.se/bokning',
+  arbetstider: { '1': { start: '08:00', slut: '17:00' }, '2': { start: '08:00', slut: '17:00' }, '3': { start: '08:00', slut: '17:00' },
+                 '4': { start: '08:00', slut: '17:00' }, '5': { start: '08:00', slut: '17:00' }, '6': null, '0': null },
+  lunch: { start: '12:00', slut: '13:00' },
+  basadress: '', basLat: null, basLng: null, restidTillForsta: true, restidEfterSista: true,
+  framforhallningFysiskDagar: 2, framforhallningTeamsDagar: 1, horisontVeckor: 6,
+  startintervallMin: 30, maxFysiskaPerDag: 3, maxEnkelResaMin: 90,
+  schablonRestidMin: 45, marginalMinstMin: 15, marginalProcent: 25,
+  rodaDagar: true, rodaDagarExtra: [], rodaDagarUndantag: [],
+  paus: { aktiv: false, tom: '', meddelande: '' },
+  // Tom tills Anslut-guiden (M3, calendars-list) fyller listan – inga kalender-id:n/e-postadresser i källkoden (publikt repo).
+  kalendrar: [],
+  outlookIcsUrl: '', raknaPreliminaraOutlook: false,
+  telexiaEpost: '', notisEpost: '', kontaktuppgifterIKalender: false,
+  integritetstext: 'Uppgifterna lagras av Redneck Engineering för att genomföra det bokade mötet och raderas ur bokningssystemet 30 dagar efter mötet. Frågor: {notisEpost}',
+  kontaktTextBokare: 'Blev något fel? Mejla CJ på {notisEpost} och ange bokningsnumret {bokningId}.',
+  gallringDagar: 30
+};
+
+function isPlainObject(v) { return !!v && typeof v === 'object' && !Array.isArray(v); }
+function deepClone(v) { return v === undefined ? undefined : JSON.parse(JSON.stringify(v)); }
+// Djup default-fyllning fält för fält: befintliga värden behålls, saknade fält tas från def (idempotent).
+// Rekurserar bara när både sparat värde och default är plain objects – ett sparat null (t.ex. arbetstider['1'] = stängd dag,
+// spec 3.5) eller annan typ lämnas orört.
+function fillDefaults(obj, def) {
+  if (!isPlainObject(obj)) obj = {};
+  Object.keys(def).forEach(k => {
+    if (obj[k] === undefined) obj[k] = deepClone(def[k]);
+    else if (isPlainObject(def[k]) && isPlainObject(obj[k])) fillDefaults(obj[k], def[k]);
+  });
+  return obj;
+}
+function loadJsonArray(key) {
+  try {
+    const v = JSON.parse(localStorage.getItem(key));
+    if (Array.isArray(v)) return v;
+  } catch(e) {}
+  return [];
+}
+function loadJsonObject(key) {
+  try {
+    const v = JSON.parse(localStorage.getItem(key));
+    if (isPlainObject(v)) return v;
+  } catch(e) {}
+  return null;
+}
+// Gallring av importposter: äldre än gallringDagar tas bort, 'raderad' först efter 90 dagar (spec 3.5).
+function gallraBokningImport(list) {
+  const dagar = (BOKNINGSINSTALLNINGAR && Number(BOKNINGSINSTALLNINGAR.gallringDagar)) || DEFAULT_BOKNINGSINSTALLNINGAR.gallringDagar;
+  const now = Date.now();
+  return (Array.isArray(list) ? list : []).filter(p => {
+    if (!p || typeof p !== 'object') return false;
+    const t = Date.parse(p.importeradTs || '');
+    if (isNaN(t)) return true;   // okänd tidsstämpel – behåll
+    const maxDagar = p.status === 'raderad' ? 90 : dagar;
+    return (now - t) <= maxDagar * 86400000;
+  });
+}
+function loadBokare() { return loadJsonArray(BOKARE_KEY); }
+function loadMotestyper() { return loadJsonArray(MOTESTYPER_KEY); }
+function loadBokningsformular() { return fillDefaults(loadJsonObject(BOKNINGSFORMULAR_KEY), DEFAULT_BOKNINGSFORMULAR); }
+function loadBokningsinstallningar() { return fillDefaults(loadJsonObject(BOKNINGSINSTALLNINGAR_KEY), DEFAULT_BOKNINGSINSTALLNINGAR); }
+function loadKalenderIgnorera() { return loadJsonArray(KALENDER_IGNORERA_KEY); }
+function loadBokningImport() { return gallraBokningImport(loadJsonArray(BOKNING_IMPORT_KEY)); }
+function loadEnhetId() {
+  let id = '';
+  try { id = localStorage.getItem(ENHET_KEY) || ''; } catch(e) {}
+  if (!id) { id = 'dev_' + uid(); try { localStorage.setItem(ENHET_KEY, id); } catch(e) {} }
+  return id;
+}
+
+let BOKARE = loadBokare();
+let MOTESTYPER = loadMotestyper();
+let BOKNINGSFORMULAR = loadBokningsformular();
+let BOKNINGSINSTALLNINGAR = loadBokningsinstallningar();
+let KALENDER_IGNORERA = loadKalenderIgnorera();
+let BOKNING_IMPORT = loadBokningImport();
+let enhetId = loadEnhetId();
+
+function pushBokningConfig() {
+  // M3: config-push till brevlådan
+}
+// Konfigändring: stämpla tidpunkt (spec 3.5) och trigga config-push.
+function touchBokningConfig() {
+  BOKNINGSINSTALLNINGAR.senasteKonfigAndringTs = new Date().toISOString();
+  localStorage.setItem(BOKNINGSINSTALLNINGAR_KEY, JSON.stringify(BOKNINGSINSTALLNINGAR));
+  pushBokningConfig();
+}
+function saveBokare(b) {
+  localStorage.setItem(BOKARE_KEY, JSON.stringify(b));
+  touchSavedLabel();
+  scheduleDrivePush();
+  touchBokningConfig();
+}
+function saveMotestyper(m) {
+  localStorage.setItem(MOTESTYPER_KEY, JSON.stringify(m));
+  touchSavedLabel();
+  scheduleDrivePush();
+  touchBokningConfig();
+}
+function saveBokningsformular(f) {
+  localStorage.setItem(BOKNINGSFORMULAR_KEY, JSON.stringify(f));
+  touchSavedLabel();
+  scheduleDrivePush();
+  touchBokningConfig();
+}
+// configChanged=false när bara sync-fälten (senastSyncTs/senastSyncRev/brevladaFiler) ändrats – då ingen config-push.
+function saveBokningsinstallningar(s, configChanged) {
+  BOKNINGSINSTALLNINGAR = s;   // save-funktionen äger den globala – annars skriver touchBokningConfig() tillbaka det gamla objektet
+  if (configChanged !== false) s.senasteKonfigAndringTs = new Date().toISOString();
+  localStorage.setItem(BOKNINGSINSTALLNINGAR_KEY, JSON.stringify(s));
+  touchSavedLabel();
+  scheduleDrivePush();
+  if (configChanged !== false) pushBokningConfig();
+}
+function saveKalenderIgnorera(k) {
+  localStorage.setItem(KALENDER_IGNORERA_KEY, JSON.stringify(k));
+  touchSavedLabel();
+  scheduleDrivePush();
+  touchBokningConfig();
+}
+function saveBokningImport(list) {
+  localStorage.setItem(BOKNING_IMPORT_KEY, JSON.stringify(list));
+  touchSavedLabel();
+  scheduleDrivePush();
+}
+function getMotestypById(id) { return MOTESTYPER.find(m => m.id === id) || null; }   // returnerar även inaktiva typer (spec 3.5)
+function getBokareById(id) { return BOKARE.find(b => b.id === id) || null; }
+
+// Idempotent migrering av bokningsposter (spec 3.6): defaults + dubblettskydd för bokningId.
+// Körs vid boot (efter migratePipelines) och efter Drive-pull. Refererar inte TAG_DEFAULT_COLOR (deklareras senare i filen).
+function migrateBokning() {
+  if (!Array.isArray(BOKARE)) BOKARE = [];
+  if (!Array.isArray(MOTESTYPER)) MOTESTYPER = [];
+  if (!Array.isArray(KALENDER_IGNORERA)) KALENDER_IGNORERA = [];
+  if (!Array.isArray(BOKNING_IMPORT)) BOKNING_IMPORT = [];
+  BOKARE = BOKARE.filter(isPlainObject);
+  BOKARE.forEach(b => {
+    if (typeof b.id !== 'string' || !b.id) b.id = 'bokare_' + uid();
+    if (typeof b.namn !== 'string') b.namn = '';
+    if (typeof b.organisation !== 'string') b.organisation = '';
+    if (typeof b.epost !== 'string') b.epost = '';
+    if (typeof b.pipelineId !== 'string') b.pipelineId = '';
+    if (typeof b.stageKey !== 'string') b.stageKey = '';
+    if (typeof b.tagId !== 'string') b.tagId = '';
+    if (!Array.isArray(b.tillatnaMotestypIds)) b.tillatnaMotestypIds = [];
+    if (typeof b.aktiv !== 'boolean') b.aktiv = true;
+    if (typeof b.kod !== 'string') b.kod = '';
+    if (typeof b.kodRoteradTs !== 'string') b.kodRoteradTs = '';
+    if (typeof b.skapadTs !== 'string') b.skapadTs = '';
+    if (typeof b.arCj !== 'boolean') b.arCj = false;
+    if (typeof b.farg !== 'string' || !b.farg) b.farg = '#3b82f6';   // = TAG_DEFAULT_COLOR
+  });
+  MOTESTYPER = MOTESTYPER.filter(isPlainObject);
+  MOTESTYPER.forEach(m => {
+    if (typeof m.id !== 'string' || !m.id) m.id = 'mt_' + uid();
+    if (typeof m.titel !== 'string') m.titel = '';
+    if (typeof m.langdMin !== 'number' || isNaN(m.langdMin)) m.langdMin = 60;
+    if (typeof m.cooldownMin !== 'number' || isNaN(m.cooldownMin)) m.cooldownMin = 0;
+    if (typeof m.restid !== 'boolean') m.restid = false;
+    if (typeof m.farg !== 'string') m.farg = '';
+    if (typeof m.sannolikhet !== 'number' || isNaN(m.sannolikhet)) m.sannolikhet = 50;
+    if (typeof m.global !== 'boolean') m.global = false;
+    if (typeof m.pipelineId !== 'string' || m.global) m.pipelineId = '';
+    if (typeof m.bekraftelseMall !== 'string') m.bekraftelseMall = '';
+    if (typeof m.aktiv !== 'boolean') m.aktiv = true;
+  });
+  BOKNINGSFORMULAR = fillDefaults(BOKNINGSFORMULAR, DEFAULT_BOKNINGSFORMULAR);
+  Object.keys(BOKNINGSFORMULAR.karna).forEach(k => {
+    const f = BOKNINGSFORMULAR.karna[k];
+    if (typeof f.synlig !== 'boolean') f.synlig = true;
+    if (typeof f.obligatorisk !== 'boolean') f.obligatorisk = false;
+  });
+  BOKNINGSFORMULAR.karna.kundnamn.synlig = true; BOKNINGSFORMULAR.karna.kundnamn.obligatorisk = true;
+  BOKNINGSFORMULAR.karna.orgnr.synlig = true; BOKNINGSFORMULAR.karna.orgnr.obligatorisk = true;
+  if (!Array.isArray(BOKNINGSFORMULAR.extrafalt)) BOKNINGSFORMULAR.extrafalt = [];
+  BOKNINGSFORMULAR.extrafalt = BOKNINGSFORMULAR.extrafalt.filter(isPlainObject);
+  BOKNINGSFORMULAR.extrafalt.forEach(x => {
+    if (typeof x.id !== 'string' || !x.id) x.id = 'x_' + uid();
+    if (typeof x.etikett !== 'string') x.etikett = '';
+    if (!['kort','fritext','dropdown','janej'].includes(x.typ)) x.typ = 'kort';
+    if (!Array.isArray(x.alternativ)) x.alternativ = [];
+    if (typeof x.obligatorisk !== 'boolean') x.obligatorisk = false;
+    if (typeof x.synlig !== 'boolean') x.synlig = true;
+  });
+  BOKNINGSINSTALLNINGAR = fillDefaults(BOKNINGSINSTALLNINGAR, DEFAULT_BOKNINGSINSTALLNINGAR);
+  if (typeof BOKNINGSINSTALLNINGAR.bokningSidaUrl !== 'string' || !BOKNINGSINSTALLNINGAR.bokningSidaUrl.trim()) {
+    BOKNINGSINSTALLNINGAR.bokningSidaUrl = DEFAULT_BOKNINGSINSTALLNINGAR.bokningSidaUrl;
+  }
+  if (!Array.isArray(BOKNINGSINSTALLNINGAR.kalendrar)) BOKNINGSINSTALLNINGAR.kalendrar = [];
+  KALENDER_IGNORERA = KALENDER_IGNORERA.filter(isPlainObject);
+  KALENDER_IGNORERA.forEach(p => {
+    if (typeof p.id !== 'string') p.id = '';
+    if (!['privat','bokningar','ics'].includes(p.kalla)) p.kalla = 'privat';
+    if (p.lage !== 'ignorera' && p.lage !== 'rakna') p.lage = 'ignorera';   // gamla poster utan lage
+    if (typeof p.ts !== 'string') p.ts = '';
+    delete p.titel;   // ingen titel lagras – visas live ur calendar-preview
+  });
+  BOKNING_IMPORT = gallraBokningImport(BOKNING_IMPORT);
+  BOKNING_IMPORT.forEach(p => {
+    if (typeof p.bokningId !== 'string') p.bokningId = '';
+    if (!['importerad','avvisad','raderad'].includes(p.status)) p.status = 'importerad';
+    if (typeof p.sedd !== 'boolean') p.sedd = false;
+    if (typeof p.importeradTs !== 'string') p.importeradTs = '';
+    if (typeof p.enhetId !== 'string') p.enhetId = '';
+    ['leadId','eventId','kundId','kontaktId','avvisadTs','avvisadOrsak'].forEach(k => { if (typeof p[k] !== 'string') p[k] = ''; });
+    ['nyProcess','nyKund','mojligDubblett'].forEach(k => { if (typeof p[k] !== 'boolean') p[k] = false; });
+  });
+  // Dubblettskydd: samma bokningId på två händelser lokalt → behåll den vars id === 'E_' + bokningId
+  // (i andra hand en som inte redan är avbokad/avvisad), den andra får status 'avbokad' + loggpost. Inget raderas.
+  const rank = x => (x.ev.id === 'E_' + x.ev.bokningId ? 2 : 0) + ((x.ev.status !== 'avbokad' && x.ev.status !== 'avvisad') ? 1 : 0);
+  const seen = new Map();
+  leads.forEach(lead => (lead.events || []).forEach(ev => {
+    if (!ev.bokningId) return;
+    const cur = { lead, ev };
+    const prev = seen.get(ev.bokningId);
+    if (!prev) { seen.set(ev.bokningId, cur); return; }
+    let keep = prev, drop = cur;
+    if (rank(cur) > rank(prev)) { keep = cur; drop = prev; seen.set(ev.bokningId, keep); }
+    if (drop.ev.status !== 'avbokad' && drop.ev.status !== 'avvisad') {
+      drop.ev.status = 'avbokad';
+      if (!Array.isArray(drop.lead.log)) drop.lead.log = [];
+      drop.lead.log.push({ id: uid(), type: 'text', content: 'Dubblett vid import', ts: nowLabel() });
+    }
+  }));
+}
 
 // Idempotent migrering: skapar en default-pipeline vid behov och stämplar
 // pipelineId på befintliga kategorier, processer, taggar och frågor.
@@ -891,8 +1276,15 @@ function persistAllPipelineData() {
   localStorage.setItem(TAGS_KEY, JSON.stringify(TAGS));
   localStorage.setItem(LEADS_KEY, JSON.stringify(leads));
   localStorage.setItem(Q_KEY, JSON.stringify(questions));
+  localStorage.setItem(BOKARE_KEY, JSON.stringify(BOKARE));
+  localStorage.setItem(MOTESTYPER_KEY, JSON.stringify(MOTESTYPER));
+  localStorage.setItem(BOKNINGSFORMULAR_KEY, JSON.stringify(BOKNINGSFORMULAR));
+  localStorage.setItem(BOKNINGSINSTALLNINGAR_KEY, JSON.stringify(BOKNINGSINSTALLNINGAR));
+  localStorage.setItem(KALENDER_IGNORERA_KEY, JSON.stringify(KALENDER_IGNORERA));
+  localStorage.setItem(BOKNING_IMPORT_KEY, JSON.stringify(BOKNING_IMPORT));
 }
 migratePipelines();
+migrateBokning();
 persistAllPipelineData();
 
 let activePipelineId = localStorage.getItem(ACTIVE_PIPELINE_KEY) || '';
@@ -1055,7 +1447,7 @@ async function findOrCreateDriveFile() {
     driveFileId = listData.files[0].id;
     return 'existing';
   }
-  const seed = JSON.stringify({ leads, questions, customers, stages: STAGES, tags: TAGS, pipelines: PIPELINES });
+  const seed = JSON.stringify({ leads, questions, customers, stages: STAGES, tags: TAGS, pipelines: PIPELINES, bokare: BOKARE, motestyper: MOTESTYPER, bokningsformular: BOKNINGSFORMULAR, bokningsinstallningar: BOKNINGSINSTALLNINGAR, kalenderIgnorera: KALENDER_IGNORERA, bokningImport: BOKNING_IMPORT });
   const metadata = { name: DRIVE_FILE_NAME, mimeType: 'application/json' };
   const form = new FormData();
   form.append('metadata', new Blob([JSON.stringify(metadata)], { type: 'application/json' }));
@@ -1079,7 +1471,7 @@ async function pushToDrive() {
   if (!accessToken || !driveFileId) return;
   setDriveStatus('Synkar...');
   try {
-    const body = JSON.stringify({ leads, questions, customers, stages: STAGES, tags: TAGS, pipelines: PIPELINES });
+    const body = JSON.stringify({ leads, questions, customers, stages: STAGES, tags: TAGS, pipelines: PIPELINES, bokare: BOKARE, motestyper: MOTESTYPER, bokningsformular: BOKNINGSFORMULAR, bokningsinstallningar: BOKNINGSINSTALLNINGAR, kalenderIgnorera: KALENDER_IGNORERA, bokningImport: BOKNING_IMPORT });
     const res = await driveFetch('https://www.googleapis.com/upload/drive/v3/files/' + driveFileId + '?uploadType=media', {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
@@ -1123,7 +1515,15 @@ async function onSignedIn() {
         if (Array.isArray(remote.pipelines) && remote.pipelines.length) {
           PIPELINES = remote.pipelines;
         }
+        // Bokningsmodul (spec 3.6): saknas fältet i fjärrfilen behålls lokalt värde
+        if (Array.isArray(remote.bokare)) BOKARE = remote.bokare;
+        if (Array.isArray(remote.motestyper)) MOTESTYPER = remote.motestyper;
+        if (isPlainObject(remote.bokningsformular)) BOKNINGSFORMULAR = remote.bokningsformular;
+        if (isPlainObject(remote.bokningsinstallningar)) BOKNINGSINSTALLNINGAR = remote.bokningsinstallningar;
+        if (Array.isArray(remote.kalenderIgnorera)) KALENDER_IGNORERA = remote.kalenderIgnorera;
+        if (Array.isArray(remote.bokningImport)) BOKNING_IMPORT = remote.bokningImport;
         migratePipelines();
+        migrateBokning();
         persistAllPipelineData();
         if (!PIPELINES.some(p => p.id === activePipelineId)) {
           activePipelineId = PIPELINES[0].id;
@@ -1188,7 +1588,55 @@ function renderLeadTagsPicker() {
   }));
 }
 
-function openEvents(lead) { return (lead.events || []).filter(ev => !ev.utford); }
+// ---------- Händelse-hjälpare (spec 3.2) ----------
+function isActiveEvent(ev) { return !ev.utford && ev.status !== 'avbokad' && ev.status !== 'avvisad'; }
+function openEvents(lead) { return (lead.events || []).filter(isActiveEvent); }
+function eventSortKey(ev) { return (ev.datum || '9999-12-31') + 'T' + (ev.tid || '00:00'); }
+function eventEndTime(ev) {
+  if (!ev.tid || !ev.langdMin) return '';
+  const [h, m] = ev.tid.split(':').map(Number);
+  const t = Math.min(h * 60 + m + ev.langdMin, 23 * 60 + 59);
+  return String(Math.floor(t / 60)).padStart(2, '0') + ':' + String(t % 60).padStart(2, '0');
+}
+function eventTimeLabel(ev) { return ev.tid ? ev.tid + (eventEndTime(ev) ? '–' + eventEndTime(ev) : '') : ''; }
+function isBookingEvent(ev) { return !!ev.bokningId; }
+function isFutureBooking(ev) { return isBookingEvent(ev) && ev.status === 'bokad' && !ev.utford && eventSortKey(ev) > todayStr() + 'T' + nowTimeStr(); }
+function leadContact(lead) {
+  const k = getCustomerById(lead.kundId);
+  if (!k) return null;
+  return (k.kontakter || []).find(c => c.id === lead.kontaktId) || (k.kontakter || [])[0] || null;
+}
+function safeColor(c, fallback) { return /^#[0-9a-f]{6}$/i.test(String(c || '')) ? c : (fallback || TAG_DEFAULT_COLOR); }
+function compareEvents(a, b) { const ka = eventSortKey(a), kb = eventSortKey(b); return ka < kb ? -1 : ka > kb ? 1 : 0; }
+// "NY"-badge: importerad bokning som CJ ännu inte sett (spec 8.4)
+function isNyBokning(ev) { return !!ev.bokningId && BOKNING_IMPORT.some(p => p.bokningId === ev.bokningId && !p.sedd); }
+// Färgen på mötestypsbadgen: mötestypens färg, annars pipelinens
+function motestypBadgeColor(mt, plId) { const pl = getPipelineById(plId); return safeColor(mt && mt.farg, safeColor(pl && pl.color)); }
+
+// ---------- Tagg per bokare (spec 3.7) ----------
+// Alla CJ-bokare delar EN global tagg "CJ" (bokareId 'cj'); övriga bokare får en egen global tagg.
+function ensureBokareTag(b) {
+  const key = b.arCj ? 'cj' : b.id, name = b.arCj ? 'CJ' : b.namn;
+  let t = TAGS.find(x => x.bokareId === key);
+  if (!t) { t = { id: uid(), name, color: safeColor(b.farg), pipelineId: '', global: true, bokareId: key }; TAGS.push(t); }
+  t.name = name; t.color = safeColor(b.farg, t.color); t.global = true;
+  b.tagId = t.id; saveTags(TAGS); return t;
+}
+
+// ---------- Landningskolumn per bokare (spec 3.8) ----------
+function firstStageKeyFor(plId) {
+  let s = STAGES.filter(x => x.pipelineId === plId)[0];
+  if (!s) { STAGES = STAGES.concat(seedStagesFor(plId)); saveStages(STAGES); s = STAGES.filter(x => x.pipelineId === plId)[0]; }
+  return s.key;
+}
+function stageKeyValidFor(stageKey, plId) {
+  return !!stageKey && STAGES.filter(s => s.pipelineId === plId).some(s => s.key === stageKey);
+}
+function landingStageKeyFor(bokare, plId) {   // bokare kan vara null (borttagen bokare i inkorgen)
+  if (bokare && stageKeyValidFor(bokare.stageKey, plId)) return bokare.stageKey;
+  return firstStageKeyFor(plId);
+}
+
 function isOverdue(lead) {
   if (stageKind(lead.stage) === 'won' || stageKind(lead.stage) === 'lost') return false;
   const today = todayStr();
@@ -1357,16 +1805,16 @@ function renderBoard() {
       const weightedVarde = lead.varde ? Math.round(Number(lead.varde) * weight / 100) : null;
       const leadTags = (lead.tags || []).map(id => getTagById(id)).filter(Boolean);
       const kund = getCustomerById(lead.kundId);
-      const primaryContact = kund && kund.kontakter && kund.kontakter[0];
+      const primaryContact = leadContact(lead);
       const today = todayStr();
-      const openEvs = openEvents(lead).slice().sort((a,b) => (a.datum||'9999') < (b.datum||'9999') ? -1 : 1);
+      const openEvs = openEvents(lead).slice().sort(compareEvents);
       card.innerHTML = `
         <div class="card-inner">
           <div class="card-main">
             <div class="kund">${escapeHtml((kund && kund.namn) || 'Namnlös kund')}</div>
             ${primaryContact && primaryContact.namn ? `<div class="kontakt">${escapeHtml(primaryContact.namn)}${primaryContact.telefon ? ` · <a href="tel:${escapeHtml(primaryContact.telefon)}" class="card-link" onclick="event.stopPropagation()">${escapeHtml(primaryContact.telefon)}</a>` : ''}</div>` : ''}
             ${kund && kund.adress ? `<div class="kontakt"><a href="${mapsUrl(kund.adress)}" target="_blank" rel="noopener" class="card-link" onclick="event.stopPropagation()">📍 ${escapeHtml(kund.adress)}</a></div>` : ''}
-            ${openEvs.map(ev => `<div class="next">${escapeHtml(ev.text)}${ev.datum ? ` <span class="date${ev.datum < today ? ' overdue' : ''}" style="margin-left:4px">(${ev.datum})</span>` : ''}</div>`).join('')}
+            ${openEvs.map(ev => `<div class="next">${ev.tid ? `<span class="ev-time">${escapeHtml(eventTimeLabel(ev))}</span>` : ''}${escapeHtml(ev.text)}${ev.datum ? ` <span class="date${ev.datum < today ? ' overdue' : ''}" style="margin-left:4px">(${escapeHtml(ev.datum)})</span>` : ''}${isNyBokning(ev) ? '<span class="ny-badge">NY</span>' : ''}${ev.adress ? `<div class="kontakt"><a href="${mapsUrl(ev.adress)}" target="_blank" rel="noopener" class="card-link" onclick="event.stopPropagation()">📍 ${escapeHtml(ev.adress)}</a></div>` : ''}</div>`).join('')}
             ${lead.varde ? `<div class="varde">${Number(lead.varde).toLocaleString('sv-SE')} kr &nbsp;·&nbsp; ${weight}% → ${weightedVarde.toLocaleString('sv-SE')} kr</div>` : ''}
             ${logCount ? `<div class="logbadge">${logCount} logganteckning${logCount > 1 ? 'ar' : ''}</div>` : ''}
           </div>
@@ -1412,8 +1860,7 @@ function formatAgendaDate(dateStr) {
   const dt = new Date(y, m - 1, d);
   const today = todayStr();
   if (dateStr === today) return 'Idag · ' + d + ' ' + SV_MONTHS[m - 1];
-  const tomorrow = new Date(); tomorrow.setDate(tomorrow.getDate() + 1);
-  if (dateStr === tomorrow.toISOString().slice(0,10)) return 'Imorgon · ' + d + ' ' + SV_MONTHS[m - 1];
+  if (dateStr === addDays(todayStr(), 1)) return 'Imorgon · ' + d + ' ' + SV_MONTHS[m - 1];
   return SV_WEEKDAYS[dt.getDay()] + ' ' + d + ' ' + SV_MONTHS[m - 1];
 }
 
@@ -1429,18 +1876,18 @@ function renderActivity() {
     renderActivity();
   });
 
-  // Flatten every open (not-utförd) event across all active processes into one agenda row per event.
+  // Flatten every active (not utförd, not avbokad/avvisad) event across all active processes into one agenda row per event.
   let rows = [];
   leads.forEach(lead => {
     if (hiddenActivityPipelines.has(lead.pipelineId)) return;
     if (stageKind(lead.stage) === 'won' || stageKind(lead.stage) === 'lost') return;
     (lead.events || []).forEach(ev => {
-      if (ev.utford) return;
+      if (!isActiveEvent(ev)) return;
       if (!ev.datum) return;
       rows.push({ lead, ev });
     });
   });
-  rows.sort((a, b) => a.ev.datum < b.ev.datum ? -1 : a.ev.datum > b.ev.datum ? 1 : 0);
+  rows.sort((a, b) => compareEvents(a.ev, b.ev));
 
   if (!rows.length) {
     wrap.innerHTML = '<div class="empty-hint">Inga inplanerade händelser.</div>';
@@ -1457,23 +1904,37 @@ function renderActivity() {
       html += `<div class="agenda-date${overdue ? ' overdue' : ''}${isToday ? ' is-today' : ''}" data-date="${lastDate}">${formatAgendaDate(lastDate)}</div>`;
     }
     const kund = getCustomerById(lead.kundId);
-    const primaryContact = kund && kund.kontakter && kund.kontakter[0];
+    const primaryContact = leadContact(lead);
     const leadTags = (lead.tags || []).map(id => getTagById(id)).filter(Boolean);
     const weight = (lead.weight === undefined || lead.weight === null || lead.weight === '') ? 100 : Number(lead.weight);
     const weightedVarde = lead.varde ? Math.round(Number(lead.varde) * weight / 100) : null;
     const overdueRow = ev.datum < today;
+    // Bokningsmodul (spec 8.4): tid, mötestyp, adress, NY-badge, restidsvarning, notering – allt via escapeHtml/safeColor
+    const mt = ev.motestypId ? getMotestypById(ev.motestypId) : null;
+    // Bara händelsens egen mötesadress – agendan visade ingen adress före M1, så befintliga händelser ser ut som förr
+    const evAdress = ev.adress || '';
+    const restidVarning = !!(ev.restid && ev.restid.status !== 'ok');
+    const nyBokning = isNyBokning(ev);
+    const notering = ev.notering ? String(ev.notering) : '';
+    const nextLine = (ev.tid ? `<span class="ev-time">${escapeHtml(eventTimeLabel(ev))}</span>` : '')
+      + escapeHtml(ev.text)
+      + (mt ? `<span class="mt-badge" style="border-color:${motestypBadgeColor(mt, lead.pipelineId)}">${escapeHtml(mt.titel)}</span>` : '')
+      + (nyBokning ? '<span class="ny-badge">NY</span>' : '')
+      + (restidVarning ? '<span class="ev-warn" title="Restiden är osäker (schablon eller okänd)">⚠ restid</span>' : '');
     html += `
-      <div class="agenda-item${overdueRow ? ' overdue' : ''}" data-lead-id="${lead.id}" data-event-id="${ev.id}">
+      <div class="agenda-item${overdueRow ? ' overdue' : ''}" data-lead-id="${escapeHtml(lead.id)}" data-event-id="${escapeHtml(ev.id)}">
         <div class="agenda-item-main">
           <div class="agenda-item-top">
             <span style="display:inline-flex;align-items:center;gap:8px;flex-wrap:wrap"><span class="kund">${escapeHtml((kund && kund.namn) || 'Namnlös kund')}</span>${PIPELINES.length > 1 ? plBadge(lead.pipelineId) : ''}</span>
             ${leadTags.length ? `<div class="card-tags">${leadTags.map(t => `<span class="tag-chip" style="background:${t.color};color:${tagTextColor(t.color)}">${escapeHtml(t.name)}</span>`).join('')}</div>` : ''}
           </div>
-          ${ev.text ? `<div class="next">${escapeHtml(ev.text)}</div>` : ''}
+          ${nextLine ? `<div class="next">${nextLine}</div>` : ''}
+          ${evAdress ? `<div class="kontakt"><a href="${mapsUrl(evAdress)}" target="_blank" rel="noopener" class="card-link" onclick="event.stopPropagation()">📍 ${escapeHtml(evAdress)}</a></div>` : ''}
           ${primaryContact && primaryContact.namn ? `<div class="kontakt">${escapeHtml(primaryContact.namn)}${primaryContact.telefon ? ` · <a href="tel:${escapeHtml(primaryContact.telefon)}" class="card-link" onclick="event.stopPropagation()">${escapeHtml(primaryContact.telefon)}</a>` : ''}</div>` : ''}
+          ${notering ? `<span class="ev-note" title="${escapeHtml(notering)}">💬 ${escapeHtml(notering.slice(0, 80))}${notering.length > 80 ? '…' : ''}</span>` : ''}
           ${lead.varde ? `<div class="varde">${Number(lead.varde).toLocaleString('sv-SE')} kr &nbsp;·&nbsp; ${weight}% → ${weightedVarde.toLocaleString('sv-SE')} kr</div>` : ''}
         </div>
-        <button type="button" class="agenda-done-btn" data-lead-id="${lead.id}" data-event-id="${ev.id}">Utfört</button>
+        <button type="button" class="agenda-done-btn" data-lead-id="${escapeHtml(lead.id)}" data-event-id="${escapeHtml(ev.id)}">Utfört</button>
       </div>
     `;
   });
@@ -1512,10 +1973,9 @@ function matchesSearch(lead) {
   return (kund.kontakter || []).some(k => (k.namn || '').toLowerCase().includes(t));
 }
 
+// Escapar även citattecken så samma funktion är säker i både text- och attributkontext (title="…", value="…").
 function escapeHtml(str) {
-  const div = document.createElement('div');
-  div.textContent = str == null ? '' : str;
-  return div.innerHTML;
+  return String(str == null ? '' : str).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 }
 
 // ---------- AI + paste helpers ----------
@@ -1618,7 +2078,7 @@ function renderLeadLog() {
     } else {
       body += `<div class="txt">${escapeHtml(entry.content)}</div>`;
     }
-    div.innerHTML = `<div class="ts">${entry.ts}</div>${body}`;
+    div.innerHTML = `<div class="ts">${escapeHtml(entry.ts)}</div>${body}`;
     const img = div.querySelector('.log-img');
     if (img) img.addEventListener('click', () => openLightbox(entry.content));
     list.appendChild(div);
@@ -1717,20 +2177,42 @@ function renderLeadEvents() {
   wrap.innerHTML = '';
   currentLeadEvents.forEach((ev, idx) => {
     const row = document.createElement('div');
-    row.className = 'event-row';
-    row.innerHTML = `
-      <input type="text" data-idx="${idx}" class="eventTextInput" placeholder="t.ex. ring kund om avtalsförslag" value="${escapeHtml(ev.text)}">
-      <input type="date" data-idx="${idx}" class="eventDateInput" value="${ev.datum || ''}">
+    // Bokade händelser (bokningsmodulen): text/datum/tid låsta, ✕ dold – ombokas under Bokningar
+    const bokad = isBookingEvent(ev);
+    const avbokad = ev.status === 'avbokad' || ev.status === 'avvisad';
+    row.className = 'event-row' + (bokad ? ' event-bokad' : '') + (avbokad ? ' event-avbokad' : '');
+    const ro = bokad ? ' readonly' : '';
+    let html = '';
+    if (bokad) {
+      const mt = getMotestypById(ev.motestypId), b = getBokareById(ev.bokadAv);
+      const statusText = ev.status === 'avbokad' ? ' · Avbokad' : (ev.status === 'avvisad' ? ' · Avvisad' : '');
+      html += `<div class="event-booking-label">Bokat · ${escapeHtml(mt ? mt.titel : (ev.text || 'Möte'))} · ${escapeHtml(b ? b.namn : (ev.bokadAv || 'okänd bokare'))}${statusText}</div>`;
+    }
+    html += `
+      <input type="text" data-idx="${idx}" class="eventTextInput" placeholder="t.ex. ring kund om avtalsförslag" value="${escapeHtml(ev.text)}"${ro}>
+      <input type="date" data-idx="${idx}" class="eventDateInput" value="${escapeHtml(ev.datum || '')}"${ro}>
+      <input type="time" data-idx="${idx}" class="eventTimeInput" title="Klockslag (frivilligt)" value="${escapeHtml(ev.tid || '')}"${ro}>
       <label class="event-done"><input type="checkbox" data-idx="${idx}" class="eventDoneCheck" ${ev.utford ? 'checked' : ''}> Utförd</label>
-      <button type="button" data-idx="${idx}" class="eventDelBtn" title="Ta bort">✕</button>
+      ${bokad ? '' : `<button type="button" data-idx="${idx}" class="eventDelBtn" title="Ta bort">✕</button>`}
     `;
+    if (bokad) html += '<div class="event-booking-hint">Ombokas under Bokningar › Inkorg/Kalender</div>';
+    row.innerHTML = html;
     wrap.appendChild(row);
   });
   wrap.querySelectorAll('.eventTextInput').forEach(el => el.addEventListener('input', e => {
-    currentLeadEvents[Number(e.target.dataset.idx)].text = e.target.value;
+    const ev = currentLeadEvents[Number(e.target.dataset.idx)];
+    if (isBookingEvent(ev)) return;
+    ev.text = e.target.value;
   }));
   wrap.querySelectorAll('.eventDateInput').forEach(el => el.addEventListener('input', e => {
-    currentLeadEvents[Number(e.target.dataset.idx)].datum = e.target.value;
+    const ev = currentLeadEvents[Number(e.target.dataset.idx)];
+    if (isBookingEvent(ev)) return;
+    ev.datum = e.target.value;
+  }));
+  wrap.querySelectorAll('.eventTimeInput').forEach(el => el.addEventListener('input', e => {
+    const ev = currentLeadEvents[Number(e.target.dataset.idx)];
+    if (isBookingEvent(ev)) return;
+    ev.tid = e.target.value;
   }));
   wrap.querySelectorAll('.eventDoneCheck').forEach(el => el.addEventListener('change', e => {
     currentLeadEvents[Number(e.target.dataset.idx)].utford = e.target.checked;
@@ -1741,7 +2223,7 @@ function renderLeadEvents() {
   }));
 }
 document.getElementById('leadEventAddBtn').addEventListener('click', () => {
-  currentLeadEvents.push({ id: uid(), text: '', datum: '', utford: false });
+  currentLeadEvents.push({ id: uid(), text: '', datum: '', utford: false, tid: '', langdMin: 0, motestypId: '', adress: '', lat: null, lng: null, bokningId: '', bokadAv: '', status: '', restid: null, kalenderEventId: '', bokningRev: 0, notering: '' });
   renderLeadEvents();
 });
 document.getElementById('leadKundAddBtn').addEventListener('click', () => {
@@ -1899,6 +2381,7 @@ document.getElementById('exportLeadsBtn').addEventListener('click', () => {
     const primaryContact = (kund.kontakter || [])[0] || {};
     return {
       kund: kund.namn || '',
+      orgnr: kund.orgnr || '',
       kontakt: primaryContact.namn || '',
       telefon: primaryContact.telefon || '',
       email: primaryContact.email || '',
@@ -1907,13 +2390,13 @@ document.getElementById('exportLeadsBtn').addEventListener('click', () => {
       weight: l.weight,
       delningsantal: l.delningsantal,
       stage: l.stage,
-      events: (l.events || []).map(ev => `${ev.text || ''} (${ev.datum || ''})${ev.utford ? ' [klar]' : ''}`).join(' | '),
+      events: (l.events || []).map(ev => `${ev.tid ? ev.tid + ' ' : ''}${ev.text || ''} (${ev.datum || ''})${ev.status === 'avbokad' ? ' [avbokad]' : ''}${ev.status === 'avvisad' ? ' [avvisad]' : ''}${ev.utford ? ' [klar]' : ''}`).join(' | '),
       signedDate: l.signedDate,
       lostDate: l.lostDate,
       log: (l.log || []).map(e => `[${e.ts}] ${e.type === 'image' ? (e.aiText || 'skärmdump') : e.content}`).join(' | ')
     };
   });
-  exportCsv(flat, ['kund','kontakt','telefon','email','adress','varde','weight','stage','events','signedDate','lostDate','log'], 'pipeline.csv');
+  exportCsv(flat, ['kund','orgnr','kontakt','telefon','email','adress','varde','weight','stage','events','signedDate','lostDate','log'], 'pipeline.csv');
 });
 
 // ---------- Customer registry ----------
@@ -1930,7 +2413,7 @@ function renderCustomerRegistry() {
   }
   if (term) {
     list = list.filter(k => {
-      const hay = [k.namn, k.adress].concat((k.kontakter || []).map(c => `${c.namn} ${c.telefon} ${c.email}`)).join(' ').toLowerCase();
+      const hay = [k.namn, k.orgnr, String(k.orgnr || '').replace('-', ''), k.adress].concat((k.kontakter || []).map(c => `${c.namn} ${c.telefon} ${c.email}`)).join(' ').toLowerCase();
       return hay.includes(term);
     });
   }
@@ -1949,6 +2432,7 @@ function renderCustomerRegistry() {
     const plIds = customerPipelineIds(k.id);
     card.innerHTML = `
       <div class="knamn">${escapeHtml(k.namn || 'Namnlös kund')}</div>
+      ${k.orgnr ? `<div class="kinfo">Orgnr ${escapeHtml(k.orgnr)}</div>` : ''}
       <div class="kinfo">${escapeHtml(primary.namn || '')}${primary.telefon ? ' · ' + escapeHtml(primary.telefon) : ''}</div>
       <div class="kinfo">${escapeHtml(k.adress || '')}</div>
       <div class="kcount">${active} aktiva · ${total} totalt</div>
@@ -2012,7 +2496,7 @@ function renderCustomerLog() {
     } else {
       body += `<div class="txt">${escapeHtml(entry.content)}</div>`;
     }
-    div.innerHTML = `<div class="ts">${entry.ts}</div>${body}`;
+    div.innerHTML = `<div class="ts">${escapeHtml(entry.ts)}</div>${body}`;
     const img = div.querySelector('.log-img');
     if (img) img.addEventListener('click', () => openLightbox(entry.content));
     list.appendChild(div);
@@ -2076,6 +2560,7 @@ function openCustomerModal(id) {
     const k = getCustomerById(id);
     document.getElementById('customerId').value = k.id;
     document.getElementById('customerNamn').value = k.namn || '';
+    document.getElementById('customerOrgnr').value = k.orgnr || '';
     document.getElementById('customerAdress').value = k.adress || '';
     currentCustomerContacts = (k.kontakter || []).map(c => Object.assign({}, c));
     currentCustomerLog = (k.log || []).slice();
@@ -2083,11 +2568,13 @@ function openCustomerModal(id) {
   } else {
     document.getElementById('customerId').value = '';
     document.getElementById('customerNamn').value = '';
+    document.getElementById('customerOrgnr').value = '';
     document.getElementById('customerAdress').value = '';
     currentCustomerContacts = [];
     currentCustomerLog = [];
     document.getElementById('customerProcessList').innerHTML = '<div class="log-empty">Inga processer ännu</div>';
   }
+  checkCustomerOrgnr();
   renderCustomerContacts();
   renderCustomerLog();
   backdrop.classList.add('open');
@@ -2097,6 +2584,7 @@ function closeCustomerModal() {
   currentCustomerContacts = [];
   currentCustomerLog = [];
 }
+const checkCustomerOrgnr = bindOrgnrField('customerOrgnr', 'customerOrgnrHint');
 document.getElementById('customerCancelBtn').addEventListener('click', closeCustomerModal);
 document.getElementById('customerModalBackdrop').addEventListener('click', e => {
   if (e.target.id === 'customerModalBackdrop') closeCustomerModal();
@@ -2105,8 +2593,12 @@ document.getElementById('customerSaveBtn').addEventListener('click', () => {
   const id = document.getElementById('customerId').value;
   const namn = document.getElementById('customerNamn').value.trim();
   if (!namn) { alert('Ange kundnamn'); return; }
+  const befintlig = id ? getCustomerById(id) : null;
+  const orgnr = readOrgnrField('customerOrgnr', befintlig ? befintlig.orgnr : '');   // null = CJ avbröt vid ogiltigt orgnr
+  if (orgnr === null) return;
   const data = {
     namn,
+    orgnr,
     adress: document.getElementById('customerAdress').value.trim(),
     kontakter: currentCustomerContacts.slice(),
     log: currentCustomerLog.slice(),
@@ -2139,15 +2631,18 @@ function openCustQuickAddModal(context) {
   custQuickShotDataUrl = null;
   custQuickOcrResult = null;
   document.getElementById('custQuickNamn').value = '';
+  document.getElementById('custQuickOrgnr').value = '';
   document.getElementById('custQuickAdress').value = '';
   document.getElementById('custQuickKontakt').value = '';
   document.getElementById('custQuickTelefon').value = '';
   document.getElementById('custQuickEmail').value = '';
+  checkCustQuickOrgnr();
   document.getElementById('custQuickOcrStatus').textContent = '';
   document.getElementById('custQuickOcrStatus').className = 'ai-status';
   resetZone(document.getElementById('custQuickPasteZone'));
   document.getElementById('custQuickModalBackdrop').classList.add('open');
 }
+const checkCustQuickOrgnr = bindOrgnrField('custQuickOrgnr', 'custQuickOrgnrHint');
 
 // OCR-zon i Ny kund-rutan: klistra in skärmdump → fälten fylls i automatiskt.
 setupPasteZone(
@@ -2165,13 +2660,16 @@ setupPasteZone(
       // Fyll bara i fält som är tomma — skriv inte över det du redan skrivit
       const setIfEmpty = (id, val) => { const el = document.getElementById(id); if (val && !el.value.trim()) el.value = val; };
       setIfEmpty('custQuickNamn', ocr.namn);
+      // Orgnr förifylls bara när OCR-träffen är giltig (Luhn) – annars hamnar den som loggpost vid Spara (som före M1)
+      setIfEmpty('custQuickOrgnr', normalizeOrgnr(ocr.orgnr));
       setIfEmpty('custQuickAdress', ocr.adress);
       setIfEmpty('custQuickKontakt', ocr.kontakt);
       setIfEmpty('custQuickTelefon', ocr.telefon);
       setIfEmpty('custQuickEmail', ocr.email);
+      checkCustQuickOrgnr();
       const bits = ocrSummary(ocr);
       status.className = 'ai-status';
-      status.textContent = bits.length ? 'Ifyllt från skärmdumpen — kontrollera och justera vid behov.' + (ocr.orgnr ? ' (Orgnr ' + ocr.orgnr + ' sparas i kundens logg.)' : '') : 'Ingen kundinfo hittades i texten — fyll i fälten manuellt.';
+      status.textContent = bits.length ? 'Ifyllt från skärmdumpen — kontrollera och justera vid behov.' : 'Ingen kundinfo hittades i texten — fyll i fälten manuellt.';
     } catch (e) {
       status.className = 'ai-status err';
       status.textContent = 'OCR misslyckades (' + e.message + ') — fyll i fälten manuellt.';
@@ -2189,16 +2687,22 @@ document.getElementById('custQuickModalBackdrop').addEventListener('click', e =>
 document.getElementById('custQuickSaveBtn').addEventListener('click', () => {
   const namn = document.getElementById('custQuickNamn').value.trim();
   if (!namn) { alert('Ange kundnamn'); return; }
+  const orgnr = readOrgnrField('custQuickOrgnr');   // null = CJ avbröt vid ogiltigt orgnr
+  if (orgnr === null) return;
   const kontaktNamn = document.getElementById('custQuickKontakt').value.trim();
   const telefon = document.getElementById('custQuickTelefon').value.trim();
   const email = document.getElementById('custQuickEmail').value.trim();
   const kontakter = (kontaktNamn || telefon || email) ? [{ id: uid(), namn: kontaktNamn, telefon, email, roll: '' }] : [];
   const log = [];
   if (custQuickShotDataUrl) log.push({ id: uid(), type: 'image', content: custQuickShotDataUrl, ts: nowLabel() });
-  if (custQuickOcrResult && custQuickOcrResult.orgnr) log.push({ id: uid(), type: 'text', content: 'Orgnr (OCR): ' + custQuickOcrResult.orgnr, ts: nowLabel() });
+  // Giltigt OCR-orgnr ligger redan i orgnr-fältet; ogiltig OCR-träff behålls som loggpost så informationen inte tappas
+  if (custQuickOcrResult && custQuickOcrResult.orgnr && !normalizeOrgnr(custQuickOcrResult.orgnr)) {
+    log.push({ id: uid(), type: 'text', content: 'Orgnr (OCR): ' + custQuickOcrResult.orgnr, ts: nowLabel() });
+  }
   const kund = {
     id: uid(),
     namn,
+    orgnr,
     adress: document.getElementById('custQuickAdress').value.trim(),
     kontakter,
     log,
@@ -2309,11 +2813,13 @@ function renderTagRows() {
   tagWorkingCopy.forEach((t, idx) => {
     const row = document.createElement('div');
     row.className = 'tag-row';
+    // Bokartaggar (spec 3.7) är låsta här: namn readonly, alltid globala, tas bort under Bokningar › Bokare
+    const locked = !!t.bokareId;
     row.innerHTML = `
-      <input type="color" data-idx="${idx}" class="tagColorInput" value="${t.color || TAG_DEFAULT_COLOR}">
-      <input type="text" data-idx="${idx}" class="tagNameInput" value="${escapeHtml(t.name)}">
-      <label class="tag-global" title="En global tagg syns i alla pipelines"><input type="checkbox" data-idx="${idx}" class="tagGlobalCheck"${t.global ? ' checked' : ''}> Global</label>
-      <button type="button" data-idx="${idx}" class="tagDelBtn danger" title="Ta bort">Ta bort</button>
+      <input type="color" data-idx="${idx}" class="tagColorInput" value="${safeColor(t.color)}">
+      <input type="text" data-idx="${idx}" class="tagNameInput" value="${escapeHtml(t.name)}"${locked ? ' readonly' : ''}>
+      <label class="tag-global" title="En global tagg syns i alla pipelines"><input type="checkbox" data-idx="${idx}" class="tagGlobalCheck"${(t.global || locked) ? ' checked' : ''}${locked ? ' disabled' : ''}> Global</label>
+      ${locked ? '<span class="tag-locked-hint">Bokartagg – hanteras under Bokningar › Bokare</span>' : `<button type="button" data-idx="${idx}" class="tagDelBtn danger" title="Ta bort">Ta bort</button>`}
     `;
     wrap.appendChild(row);
   });
@@ -2354,10 +2860,11 @@ document.getElementById('tagAddBtn').addEventListener('click', () => {
   renderTagRows();
 });
 document.getElementById('tagSaveBtn').addEventListener('click', () => {
+  // Object.assign behåller bokareId; bokartaggar är alltid globala (spec 3.7)
   const cleaned = tagWorkingCopy.map(t => Object.assign({}, t, {
     name: t.name.trim() || 'Namnlös tagg',
-    pipelineId: t.pipelineId || activePipelineId,
-    global: !!t.global,
+    pipelineId: t.bokareId ? '' : (t.pipelineId || activePipelineId),
+    global: t.bokareId ? true : !!t.global,
   }));
   // Byt bara ut de taggar som var synliga i denna pipeline — rör inte andra pipelines taggar
   const wasVisible = new Set(visibleTagsFor(activePipelineId).map(t => t.id));
@@ -2366,6 +2873,10 @@ document.getElementById('tagSaveBtn').addEventListener('click', () => {
   leads.forEach(l => { if (l.tags) l.tags = l.tags.filter(id => keptIds.has(id)); });
   saveTags(TAGS);
   saveLeads(leads);
+  // Återskapa bokartaggar som saknas (spec 3.7)
+  let bokareChanged = false;
+  BOKARE.forEach(b => { if (!TAGS.some(t => t.id === b.tagId)) { ensureBokareTag(b); bokareChanged = true; } });
+  if (bokareChanged) saveBokare(BOKARE);
   renderBoard();
   renderLeadTagsPicker();
   document.getElementById('tagModalBackdrop').classList.remove('open');
@@ -2438,6 +2949,11 @@ document.getElementById('plSaveBtn').addEventListener('click', () => {
   const cleaned = plWorkingCopy.map(p => Object.assign({}, p, { name: p.name.trim() || 'Namnlös pipeline' }));
   const oldIds = new Set(PIPELINES.map(p => p.id));
   const keptIds = new Set(cleaned.map(p => p.id));
+  // Spärr (spec 3.7): en pipeline som tas bort i DENNA sparning får inte refereras av bokare eller mötestyper.
+  // Redan föräldralösa referenser (pipelineId som inte fanns före sparningen) blockerar inte.
+  const borttagen = id => !!id && oldIds.has(id) && !keptIds.has(id);
+  const refererad = BOKARE.some(b => borttagen(b.pipelineId)) || MOTESTYPER.some(m => borttagen(m.pipelineId));
+  if (refererad) { alert('Pipelinen används av bokare/mötestyper – ta bort eller flytta dem först'); return; }
   // Nya pipelines får en egen uppsättning standardkategorier
   cleaned.forEach(p => {
     if (!oldIds.has(p.id)) STAGES = STAGES.concat(seedStagesFor(p.id));
@@ -2505,8 +3021,9 @@ function parseOcrText(text) {
   const orgnrM = text.match(/\b(\d{6})\s?[-–]\s?(\d{4})\b/);
   if (orgnrM) out.orgnr = orgnrM[1] + '-' + orgnrM[2];
 
-  // Telefon: svenska format, men inte orgnr
-  const phoneCandidates = text.match(/(?:\+46|0)[\d\s\-()]{7,15}\d/g) || [];
+  // Telefon: svenska format, men inte orgnr (orgnr-träffen stryks först så den inte spiller över i telefonsökningen)
+  const phoneText = orgnrM ? text.replace(orgnrM[0], ' ') : text;
+  const phoneCandidates = phoneText.match(/(?:\+46|0)[\d\s\-()]{7,15}\d/g) || [];
   for (const c of phoneCandidates) {
     const digits = c.replace(/\D/g, '');
     if (out.orgnr && digits === out.orgnr.replace('-', '')) continue;
@@ -2609,7 +3126,8 @@ document.getElementById('shotModalBackdrop').addEventListener('click', e => {
 document.getElementById('shotCreateBtn').addEventListener('click', () => {
   if (!shotDataUrl) return;
   const log = [{ id: uid(), type: 'image', content: shotDataUrl, ts: nowLabel() }];
-  if (shotOcrResult && shotOcrResult.orgnr) {
+  // Giltigt OCR-orgnr fylls i kundens orgnr-fält nedan; ogiltig träff behålls som loggpost (som före M1)
+  if (shotOcrResult && shotOcrResult.orgnr && !normalizeOrgnr(shotOcrResult.orgnr)) {
     log.push({ id: uid(), type: 'text', content: 'Orgnr (OCR): ' + shotOcrResult.orgnr, ts: nowLabel() });
   }
   const prefill = { log };
@@ -2620,6 +3138,8 @@ document.getElementById('shotCreateBtn').addEventListener('click', () => {
   openCustQuickAddModal('lead');
   if (ocr) {
     document.getElementById('custQuickNamn').value = ocr.namn || '';
+    document.getElementById('custQuickOrgnr').value = normalizeOrgnr(ocr.orgnr) || '';
+    checkCustQuickOrgnr();
     document.getElementById('custQuickAdress').value = ocr.adress || '';
     document.getElementById('custQuickKontakt').value = ocr.kontakt || '';
     document.getElementById('custQuickTelefon').value = ocr.telefon || '';
@@ -2749,7 +3269,14 @@ document.getElementById('exportQuestionsBtn').addEventListener('click', () => {
 
 function exportCsv(rows, cols, filename) {
   const header = cols.join(';');
-  const lines = rows.map(r => cols.map(c => '"' + String(r[c] || '').replace(/"/g,'""') + '"').join(';'));
+  // Formelskydd: celler som börjar med = + - @ tab CR får ett inledande ' (formelinjektion i Excel/LibreOffice, OWASP).
+  // Rena tal/telefonnummer (t.ex. "+46 70 111 22 33", "-5") undantas – de kan inte bli formler men blir oläsliga med apostrof.
+  const cell = v => {
+    let s = String(v || '');
+    if (/^[=+\-@\t\r]/.test(s) && !/^[+\-]?[\d\s().\-]+$/.test(s)) s = "'" + s;
+    return '"' + s.replace(/"/g,'""') + '"';
+  };
+  const lines = rows.map(r => cols.map(c => cell(r[c])).join(';'));
   const csv = [header].concat(lines).join('\n');
   const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
   const url = URL.createObjectURL(blob);
