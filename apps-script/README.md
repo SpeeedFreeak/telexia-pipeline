@@ -46,7 +46,7 @@ Saknas något av de tre fil-id:na, eller misslyckas filkontrollen (filen i pappe
 ### Verifiera i redigeraren efter inklistring (en gång per deploy)
 
 - `Logger.log(Session.getEffectiveUser().getEmail())` → CJ:s adress, **inte tom sträng**. Tom sträng = scopet `userinfo.email` saknas/är inte godkänt; då svarar all filhantering `E_SETUP` "Scriptet saknar behörighet userinfo.email".
-- `Logger.log(Session.getScriptTimeZone())` → `Europe/Stockholm` (annars svarar allt `E_INTERNAL`).
+- `Logger.log(Session.getScriptTimeZone())` → `Europe/Stockholm` eller en zon med samma regler (Googles meny ger ofta `Europe/Berlin`; godtas av `tidszonOk()`). En zon med andra regler ger `E_INTERNAL` på alla anrop.
 - `Logger.log('Storgatan 1, Sverige!'.replace(/[^\p{L}\p{N}\s]/gu, ' '))` → `Storgatan 1  Sverige ` utan `SyntaxError` (Unicode property escapes i `normalizeAdressKey`, Availability.gs). Vid fel: byt regexen till `/[^a-z0-9åäöéü\s]/g` (strängen är redan i gemener).
 - `runAvailabilityTests()` → "Alla N test OK" i loggen.
 - `<URL>?action=ping` → `konfigurerad:true` och `orsak:""` när Anslut-guiden körts (fil-id:n + `ADMIN_KEY` finns och alla tre filerna klarar kontrollen); `mapsVarning` tom när Maps-nyckeln är rätt begränsad.

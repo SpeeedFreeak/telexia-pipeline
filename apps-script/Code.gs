@@ -304,11 +304,22 @@ function doGet(e) {
   return doPost({ postData: { contents: JSON.stringify({ action: 'ping' }) } });
 }
 
+// Tidszonskontroll (5.9): Googles inställningsmeny kan ge t.ex. Europe/Berlin även när Stockholm väljs.
+// Godta varje tidszon med samma vinter- och sommartid som Stockholm (offset jämförs för januari och juli).
+function tidszonOk() {
+  const tz = Session.getScriptTimeZone();
+  if (tz === TZ) return true;
+  try {
+    const prov = [new Date(Date.UTC(2026, 0, 15, 12)), new Date(Date.UTC(2026, 6, 15, 12))];
+    return prov.every(d => Utilities.formatDate(d, tz, 'XXX') === Utilities.formatDate(d, TZ, 'XXX'));
+  } catch (e) { return false; }
+}
+
 // Routing: kör handlern, översätter kända fel till kuvert. Okända fel bubblar till doPost (E_INTERNAL).
 function route(req, setCtx) {
   const ctx = { action: String(req.action || ''), bokareId: '', kodKey: '', configRev: null };
   try {
-    if (Session.getScriptTimeZone() !== TZ) throw new Error('Scriptets tidszon avviker från ' + TZ + ' – sätt den i Projektinställningar');
+    if (!tidszonOk()) throw new Error('Scriptets tidszon (' + Session.getScriptTimeZone() + ') har andra regler än ' + TZ + ' – sätt den i Projektinställningar');
     const handler = Object.prototype.hasOwnProperty.call(HANDLERS, ctx.action) ? HANDLERS[ctx.action] : null;
     if (!handler) return errEnvelope('E_VALIDATION', 'Okänd åtgärd', { falt: { action: 'Okänd åtgärd' } });
     const data = handler(req, ctx);
