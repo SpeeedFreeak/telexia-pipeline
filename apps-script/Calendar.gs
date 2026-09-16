@@ -23,6 +23,8 @@
  *     varning:'' }
  *   plats.omrade (steg 2c, A56) = områdesetikett 'Stad · Stadsdel' när platsen är geokodad – ur inkorgspostens geo.omrade,
  *   reservationens plats.omrade (Code.gs) eller geokodaAnkare (Availability.gs) för platstexter; aldrig satt utan koordinater.
+ *   hasPlace (Teams-fix, version 7): en bokning vars mötestyp saknar restid (kalRestidFn_, via motestypId) får alltid hasPlace:false
+ *   – plats/omrade kan finnas kvar för visning men posten blir aldrig restidsankare (isTravelMeeting).
  *
  * Inget av det som läses här loggas: ICS-url, titlar och platser stannar i minnet/CacheService.
  */
@@ -154,7 +156,8 @@ function heldagSegments(startDatum, slutDatumExkl, base) {
 /**
  * @param ev     Events-resurs från Calendar v3.
  * @param kalla  'privat' (lage 'tider') eller 'bokningar' (lage 'fullt').
- * @param opts   { cooldownFor: fn(motestypId) → min }  (bara för 'bokningar')
+ * @param opts   { cooldownFor: fn(motestypId) → min, restidFor: fn(motestypId) → bool }  (bara för 'bokningar')
+ *               restidFor (Teams-fix, version 7): mötestyp utan restid → hasPlace:false även om location är satt (aldrig ankare).
  * @return       [] om händelsen inte räknas, annars dag-segment.
  */
 function normalizeGoogleEvent(ev, kalla, opts) {
@@ -173,12 +176,13 @@ function normalizeGoogleEvent(ev, kalla, opts) {
   const recurringEventId = String(ev.recurringEventId || '');
   const matchIds = [eventId, recurringEventId].filter(Boolean);
   const platsText = typ === 'focusTime' ? '' : String(ev.location || '');    // fokustid = hinder utan plats
+  const utanRestid = kalla === 'bokningar' && motestypId && typeof opts.restidFor === 'function' && opts.restidFor(motestypId) === false;
   const base = {
     id: bokningId ? 'bk_' + bokningId : 'gcal:' + eventId,
     kalla: kalla === 'bokningar' ? 'bokningar' : 'privat',
     eventId, recurringEventId, iCalUID: String(ev.iCalUID || ''), matchIds,
     summary: typ === 'focusTime' ? 'Fokustid' : String(ev.summary || ''),
-    plats: kalPlats(platsText), hasPlace: kalLooksLikePlace(platsText),
+    plats: kalPlats(platsText), hasPlace: !utanRestid && kalLooksLikePlace(platsText),
     cooldownMin: (kalla === 'bokningar' && motestypId && typeof opts.cooldownFor === 'function') ? (opts.cooldownFor(motestypId) | 0) : 0,
     bokningId, motestypId,
     bokareId: kalla === 'bokningar' ? String(priv.bokareId || '') : '',
@@ -562,23 +566,26 @@ function reservationToBusy(rs, opts) {
   return splitToDays(new Date(rs.start), new Date(rs.slut), base);
 }
 
-/** Inkorgspost med status ny/importerad (bokad) → segment; kalla 'bokningar', id 'bk_<bokningId>'. */
+/** Inkorgspost med status ny/importerad (bokad) → segment; kalla 'bokningar', id 'bk_<bokningId>'.
+ *  opts: { cooldownFor, restidFor } – restidFor(motestypId) === false (Teams-fix, version 7) → hasPlace:false: adress/geo/omrade
+ *  behålls på plats för visning (Kalenderkoll), men posten blir aldrig restidsankare. */
 function inboxBookingToBusy(b, opts) {
   opts = opts || {};
   if (!b || !b.start || !b.slut) return [];
   const st = String(b.status || '');
   if (st !== 'ny' && st !== 'importerad' && st !== 'bokad' && st !== 'ombokad') return [];
+  const utanRestid = typeof opts.restidFor === 'function' && opts.restidFor(String(b.motestypId || '')) === false;
   const base = {
     id: 'bk_' + String(b.bokningId || ''), kalla: 'bokningar', matchIds: b.kalenderEventId ? [String(b.kalenderEventId)] : [],
     eventId: String(b.kalenderEventId || ''),
-    plats: kalPlats(b.adress), hasPlace: kalLooksLikePlace(b.adress),
+    plats: kalPlats(b.adress), hasPlace: !utanRestid && kalLooksLikePlace(b.adress),
     cooldownMin: typeof opts.cooldownFor === 'function' ? (opts.cooldownFor(b.motestypId) | 0) : 0,
     bokningId: String(b.bokningId || ''), bokareId: String(b.bokareId || ''), motestypId: String(b.motestypId || ''),
     pipelineId: String(b.pipelineId || ''), kundnamn: b.kund && b.kund.namn ? String(b.kund.namn) : '',
     summary: 'Bokning'                              // aldrig kundnamn i titeln (calendar-preview, M4) – kundnamn är eget fält (bara ägande bokare)
   };
   if (b.geo && typeof b.geo.lat === 'number' && typeof b.geo.lng === 'number') {
-    base.plats.lat = b.geo.lat; base.plats.lng = b.geo.lng; base.plats.geokodad = true; base.hasPlace = true;
+    base.plats.lat = b.geo.lat; base.plats.lng = b.geo.lng; base.plats.geokodad = true; base.hasPlace = !utanRestid;
     if (typeof b.geo.omrade === 'string' && b.geo.omrade.trim()) base.plats.omrade = b.geo.omrade.trim().slice(0, 60);   // steg 2c: områdesetikett
   }
   return splitToDays(new Date(b.start), new Date(b.slut), base);
@@ -680,11 +687,15 @@ function applyIgnore(list, ignorerade) {
   });
 }
 
-/** Sätter härledda fält (isTravelMeeting = hasPlace && !ignore, heldag aldrig ankare) och rensar kundnamn på andras poster. */
+/** Sätter härledda fält (isTravelMeeting = hasPlace && !ignore, heldag aldrig ankare) och rensar kundnamn på andras poster.
+ *  opts.restidFor (Teams-fix, version 7): en sammanslagen post med motestypId vars typ saknar restid får hasPlace:false – fångar
+ *  Outlooks ICS-kopia av en äldre Teams-bokning (LOCATION satt före version 7): den vinner sammanslagningen på hasPlace och bär
+ *  förlorarens bokningId/motestypId, så regeln i normalizeGoogleEvent/inboxBookingToBusy räcker inte ensam. */
 function finalizeBusy(list, opts) {
   opts = opts || {};
   return (list || []).map(x => {
     const item = Object.assign({}, x);
+    if (item.motestypId && typeof opts.restidFor === 'function' && opts.restidFor(item.motestypId) === false) item.hasPlace = false;
     item.isTravelMeeting = !!item.hasPlace && !item.ignore && !item.heldag;
     if (item.kalla === 'bokningar' || item.kalla === 'reservation') {
       item.egen = item.egen || (!!opts.bokareId && item.bokareId === opts.bokareId);
@@ -827,6 +838,14 @@ function kalCooldownFn_(config) {
   const map = {};
   ((config && config.motestyper) || []).forEach(m => { if (m && m.id) map[m.id] = m.cooldownMin | 0; });
   return id => map[id] || 0;
+}
+/** restid per mötestyp (Teams-fix, version 7): motestypId → typ.restid === true. Okänd/borttagen typ → true (hellre ett ankare
+ *  för mycket än en dubbelbokad resa). Används av normalizeGoogleEvent ('bokningar' med extendedProperties.private.motestypId)
+ *  och inboxBookingToBusy: restidFor(motestypId) === false → hasPlace:false (plats/omrade får finnas kvar för visning, inget ankare). */
+function kalRestidFn_(config) {
+  const map = {};
+  ((config && config.motestyper) || []).forEach(m => { if (m && m.id) map[m.id] = m.restid === true; });
+  return id => (id && Object.prototype.hasOwnProperty.call(map, id) ? map[id] : true);
 }
 function kalHorisontVeckor_(config) {
   const v = config && config.installningar ? parseInt(config.installningar.horisontVeckor, 10) : 0;
@@ -1046,7 +1065,7 @@ function readBusy(fran, till, opts) {
     } catch (err) { /* trasig cache → läs */ }
   }
 
-  const cooldownFor = kalCooldownFn_(config);
+  const cooldownFor = kalCooldownFn_(config), restidFor = kalRestidFn_(config);
   const timeMin = rfc3339_(new Date(toIsoWithOffset(fran, '00:00')));
   const timeMax = rfc3339_(new Date(toIsoWithOffset(addDays(till, 1), '00:00')));
   const items = [];
@@ -1056,7 +1075,7 @@ function readBusy(fran, till, opts) {
     if (lage !== 'tider' && lage !== 'fullt') return;
     const kalla = lage === 'fullt' ? 'bokningar' : 'privat';
     listGoogleEvents_(String(k.id), timeMin, timeMax).forEach(ev => {
-      normalizeGoogleEvent(ev, kalla, { cooldownFor }).forEach(seg => { if (seg.datum >= fran && seg.datum <= till) items.push(seg); });
+      normalizeGoogleEvent(ev, kalla, { cooldownFor, restidFor }).forEach(seg => { if (seg.datum >= fran && seg.datum <= till) items.push(seg); });
     });
   });
 
@@ -1102,7 +1121,7 @@ function kalUndantaBokning_(items, bokningId) {
 function buildBusyList(from, to, opts) {
   opts = opts || {};
   const config = kalConfig_(opts);
-  const cooldownFor = kalCooldownFn_(config);
+  const cooldownFor = kalCooldownFn_(config), restidFor = kalRestidFn_(config);
   const busy = readBusy(from, to, { config, farsk: !!opts.farsk });
   const varningar = (busy.varningar || []).slice();
   let items = busy.slice();
@@ -1114,7 +1133,7 @@ function buildBusyList(from, to, opts) {
   ((inbox && inbox.bokningar) || []).forEach(b => {
     if (!b) return;
     if (b.bokningId && b.kund && b.kund.namn) kundnamn[b.bokningId] = String(b.kund.namn);
-    inboxBookingToBusy(b, { cooldownFor }).forEach(seg => { if (seg.datum >= from && seg.datum <= to) items.push(seg); });
+    inboxBookingToBusy(b, { cooldownFor, restidFor }).forEach(seg => { if (seg.datum >= from && seg.datum <= to) items.push(seg); });
   });
   items.forEach(x => { if (x.kalla === 'bokningar' && x.bokningId && !x.kundnamn && kundnamn[x.bokningId]) x.kundnamn = kundnamn[x.bokningId]; });
 
@@ -1132,7 +1151,7 @@ function buildBusyList(from, to, opts) {
 
   let out = mergeBusy(items);
   out = applyIgnore(out, config.ignorerade || []);
-  out = finalizeBusy(out, { bokareId: opts.bokareId });
+  out = finalizeBusy(out, { bokareId: opts.bokareId, restidFor });
   out.varningar = varningar;
   return out;
 }

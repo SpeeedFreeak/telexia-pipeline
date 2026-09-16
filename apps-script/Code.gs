@@ -13,7 +13,9 @@
  *                      bokar-endpoints egen-rebook/egen-cancel/egen-update (steg 2a, SCRIPT_VERSION 4),
  *                      adressforslag + placeId-stöd i geokodningen (steg 2b, SCRIPT_VERSION 5),
  *                      områdesetikett för bokare + restid (resor) i calendar-preview + omrade-backfill i dailyMaintenance
- *                      (steg 2c, SCRIPT_VERSION 6).
+ *                      (steg 2c, SCRIPT_VERSION 6),
+ *                      inkorg i CacheService + Drive-filmemo + ICS-värmare refreshIcsCache + Teams-fix (location bara vid restid)
+ *                      + rebook släpper reservationen (version 7, SCRIPT_VERSION 7).
  *   Calendar.gs      – readBusy(fran, till), parseIcs, mergeBusy, applyIgnore, buildBusyList(from, to).
  *   Availability.gs  – computeAvailability(req), dayPlan, placeTravel, geocodeAddress(adress, { placeId }), hamtaAdressforslag(q, token),
  *                      travelMinutes, travelSecondsForPairs_, previewResor, geokodaAnkare, backfillOmrade_, swedishHolidays.
@@ -30,7 +32,7 @@
 // Konstanter
 // ============================================================
 
-const SCRIPT_VERSION = 6;                       // MIN_SCRIPT_VERSION i index.html/bokning.js jämförs mot denna (4.12); 3 = M5 (purge, dailyMaintenance, nya ping-fält); 4 = steg 2a (egen-rebook/egen-cancel/egen-update, hello.egna med kanAndras); 5 = steg 2b (adressforslag via Places, placeId i geokodning – valfritt: MIN_SCRIPT_VERSION förblir 4); 6 = steg 2c (block.omrade i availability, omrade + resor i calendar-preview – valfria fält: MIN_SCRIPT_VERSION förblir 4)
+const SCRIPT_VERSION = 7;                       // MIN_SCRIPT_VERSION i index.html/bokning.js jämförs mot denna (4.12); 3 = M5 (purge, dailyMaintenance, nya ping-fält); 4 = steg 2a (egen-rebook/egen-cancel/egen-update, hello.egna med kanAndras); 5 = steg 2b (adressforslag via Places, placeId i geokodning – valfritt: MIN_SCRIPT_VERSION förblir 4); 6 = steg 2c (block.omrade i availability, omrade + resor i calendar-preview – valfria fält: MIN_SCRIPT_VERSION förblir 4); 7 = optimering (inkorg i CacheService, en cache-filskrivning per körning, ICS-värmare) + restid tydlig (paus-block, 0 min samma adress, Teams-fix, mejltext) + rebook släpper reservation (valfria fält: MIN_SCRIPT_VERSION förblir 4)
 const TZ = 'Europe/Stockholm';
 const APP_URL = 'https://speeedfreeak.github.io/telexia-pipeline/';   // länk i notismejlet (4.9)
 const MAX_BODY_BYTES = 16384;                   // body kontrolleras före JSON.parse (4.3)
@@ -113,6 +115,7 @@ const PROP = {
   CONFIG_FILE_ID: 'CONFIG_FILE_ID',
   INBOX_FILE_ID: 'INBOX_FILE_ID',
   CACHE_FILE_ID: 'CACHE_FILE_ID',
+  INBOX_REV: 'INBOX_REV',           // version 7: rev för den inkorg som senast lades i CacheService (skrivs bara under låset)
   MAPS_API_KEY: 'MAPS_API_KEY',
   MAPS_DAILY_CAP: 'MAPS_DAILY_CAP'
 };
@@ -333,13 +336,14 @@ function errEnvelope(code, message, details) {
 
 function doPost(e) {
   try { return doPostInner_(e); }
-  finally { if (typeof availFlushGeokod_ === 'function') availFlushGeokod_(); }   // körningens nya geokodposter → cache-filen, en skrivning (A51)
+  finally { if (typeof availFlushGeokod_ === 'function') availFlushGeokod_(); }   // körningens nya geokod- OCH restidsposter → cache-filen, en skrivning (A51, version 7)
 }
 function doPostInner_(e) {
   const t0 = Date.now(); let action = '?', bokareId = '';
   try {
     if (typeof kalResetMemo_ === 'function') kalResetMemo_();   // per-anrop-memo (ICS) – varje request är en ny körning
     if (typeof availResetMemo_ === 'function') availResetMemo_();   // per-anrop-memo (cache-filen, A51)
+    brevladaResetMemo_();                                          // per-anrop-memo (Drive-filobjekten, version 7)
 
     if (!e || !e.postData || typeof e.postData.contents !== 'string' || e.postData.contents.length > MAX_BODY_BYTES)
       return respond(errEnvelope('E_VALIDATION', 'Ogiltig eller för stor förfrågan'));
@@ -454,10 +458,22 @@ function verifyBrevladaFile(id, opts) {
   cache.put(key, '1', SETUP_CACHE_S);
   return file;
 }
-function brevladaFile(id) { return verifyBrevladaFile(id) || DriveApp.getFileById(id); }
+// Memo per körning (version 7): DriveApp.getFileById går över Drive-bryggan (~0,2–0,5 s) och anropades förut vid varje
+// läsning OCH skrivning av samma fil (book: inkorg läs + skriv, cache-fil läs + skriv …). File-objektet är ett handtag –
+// getBlob/setContent läser resp. skriver alltid färskt, så memot ändrar ingen semantik. Nollställs i doPostInner_,
+// dailyMaintenance och refreshIcsCache (bredvid kalResetMemo_/availResetMemo_). verifyBrevladaFile (setupok:) oförändrad.
+let BREVLADA_FIL_MEMO = {};
+function brevladaResetMemo_() { BREVLADA_FIL_MEMO = {}; }
+function brevladaFile(id) {
+  if (BREVLADA_FIL_MEMO[id]) return BREVLADA_FIL_MEMO[id];
+  const file = verifyBrevladaFile(id) || DriveApp.getFileById(id);
+  BREVLADA_FIL_MEMO[id] = file;
+  return file;
+}
 function clearSetupCache() {
   const c = CacheService.getScriptCache();
   [PROP.CONFIG_FILE_ID, PROP.INBOX_FILE_ID, PROP.CACHE_FILE_ID].forEach(p => { const id = getProp(p); if (id) c.remove('setupok:' + id); });
+  inboxCacheRensa_();   // setup kan så inkorgsfilen (seedBrevladaFile) – en cachad kopia av ett tidigare innehåll får inte överleva
 }
 
 function readJsonFile(id) {
@@ -520,14 +536,91 @@ function normalizeConfig(raw) {
 }
 
 // --- Inkorg (skrivs bara av scriptet, alltid under lås) ---
+// Version 7: inkorgen cachas i CacheService (6 h). Scriptet är ENSAM skrivare av inkorgsfilen (appen läser den bara via
+// inbox-list), så en cachad kopia är koherent så länge BARA LÅSHÅLLAREN fyller cachen (4.8): writeInbox (1) invaliderar,
+// (2) skriver Drive, (3) lägger det nya innehållet i cachen + dess rev i Script Property INBOX_REV (best effort – misslyckas
+// steg 3 läser nästa anrop Drive). En läsning UTAN lås (hello/availability/calendar-preview/inbox-list …) får cache-träffar
+// men fyller aldrig cachen: den kan läsa Drive mitt i en skrivning (efter steg 1, före steg 2) och hade annars planterat den
+// gamla kopian EFTER skrivarens steg 3 – nästa läs-ändra-skriv under låset hade då skrivit bort den nya bokningen (inkorgen
+// tappar posten, idempotensnyckeln saknas → dubblett vid retry). Skyddsnät nr 2: en cache-träff godtas bara när dess rev ==
+// INBOX_REV (annars Drive) – täcker även att steg 1 OCH 3 tyst misslyckas (raderade poster hade återuppstått, 8.3/purge).
+// Format som ICS-cachen men med egna nycklar/hjälpfunktioner (cacheChunked*): JSON → gzip → base64 → bitar ≤
+// INBOX_CACHE_CHUNK_BYTES under 'inbox:<fileId>:<n>' + index 'inbox:<fileId>' { v:1, delar, langd, rev, ts }; fler än
+// INBOX_CACHE_MAX_CHUNKS bitar → ingen cache. Ingen per-körning-memo av objektet – anroparna muterar det (book pushar, ack
+// ändrar status …) och en färsk kopia per readInbox är just det låset förutsätter. Sparar Drive-läsningen (~0,3–1 s) i
+// hello/availability/book/reserve/calendar-preview.
+const INBOX_CACHE_S = 21600;
+const INBOX_CACHE_CHUNK_BYTES = 90 * 1024;
+const INBOX_CACHE_MAX_CHUNKS = 8;
+function inboxCacheKey_() { return 'inbox:' + getFileIds().inbox; }
 function readInbox() {
-  const inbox = readJsonFile(getFileIds().inbox);
+  let inbox = null;
+  try { inbox = cacheChunkedGet_(inboxCacheKey_()); } catch (e) { inbox = null; }   // trasig/ofullständig cache → Drive
+  if (isPlainObject(inbox) && String(Number(inbox.rev) || 0) !== getProp(PROP.INBOX_REV)) inbox = null;   // speglar inte senaste skrivning → Drive
+  if (!isPlainObject(inbox)) {
+    inbox = readJsonFile(getFileIds().inbox);
+    if (LAS_HALLS_) inboxCacheSpara_(inbox);   // bara låshållaren fyller cachen (se ovan)
+  }
   if (!Array.isArray(inbox.bokningar)) inbox.bokningar = [];
   inbox.bokningar = inbox.bokningar.filter(isPlainObject);
   return inbox;
 }
-function writeInbox(inbox) { return writeJsonFile(getFileIds().inbox, inbox); }
+// Anroparen håller låset (4.8).
+function writeInbox(inbox) {
+  try { cacheChunkedRemove_(inboxCacheKey_()); } catch (e) { /* best effort */ }
+  const ut = writeJsonFile(getFileIds().inbox, inbox);
+  inboxCacheSpara_(ut);
+  return ut;
+}
+// INBOX_REV först, sedan cachen: misslyckas propertyn läggs inget i cachen (rev-kontrollen hade ändå avvisat kopian).
+function inboxCacheSpara_(inbox) {
+  try { setProp(PROP.INBOX_REV, Number(inbox.rev) || 0); cacheChunkedPut_(inboxCacheKey_(), inbox, INBOX_CACHE_S); } catch (e) { /* best effort – nästa läsning tar Drive */ }
+}
+function inboxCacheRensa_() {
+  try { const id = getProp(PROP.INBOX_FILE_ID); if (id) cacheChunkedRemove_('inbox:' + id); } catch (e) { /* best effort */ }
+}
 function findBokningInInbox(inbox, bokningId) { return inbox.bokningar.find(b => b.bokningId === bokningId) || null; }
+
+// --- Generisk chunkad, komprimerad CacheService-lagring av ett JSON-objekt (version 7; inkorgen). ---
+// Egna nycklar och format – återanvänder INTE Calendar.gs kalIcs* (de bär ICS-specifik meta och version).
+// cacheChunkedPut_(key, obj, ttlS) → true om cachat (för stort → false). cacheChunkedGet_(key) → objekt | null (saknas,
+// ofullständig – t.ex. en bit utgången – eller trasig). cacheChunkedRemove_(key) tar bort index + alla möjliga bitar. Kastar aldrig.
+function cacheChunkedPut_(key, obj, ttlS) {
+  try {
+    const json = JSON.stringify(obj);
+    const b64 = Utilities.base64Encode(Utilities.gzip(Utilities.newBlob(json, 'application/json')).getBytes());
+    const delar = [];
+    for (let i = 0; i < b64.length; i += INBOX_CACHE_CHUNK_BYTES) delar.push(b64.slice(i, i + INBOX_CACHE_CHUNK_BYTES));
+    if (!delar.length || delar.length > INBOX_CACHE_MAX_CHUNKS) return false;
+    const put = {};
+    delar.forEach((d, i) => { put[key + ':' + i] = d; });
+    put[key] = JSON.stringify({ v: 1, delar: delar.length, langd: b64.length, rev: Number(obj && obj.rev) || 0, ts: nowIso() });
+    CacheService.getScriptCache().putAll(put, Math.min(21600, ttlS || INBOX_CACHE_S));
+    return true;
+  } catch (e) { return false; }
+}
+function cacheChunkedGet_(key) {
+  try {
+    const cache = CacheService.getScriptCache();
+    const raw = cache.get(key);
+    if (!raw) return null;
+    const idx = JSON.parse(raw);
+    if (!isPlainObject(idx) || idx.v !== 1 || !(idx.delar >= 1) || idx.delar > INBOX_CACHE_MAX_CHUNKS) return null;
+    const nycklar = [];
+    for (let i = 0; i < idx.delar; i++) nycklar.push(key + ':' + i);
+    const hit = cache.getAll(nycklar) || {};
+    const delar = nycklar.map(k => hit[k]);
+    if (delar.some(d => typeof d !== 'string' || !d) || delar.join('').length !== idx.langd) return null;
+    const bytes = Utilities.base64Decode(delar.join(''));
+    const obj = JSON.parse(Utilities.ungzip(Utilities.newBlob(bytes, 'application/x-gzip')).getDataAsString('UTF-8'));
+    return isPlainObject(obj) ? obj : null;
+  } catch (e) { return null; }
+}
+function cacheChunkedRemove_(key) {
+  const nycklar = [key];
+  for (let i = 0; i < INBOX_CACHE_MAX_CHUNKS; i++) nycklar.push(key + ':' + i);
+  try { CacheService.getScriptCache().removeAll(nycklar); } catch (e) { /* best effort */ }
+}
 
 // --- Cache-fil (geokod, restid, icsReserv) – används av Availability.gs/Calendar.gs ---
 function readCacheFile() {
@@ -543,13 +636,16 @@ function writeCacheFile(c) { return writeJsonFile(getFileIds().cache, c); }
 // Lås (4.8)
 // ============================================================
 
+// LAS_HALLS_: true medan fn() kör – readInbox fyller inkorgscachen bara då (version 7). Nästla aldrig withScriptLock.
+let LAS_HALLS_ = false;
 function withScriptLock(fn, waitMs) {
   const lock = LockService.getScriptLock();
   let fick = false;
   try { fick = lock.tryLock(waitMs || LOCK_WAIT_MS); } catch (e) { fick = false; }
   if (!fick) fel('E_LOCK');
+  LAS_HALLS_ = true;
   try { return fn(); }
-  finally { try { lock.releaseLock(); } catch (e) { /* redan släppt */ } }
+  finally { LAS_HALLS_ = false; try { lock.releaseLock(); } catch (e) { /* redan släppt */ } }
 }
 
 // ============================================================
@@ -1231,12 +1327,13 @@ function handleBook(req, ctx) {
   const reservationId = typeof req.reservationId === 'string' ? req.reservationId.slice(0, 64) : '';
   if (typ.restid && input.adress) checkAdressLimits(ctx, input.adress);
   const slutIso = toIsoWithOffset(st.datum, minToTid(tidToMin(st.tid) + typ.langdMin));
-  // Geokodning och dagsberäkning (utan färsk kalenderläsning) FÖRE låset värmer cacherna: geocodeAddress, ICS,
-  // ankare och Distance Matrix blir cache-träffar inuti låset, som då bara gör Calendar.Events.list + Drive.
+  // Nätverks-I/O FÖRE låset (4.8): geokodning av bokarens adress och en uttrycklig ICS-läsning (UrlFetchApp vid cache-miss;
+  // memot i Calendar.gs gör läsningen under låset till en kopia). Version 7: ingen findSlot-uppvärmning (warmSlotCaches) här –
+  // allt annat (ankarnas geokodning, Distance Matrix) värmdes av reserve högst 5 min tidigare (CacheService geo:/restid: 6 h),
+  // den färska beräkningen under låset avgör ändå, och uppvärmningen kostade en kalenderläsning + en inkorgsläsning per bokning.
   // updateCacheFile (Availability.gs) tar INGET lås – nästla aldrig withScriptLock.
   const geo = typ.restid ? geoForBooking(input.adress, ctx, input.placeId) : { lat: null, lng: null, formaterad: '', status: 'saknas' };
-  const egenFore = getReservation(reservationId);
-  warmSlotCaches(bokare, config, typ, input.adress, st, egenFore && egenFore.bokareId === bokare.id ? egenFore.id : ownReservationId(ctx));
+  if (typeof readIcs === 'function') { try { readIcs(config, { farsk: false }); } catch (e) { /* avgörs under låset */ } }
 
   let bokning = null, ny = false;
   withScriptLock(() => {
@@ -1300,18 +1397,25 @@ function handleBook(req, ctx) {
 
 // Hela händelseresursen för en inkorgspost (4.7). Används av createBookingEvent (insert) och – fält för fält – av
 // patchBookingEvent/patchBookingDetails (rebook, egen-update), så att titel/plats/beskrivning alltid byggs på ett ställe.
+// Teams-fix (version 7): location sätts BARA för mötestyper med restid. En Teams-bokning med kundens adress i location blev annars
+// ett restidsankare i Google-kalendern ('bokningar' med hasPlace) och i Outlook-kopian (ICS LOCATION) – Calendar.gs skyddar
+// numera också via motestypId (kalRestidFn_), men ICS-kopian av en händelse saknar motestypId, så adressen får inte ligga i
+// location. Adressen finns i stället som raden 'Adress: …' i beskrivningen (om den finns) – synlig för CJ, aldrig ett ankare.
+// patchBookingEvent/patchBookingDetails bygger på samma resurs och följer därmed regeln vid ombokning/egen-update.
 function bookingEventResource(config, bokare, typ, bokning) {
   const inst = config.installningar;
   const s = v => String(v || '').replace(/[<>]/g, ' ');   // aldrig HTML i kalender/Outlook
   const kontakt = isPlainObject(bokning.kontakt) ? bokning.kontakt : {};
   const kund = isPlainObject(bokning.kund) ? bokning.kund : {};
+  const medRestid = typ.restid === true;
   const resurs = {
     summary: s(typ.titel) + ': ' + s(kund.namn),
-    location: s(bokning.adress),
+    location: medRestid ? s(bokning.adress) : '',
     description: 'Bokad av: ' + s(bokare.namn) + '\nBokningId: ' + bokning.bokningId +
                  (inst.kontaktuppgifterIKalender === true
                    ? '\nKontakt: ' + s(kontakt.namn) + ', ' + s(kontakt.telefon) + ', ' + s(kontakt.epost)
                    : '\nKontakt: ' + s(kontakt.namn)) +
+                 (!medRestid && bokning.adress ? '\nAdress: ' + s(bokning.adress) : '') +
                  (bokning.notering ? '\nNotering: ' + s(bokning.notering) : ''),
     start: { dateTime: bokning.start, timeZone: TZ },
     end:   { dateTime: bokning.slut,  timeZone: TZ },
@@ -1358,7 +1462,7 @@ function notifyCj(config, bokare, typ, bokning) {
 function restidRadForMejl(typ, bokning) {
   const rs = bokning.restid && bokning.restid.status;
   if (typ.restid !== true) return 'ingen (möte utan restid)';
-  if (rs === 'ok') return 'ok (' + bokning.restid.foreMin + ' min före, ' + bokning.restid.efterMin + ' min efter)';
+  if (rs === 'ok') return 'ok (' + bokning.restid.foreMin + ' min före, ' + bokning.restid.efterMin + ' min efter, inkl. marginal)';   // K5: minuterna är restid + marginal (5.8)
   if (rs === 'schablon') return 'schablon – Maps gav inget svar';
   return 'OBS: restid okänd – kontrollera adressen';
 }
@@ -1720,6 +1824,7 @@ function seedBrevladaFile(file, roll, seed) {
   const text = String(file.getBlob().getDataAsString('UTF-8') || '').trim();
   if (text === '' || text === '{}' || text === 'null') {
     file.setContent(JSON.stringify(Object.assign({ schemaVersion: 1, rev: 0, updatedAt: nowIso(), updatedBy: 'script' }, seed)));
+    if (roll === 'inbox') inboxCacheRensa_();   // version 7: den cachade inkorgen (om någon) speglar inte längre filen
     return true;
   }
   let obj = null;
@@ -2221,6 +2326,9 @@ function rebookUtfor(config, bokare, typ, bokningId, forb, opts) {
     }
     clearBusyCacheFor({ start: fran, slut: franSlut });
     clearBusyCacheFor(b);
+    // Version 7: den honorerade reservationen (rebookReservationId – bokningens bokare eller CJ-bokare) har gjort sitt när flytten
+    // lyckats; släpp den så att luckan inte ligger kvar som hinder för andra i upp till 5 min (book gör detsamma via releaseOwnReservation).
+    if (forb.reservationId) { try { releaseReservation(forb.reservationId); } catch (e) { /* best effort – går ut av sig själv */ } }
     bokning = b;
   });
   return { bokning: bokning, fran: fran, kal: kal };
@@ -2256,7 +2364,11 @@ function patchBookingEvent(config, bokare, typ, bokning, nytt) {
   const uppdaterad = Object.assign({}, bokning, { start: nytt.start, slut: nytt.slut, adress: nytt.adress, motestypId: nytt.motestypId });
   const hel = bookingEventResource(config, bokare, typ, uppdaterad);
   const resurs = { start: hel.start, end: hel.end, location: hel.location };
-  if (nytt.motestypId !== str(bokning.motestypId)) { resurs.summary = hel.summary; resurs.extendedProperties = hel.extendedProperties; }
+  const typbyte = nytt.motestypId !== str(bokning.motestypId);
+  if (typbyte) { resurs.summary = hel.summary; resurs.extendedProperties = hel.extendedProperties; }
+  // Version 7 (Teams-fix): beskrivningen bär adressraden för typer utan restid – patchas när adress eller typ ändrats, och
+  // alltid för typer utan restid (location töms ju ovan; en bokning från ≤ v6 har adressen bara där och saknar Adress-raden).
+  if (typbyte || nytt.adress !== str(bokning.adress) || typ.restid !== true) resurs.description = hel.description;
   return patchEllerSkapa(config, bokare, typ, uppdaterad, resurs);
 }
 // Uppdaterar titel/plats/beskrivning på bokningens händelse efter bokarens ändrade uppgifter (egen-update, steg 2a) – bara de
@@ -2597,23 +2709,64 @@ const HANDLERS = {
 };
 
 // ============================================================
-// Trigger och underhåll (4.11) – install() körs en gång manuellt av CJ vid deploy (auktoriserar även scopes) och
+// Triggers och underhåll (4.11) – install() körs en gång manuellt av CJ vid deploy (auktoriserar även scopes) och
 // därefter idempotent av setup (Anslut-guiden). dailyMaintenance (M5): gallring av inkorg och cache-fil, räknare i Script
-// Properties, avstämning kalender ↔ inkorg. Loggar EN rad { trigger:'dailyMaintenance', ok, ms, … } utan personuppgifter.
+// Properties, avstämning kalender ↔ inkorg. refreshIcsCache (version 7): ICS-värmare var 10:e minut. Båda loggar EN rad
+// { trigger, ok, ms, … } utan personuppgifter.
 // ============================================================
+
+const ICS_VARMARE_MIN = 10;                        // trigger var 10:e minut (everyMinutes tillåter 1, 5, 10, 15, 30)
+const ICS_VARMARE_FARSK_MS = 9 * 60000;            // ics:meta.hamtadTs yngre än 9 min + busy-index finns → hoppa över (någon annan hann hämta)
 
 function install() {
   ScriptApp.getProjectTriggers()
-    .filter(t => t.getHandlerFunction() === 'dailyMaintenance')
+    .filter(t => t.getHandlerFunction() === 'dailyMaintenance' || t.getHandlerFunction() === 'refreshIcsCache')
     .forEach(t => ScriptApp.deleteTrigger(t));
   ScriptApp.newTrigger('dailyMaintenance').timeBased().everyDays(1).atHour(3).create();
-  return 'Trigger för dailyMaintenance skapad (kl 03–04). Scriptversion ' + SCRIPT_VERSION + '.';
+  ScriptApp.newTrigger('refreshIcsCache').timeBased().everyMinutes(ICS_VARMARE_MIN).create();
+  return 'Triggers skapade: dailyMaintenance (kl 03–04) och refreshIcsCache (var ' + ICS_VARMARE_MIN + ':e minut). Scriptversion ' + SCRIPT_VERSION + '.';
+}
+
+// ICS-värmare (version 7): håller CacheService-cachen ics:busy (15 min, Calendar.gs) varm så att bokningssidans/appens anrop
+// praktiskt taget aldrig gör UrlFetchApp mot Outlook själva (CJ:s flöde tar 2–8 s att hämta + parsa – det var den största posten
+// i availability/reserve/calendar-preview vid cache-miss). Kvot: 144 hämtningar/dygn, långt under UrlFetch-kvoten (20 000/dygn)
+// och trigger-runtime ≈ några sekunder per körning (gränsen är 90 min/dygn). Utan outlookIcsUrl gör körningen inget.
+// Hoppar över när ics:meta.hamtadTs är yngre än ICS_VARMARE_FARSK_MS och busy-indexet finns (ett anrop hann hämta nyss).
+// Fel fäller aldrig (try/catch) – readIcs sätter själv felmeta/reserv. Loggrad { trigger:'refreshIcsCache', ok, ms, kalla } utan personuppgifter.
+function refreshIcsCache() {
+  const t0 = Date.now();
+  let ok = true, kalla = 'hoppad';
+  try {
+    if (typeof kalResetMemo_ === 'function') kalResetMemo_();
+    if (typeof availResetMemo_ === 'function') availResetMemo_();
+    brevladaResetMemo_();
+    const config = loadConfig();
+    if (!str(config.installningar.outlookIcsUrl)) { kalla = 'ingen'; return; }
+    const cache = CacheService.getScriptCache();
+    let meta = null;
+    try { const m = cache.get(KAL_ICS_META_KEY); meta = m ? JSON.parse(m) : null; } catch (e) { meta = null; }   // nycklarna ägs av Calendar.gs
+    const hamtadMs = meta && typeof meta.hamtadTs === 'string' && meta.hamtadTs ? new Date(meta.hamtadTs).getTime() : NaN;
+    if (!isNaN(hamtadMs) && Date.now() - hamtadMs < ICS_VARMARE_FARSK_MS && cache.get(KAL_ICS_CACHE_KEY)) return;
+    const res = readIcs(config, { farsk: true });
+    ok = !!(res && res.ok); kalla = res ? str(res.kalla) : '';
+  } catch (e) {
+    if (errorCode(e) === 'E_SETUP') kalla = 'ingen';   // okonfigurerat script → tyst hoppad
+    else { ok = false; kalla = 'fel'; }
+  } finally {
+    if (typeof availFlushGeokod_ === 'function') availFlushGeokod_();   // pending-poster (om några) tappas aldrig
+    console.log(JSON.stringify({ trigger: 'refreshIcsCache', ok: ok, ms: Date.now() - t0, kalla: kalla }));
+  }
 }
 
 function dailyMaintenance() {
+  try { return dailyMaintenanceInner_(); }
+  finally { if (typeof availFlushGeokod_ === 'function') availFlushGeokod_(); }   // version 7: pending geokod-/restidsposter → cache-filen, aldrig tappade
+}
+function dailyMaintenanceInner_() {
   const t0 = Date.now();
   if (typeof availResetMemo_ === 'function') availResetMemo_();   // egen körning – memona ska vara tomma som i doPost
   if (typeof kalResetMemo_ === 'function') kalResetMemo_();
+  brevladaResetMemo_();
   const rad = { trigger: 'dailyMaintenance', ok: true, ms: 0, raknare: 0, inkorg: 0, utanImport: 0, geokod: 0, restid: 0, omrade: 0, saknas: 0, fel: [] };
   const nuMs = Date.now();
   // 1. Räknare i Script Properties äldre än 7 dagar (4.2, 4.11) – oberoende av brevlådan.

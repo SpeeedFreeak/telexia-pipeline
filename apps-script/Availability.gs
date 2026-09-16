@@ -242,6 +242,8 @@ function unikaPlatser(busy, cfg) {
 }
 // Bygger T(plats) → { min, kalla:'maps'|'forLangt'|'schablon' }. travelSekFn(X, platser) returnerar
 // { <cachenyckel>: sek | { sek, forLangt:true } | null } och anropas bara när X är geokodad och platser finns.
+// 0 sekunder (samma koordinater – travelSecondsForPairs_ ger 0 utan anrop) → 0 min UTAN marginal (version 7, K3): ingen resa
+// sker, så dayPlan får inBlock/utBlock tomma och restidMin.fore/efter = 0 (placeTravel returnerar [gapEnd, gapEnd] för 0).
 function buildTravelTable(X, platser, cfg, travelSekFn) {
   const schablon = { min: cfg.restid.schablonMin, kalla: 'schablon' };
   const tabell = {};
@@ -249,7 +251,8 @@ function buildTravelTable(X, platser, cfg, travelSekFn) {
     const svar = travelSekFn(X, platser) || {};
     platser.forEach(p => {
       const v = svar[cachenyckel(X, p)];
-      if (typeof v === 'number' && isFinite(v) && v >= 0) tabell[platsnyckel(p)] = { min: travelWithMargin(v, cfg.restid), kalla: 'maps' };
+      if (v === 0) tabell[platsnyckel(p)] = { min: 0, kalla: 'maps' };
+      else if (typeof v === 'number' && isFinite(v) && v >= 0) tabell[platsnyckel(p)] = { min: travelWithMargin(v, cfg.restid), kalla: 'maps' };
       else if (v && typeof v === 'object' && typeof v.sek === 'number') tabell[platsnyckel(p)] = { min: travelWithMargin(v.sek, cfg.restid), kalla: v.forLangt ? 'forLangt' : 'maps' };
     });
   }
@@ -325,24 +328,36 @@ function dayPlan(D, cfg, typ, X, busyDay, T) {
   };
 }
 function arbetstidFor(at) { return at ? { start: at.start, slut: at.slut, lunch: at.lunch ? [at.lunch.start, at.lunch.slut] : null } : undefined; }
-// Block för rendering: möte + cooldown sammanslaget; aldrig titel, adress eller källa (spec 5.12). omrade (steg 2c) = områdesetikett
-// när platsen är geokodad (även egna bokningar och reservationer) – men ALDRIG för kalla 'privat' (kalender i läge "bara tider":
-// den exporterar tider, inte var CJ befinner sig; platsen används bara för restiden). egen:true + kundnamn/bokningId bara för
-// anropande bokarens egna bokningar/reservation.
+// Block för rendering (spec 5.12, K1 version 7): 'upptaget' = mötets egen tid [_s, _e]; har källan cooldownMin > 0 följer ett
+// eget block { typ:'paus', start:<mötets slut>, slut:<slut + cooldown> } direkt efter (samma egen/kundnamn/bokningId som
+// upptaget-blocket om egen – aldrig omrade på paus), så att klienterna kan rita pausen ljusare än mötet. Förut var möte + cooldown
+// ett sammanslaget upptaget-block; äldre klienter som bara ritar upptaget/lunch ignorerar den okända typen och ser mötet kortare
+// (pausen är ändå hinder i dayPlan). Aldrig titel, adress eller källa. omrade (steg 2c) = områdesetikett när platsen är geokodad
+// (även egna bokningar och reservationer) – men ALDRIG för kalla 'privat' (kalender i läge "bara tider": den exporterar tider, inte
+// var CJ befinner sig; platsen används bara för restiden). egen:true + kundnamn/bokningId bara för anropande bokarens egna
+// bokningar/reservation. Sortering på start som förut.
 function blockFor(aktiva, at, bokareId) {
-  const block = aktiva.map(b => {
-    const o = { typ: 'upptaget', start: minToHhmm(b._s), slut: minToHhmm(Math.min(1440, b._e + (b.cooldownMin || 0))), egen: false };
+  const block = [];
+  aktiva.forEach(b => {
+    const o = { typ: 'upptaget', start: minToHhmm(b._s), slut: minToHhmm(Math.min(1440, b._e)), egen: false };
     // Områdesetikett (steg 2c, A56): stad · stadsdel för geokodade platser – det enda om platsen som når bokaren (aldrig adress/titel/källa);
     // privat ('tider') → aldrig omrade.
     const omrade = b.kalla === 'privat' ? '' : platsOmrade(b.plats);
     if (omrade) o.omrade = omrade;
     const egenKalla = b.kalla === 'bokningar' || b.kalla === 'reservation';
-    if (egenKalla && (b.egen === true || (!!bokareId && b.bokareId === bokareId))) {
+    const egen = egenKalla && (b.egen === true || (!!bokareId && b.bokareId === bokareId));
+    if (egen) {
       o.egen = true;
       if (b.kundnamn) o.kundnamn = String(b.kundnamn);
       if (b.bokningId) o.bokningId = String(b.bokningId);
     }
-    return o;
+    block.push(o);
+    const cooldown = b.cooldownMin | 0;
+    if (cooldown > 0 && b._e < 1440) {
+      const p = { typ: 'paus', start: minToHhmm(b._e), slut: minToHhmm(Math.min(1440, b._e + cooldown)), egen: egen };
+      if (egen) { if (b.kundnamn) p.kundnamn = String(b.kundnamn); if (b.bokningId) p.bokningId = String(b.bokningId); }
+      block.push(p);
+    }
   });
   if (at && at.lunch) block.push({ typ: 'lunch', start: at.lunch.start, slut: at.lunch.slut });
   return block.sort((a, b) => a.start < b.start ? -1 : a.start > b.start ? 1 : 0);
@@ -534,7 +549,8 @@ function omradeFranComponents_(comps) {
 // Resa: { datum, franId|'bas', tillId|'bas', start:'HH:MM', slut:'HH:MM', minuter, status:'ok'|'schablon'|'okand', konflikt }.
 //   minuter: Distance Matrix + marginal (5.8) → 'ok'; "för långt" (fågelväg > 150 km) → uppskattning (fågelväg/70 km/h + marginal,
 //   samma som availability) → 'ok'; ogeokodad ändpunkt → schablonminuter → 'schablon'; par som inte fick beräknas (taket
-//   AVAIL_PREVIEW_MAX_PAR, dagstak, API-fel) → schablonminuter + 'okand'.
+//   AVAIL_PREVIEW_MAX_PAR, dagstak, API-fel) → schablonminuter + 'okand'. Samma koordinater i båda ändar (0 s) → benet UTELÄMNAS
+//   ur resor (version 7, K3 – ingen resa, ingen marginal; klienterna ska ändå tåla minuter 0 om det kommer).
 //   Placering: inresa slutar vid mötets start (hoppar bakåt över platslösa hinder); utresa efter sista mötet börjar vid mötets slut
 //   + cooldown. Ryms resan inte mellan föregående mötes slut + cooldown och nästa mötes start (för tajt) → konflikt:true och resan
 //   ritas ändå närmast mötet (överlappar föregående möte/cooldown).
@@ -572,6 +588,7 @@ function previewResor(busy, cfg, parFn) {
     let minuter = schablon, status = 'schablon';
     if (platsGeokodad(a) && platsGeokodad(b)) {
       const v = svar[cachenyckel(a, b)];
+      if (v === 0) return null;   // samma koordinater → 0 min, ingen resa: benet UTELÄMNAS (version 7, K3)
       if (typeof v === 'number' && isFinite(v) && v >= 0) { minuter = travelWithMargin(v, cfg.restid); status = 'ok'; }
       else if (v && typeof v === 'object' && typeof v.sek === 'number') { minuter = travelWithMargin(v.sek, cfg.restid); status = 'ok'; }   // "för långt" = uppskattning, inte schablon
       else status = 'okand';
@@ -590,7 +607,7 @@ function previewResor(busy, cfg, parFn) {
       datum: l.datum, franId: l.fran === 'bas' ? 'bas' : String(l.fran.id || ''), tillId: l.till === 'bas' ? 'bas' : String(l.till.id || ''),
       start: minToHhmm(Math.max(0, start)), slut: minToHhmm(Math.min(1440, slut)), minuter, status, konflikt
     };
-  });
+  }).filter(Boolean);
   return { resor, overCap };
 }
 // Tar bort råa restidsminuter (restidMin) före export till bokaren (spec 5.12).
@@ -631,20 +648,32 @@ function mapsHanteraToppstatus(status, errorMessage) {
 // till det skrivna objektet. Ett fel vid läsning memoiseras inte (nästa försök läser igen) – tillgängligheten ska aldrig falla
 // på cachen. Nya geokodposter samlas i AVAIL_GEOKOD_PENDING och skrivs EN gång per körning (availFlushGeokod_, anropas av
 // doPost efter handlern) i stället för en läsning + skrivning per ny adress – första anropet med många nya ICS-platser gjorde
-// annars tiotals Drive-omgångar.
+// annars tiotals Drive-omgångar. Version 7: även nya restidspar (Distance Matrix, travelSecondsForPairs_) samlas i
+// AVAIL_RESTID_PENDING och skrivs i SAMMA läs-ändra-skriv – förut skrev travelSecondsForPairs_ filen direkt vid varje anrop med
+// nya par (en extra Drive-omgång per availability/preview utöver geokod-skrivningen). dailyMaintenance och refreshIcsCache
+// (Code.gs) anropar availFlushGeokod_ i finally precis som doPost, så pending tappas aldrig.
 let AVAIL_FIL_MEMO = null;
 let AVAIL_GEOKOD_PENDING = {};
+let AVAIL_RESTID_PENDING = {};
 // AVAIL_GEO_MEMO: körningens geokodningsresultat per normaliserad adressnyckel. Behövs för placeId-flödet (steg 2b): reserve/book/
 // availability geokodar med placeId FÖRE låset/beräkningen, och computeAvailability/findSlot/warmSlotCaches (som bara har adressen)
 // träffar memot i samma körning utan att resultatet cachas under den skrivna adressen (se geocodeAddress).
 let AVAIL_GEO_MEMO = {};
-function availResetMemo_() { AVAIL_FIL_MEMO = null; AVAIL_GEOKOD_PENDING = {}; AVAIL_GEO_MEMO = {}; }
-// Skriver körningens nya geokodposter till cache-filen (färsk läsning + en skrivning). → true om filen skrevs. Kastar aldrig.
+function availResetMemo_() { AVAIL_FIL_MEMO = null; AVAIL_GEOKOD_PENDING = {}; AVAIL_RESTID_PENDING = {}; AVAIL_GEO_MEMO = {}; }
+// Skriver körningens nya geokod- OCH restidsposter till cache-filen (färsk läsning + en skrivning; namnet behålls – doPost anropar det).
+// → true om filen skrevs. Kastar aldrig.
 function availFlushGeokod_() {
-  const nycklar = Object.keys(AVAIL_GEOKOD_PENDING);
-  if (!nycklar.length) return false;
-  const pend = AVAIL_GEOKOD_PENDING; AVAIL_GEOKOD_PENDING = {};
-  return updateCacheFile(obj => { if (!obj.geokod || typeof obj.geokod !== 'object') obj.geokod = {}; nycklar.forEach(k => { obj.geokod[k] = pend[k]; }); return true; });
+  const geoNycklar = Object.keys(AVAIL_GEOKOD_PENDING), restidNycklar = Object.keys(AVAIL_RESTID_PENDING);
+  if (!geoNycklar.length && !restidNycklar.length) return false;
+  const pendGeo = AVAIL_GEOKOD_PENDING, pendRestid = AVAIL_RESTID_PENDING;
+  AVAIL_GEOKOD_PENDING = {}; AVAIL_RESTID_PENDING = {};
+  return updateCacheFile(obj => {
+    if (!obj.geokod || typeof obj.geokod !== 'object') obj.geokod = {};
+    if (!obj.restid || typeof obj.restid !== 'object') obj.restid = {};
+    geoNycklar.forEach(k => { obj.geokod[k] = pendGeo[k]; });
+    restidNycklar.forEach(k => { obj.restid[k] = pendRestid[k]; });
+    return true;
+  });
 }
 function readCacheFileSafe() {
   if (AVAIL_FIL_MEMO) return AVAIL_FIL_MEMO;
@@ -987,7 +1016,8 @@ function travelSecondsForPairs_(par, maxNya) {
   saknas.forEach(s => {
     const post = fil && fil.restid ? fil.restid[s.key] : null;
     if (post && typeof post.sek === 'number') { ut[s.key] = post.sek; cachePutJson('restid:' + s.key, { sek: post.sek }, AVAIL_CACHE_TTL_RESTID_S); return; }
-    // Samma plats i båda ändar (två möten på samma adress, eller bokarens adress = ett ankare) → 0 s utan anrop (marginalen läggs på som förut).
+    // Samma plats i båda ändar (två möten på samma adress, eller bokarens adress = ett ankare) → 0 s utan anrop. Version 7 (K3):
+    // 0 s blir 0 min UTAN marginal i buildTravelTable/previewResor – ingen resa sker, så ingen marginal behövs.
     if (platsnyckel(s.a) === platsnyckel(s.b)) { ut[s.key] = 0; cachePutJson('restid:' + s.key, { sek: 0 }, AVAIL_CACHE_TTL_RESTID_S); return; }
     const km = haversineKm(s.a, s.b);
     if (km > AVAIL_FAGELVAG_MAX_KM) { ut[s.key] = { sek: Math.round(km / AVAIL_FAGELVAG_KMH * 3600), forLangt: true }; return; }   // "för långt" utan anrop
@@ -1028,9 +1058,15 @@ function travelSecondsForPairs_(par, maxNya) {
     }
   });
   attAnropa.forEach(s => { if (ut[s.key] === undefined) ut[s.key] = null; });
+  // Nya par → cache-filen samlat (AVAIL_RESTID_PENDING, skrivs av availFlushGeokod_ i slutet av körningen – version 7) + körningens fil-memo,
+  // så att ett andra anrop i samma körning (findSlot under låset) inte ser paret som saknat.
   if (Object.keys(nya).length) {
     const ts = availNowIso();
-    updateCacheFile(obj => { if (!obj.restid || typeof obj.restid !== 'object') obj.restid = {}; Object.keys(nya).forEach(k => { obj.restid[k] = { sek: nya[k], ts }; }); return true; });
+    Object.keys(nya).forEach(k => {
+      const post = { sek: nya[k], ts };
+      AVAIL_RESTID_PENDING[k] = post;
+      if (AVAIL_FIL_MEMO && AVAIL_FIL_MEMO.restid && typeof AVAIL_FIL_MEMO.restid === 'object') AVAIL_FIL_MEMO.restid[k] = post;
+    });
   }
   return { svar: ut, overCap };
 }
@@ -1122,6 +1158,7 @@ function runAvailabilityTests() {
     Object.assign({ config: { installningar: (o && o.inst) || inst(), motestyper: [MOTE, TEAMS] }, bokare: ANNA, now: NOW, busy, geocode: geoOk, travelSek, findBokning: () => null }, o || {}));
   const slot = (r, tid, dag) => (r.data.dagar[dag || 0].slots.find(s => s.tid === tid) || {});
   const upptagetBlock = (r, i) => r.data.dagar[i || 0].block.find(b => b.typ === 'upptaget') || {};
+  const pausBlock = (r, i) => r.data.dagar[i || 0].block.find(b => b.typ === 'paus') || {};
 
   // Marginal (5.8)
   ok(travelWithMargin(32 * 60, mapCfg(inst()).restid) === 50, 'marginal 32 → 50');
@@ -1192,7 +1229,10 @@ function runAvailabilityTests() {
   // 8. Reservation: Annas reservation tor 24/9 med X1 = A. Bo ser upptaget; Anna med reservationId ser ledig.
   const res = bi('2026-09-24', '10:00', '11:00', med(A, { id: 'rs_1', kalla: 'reservation', bokareId: 'bokare_anna', cooldownMin: 30 }));
   r = kor({ from: '2026-09-24', to: '2026-09-24' }, [res], { bokare: BO });
-  ok(slot(r, '10:00').status === 'upptaget' && upptagetBlock(r).egen === false && upptagetBlock(r).slut === '11:30', 'test8 Bo ser upptaget (inkl. cooldown), ej egen');
+  ok(slot(r, '10:00').status === 'upptaget' && upptagetBlock(r).egen === false && upptagetBlock(r).slut === '11:00', 'test8 Bo ser upptaget (mötets egen tid), ej egen');
+  // K1 (version 7): cooldown som eget paus-block direkt efter mötet – samma egen-regel, aldrig omrade; sorterat på start; hindret oförändrat
+  ok(pausBlock(r).start === '11:00' && pausBlock(r).slut === '11:30' && pausBlock(r).egen === false && !('omrade' in pausBlock(r)) && !('kundnamn' in pausBlock(r)), 'test8 paus-block 11:00–11:30 efter upptaget, ej egen, utan omrade');
+  ok(r.data.dagar[0].block.length === 3 && r.data.dagar[0].block.map(b => b.typ).join(',') === 'upptaget,paus,lunch' && slot(r, '11:00').status === 'upptaget', 'test8 block upptaget,paus,lunch i startordning; 11:00 fortfarande upptaget (cooldown-hinder)');
   const res1115 = Object.assign({}, res, { start: toIsoWithOffset('2026-09-24', '11:15'), slut: toIsoWithOffset('2026-09-24', '12:15') });
   r = kor({ from: '2026-09-24', to: '2026-09-24' }, [res1115], { bokare: BO });
   ok(slot(r, '09:00').status === 'ledig' && slot(r, '09:00').restid.utBlock[0] === '10:30' && slot(r, '09:00').restid.utBlock[1] === '11:10', 'test8 Bo 09:00 kräver utresa X2→X1 (10:30–11:10)');
@@ -1241,7 +1281,8 @@ function runAvailabilityTests() {
   r = kor({ undantaBokningId: 'bk1' }, [egen], { findBokning: id => id === 'bk1' ? { bokareId: 'bokare_anna', motestypId: 'mt_mote' } : null });
   ok(slot(r, '14:00').status === 'ledig', 'test13 undantagen → ledig');
   r = kor({}, [egen]);
-  ok(slot(r, '14:00').status === 'upptaget' && upptagetBlock(r).egen === true && upptagetBlock(r).kundnamn === 'Firma AB' && upptagetBlock(r).slut === '15:30', 'test13 utan undantag → upptaget, egen med kundnamn, block inkl. cooldown');
+  ok(slot(r, '14:00').status === 'upptaget' && upptagetBlock(r).egen === true && upptagetBlock(r).kundnamn === 'Firma AB' && upptagetBlock(r).slut === '15:00', 'test13 utan undantag → upptaget, egen med kundnamn, block = mötets tid');
+  ok(pausBlock(r).start === '15:00' && pausBlock(r).slut === '15:30' && pausBlock(r).egen === true && pausBlock(r).kundnamn === 'Firma AB' && pausBlock(r).bokningId === 'bk1', 'test13 paus-block 15:00–15:30 egen med kundnamn/bokningId (K1)');
   r = kor({ undantaBokningId: 'bk1' }, [egen], { bokare: BO, findBokning: () => ({ bokareId: 'bokare_anna', motestypId: 'mt_mote' }) });
   ok(slot(r, '14:00').status === 'upptaget' && upptagetBlock(r).egen === false && !('kundnamn' in upptagetBlock(r)), 'test13 annan bokare: ignoreras tyst, inget kundnamn');
   // inaktiv typ accepteras vid ombokning av egen bokning
@@ -1277,6 +1318,17 @@ function runAvailabilityTests() {
   // Export läcker inga råa restidsminuter
   const exp = stripInternAvailability(kor({}, []).data);
   ok(exp.dagar[0].slots.every(s => !('restidMin' in s)) && exp.dagar[0].slots.some(s => s.restid), 'export utan restidMin men med restid-block');
+
+  // K3 (version 7): samma koordinater = 0 min utan marginal. Ankare på X:s koordinater 08:00–09:00 (+30 cooldown) → första lediga
+  // lucka 09:30 direkt efter mötet + cooldown, utan inresa (inBlock utelämnas, restidMin.fore 0, kalla 'ok'); utresan mot bas som förut.
+  sattSek(X, X, 0);
+  r = kor({}, [bi('2026-09-22', '08:00', '09:00', med(X, { cooldownMin: 30 }))]);
+  ok(slot(r, '09:00').status === 'upptaget' && slot(r, '09:30').status === 'ledig' && slot(r, '09:30').restidMin.fore === 0 && slot(r, '09:30').restidMin.kalla === 'ok' && !('inBlock' in slot(r, '09:30').restid) && slot(r, '09:30').restid.utBlock[0] === '11:00', 'K3 samma koordinater → 09:30 ledig utan inresa (0 min), utresa mot bas 11:00');
+  ok(buildTravelTable(X, [X], mapCfg(inst()), () => ({ [cachenyckel(X, X)]: 0 }))(X).min === 0, 'K3 buildTravelTable 0 s → 0 min utan marginal');
+  // K3 i previewResor: två ankare på samma koordinater → benet mellan dem utelämnas; bas-benen (50 min) finns kvar.
+  const segX = (id, s, e) => ({ id, kalla: 'privat', datum: '2026-09-22', startMin: s, slutMin: e, plats: { text: 'x', lat: X.lat, lng: X.lng, geokodad: true }, hasPlace: true, isTravelMeeting: true, cooldownMin: 0, heldag: false, ignore: false });
+  const pr = previewResor([segX('p1', 540, 600), segX('p2', 660, 720)], mapCfg(inst()), par => { const ut = {}; par.forEach(p => { ut[cachenyckel(p.a, p.b)] = sekTabell[cachenyckel(p.a, p.b)] !== undefined ? sekTabell[cachenyckel(p.a, p.b)] : null; }); return { svar: ut, overCap: 0 }; });
+  ok(pr.resor.length === 2 && pr.resor[0].franId === 'bas' && pr.resor[0].tillId === 'p1' && pr.resor[0].minuter === 50 && pr.resor[1].franId === 'p2' && pr.resor[1].tillId === 'bas' && !pr.resor.some(x => x.franId === 'p1'), 'K3 previewResor utelämnar 0-benet p1→p2, bas-benen kvar');
 
   const rapport = fel.length ? `${fel.length} av ${antal} test misslyckades:\n- ${fel.join('\n- ')}` : `Alla ${antal} test OK`;
   if (typeof Logger !== 'undefined') Logger.log(rapport); else console.log(rapport);
