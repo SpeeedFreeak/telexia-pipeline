@@ -1,5 +1,5 @@
 // =====================================================================================
-// Availability.gs — Tillgänglighet och restid för bokningsmodulen (spec 5.1–5.13, 4.5, A2, A5, A10–A12)
+// Availability.gs — Tillgänglighet och restid för bokningsmodulen (spec 5.1–5.13, 4.5, A2, A5, A10–A12, A56–A57 steg 2c)
 //
 // Uppbyggnad (uppifrån och ned):
 //   1. Rena funktioner utan Google-tjänster: mapCfg, swedishHolidays, isRedDay, firstBookableDay, dayStatus,
@@ -10,7 +10,11 @@
 //      Distance Matrix. Isolerade så att de rena funktionerna aldrig rör dem.
 //   3. Ingångar som Code.gs anropar: computeAvailability(req) (kastar ApiError-kompatibla fel), geocodeAddress(adress, opts?),
 //      hamtaAdressforslag(q, sessionToken) (steg 2b, Places API (New) Autocomplete), travelMinutes(a, b, restidCfg),
-//      readIcsReserv()/writeIcsReserv(obj) (Calendar.gs), swedishHolidays(year).
+//      readIcsReserv()/writeIcsReserv(obj) (Calendar.gs), swedishHolidays(year), geokodaAnkare(busy, geocodeFn) + previewResor(busy, cfg, parFn)
+//      + travelSecondsForPairs_(par, maxNya) (steg 2c: restid mellan ankarpar i calendar-preview), backfillOmrade_(max) (dailyMaintenance).
+//   Områdesetikett (steg 2c, A56): geokodningen härleder omrade = { stad, stadsdel, etikett } ur Geocoding address_components
+//   (locality/postal_town → stad; sublocality_level_1/sublocality/neighborhood → stadsdel; etikett = 'Stad · Stadsdel'). Etiketten är
+//   det ENDA om platsen som når bokarna (availability-block.omrade) – aldrig gatuadress, titel, koordinater eller källa.
 //
 // Delas med andra filer (deklareras INTE här – dubbla const/function i Apps Script bryter projektet):
 //   Code.gs      tidshjälpen APP_TZ, SV_WEEKDAYS, SV_MONTHS, tzParts, todayStr, addDays, weekdayOf, tzOffsetMinutes,
@@ -27,9 +31,14 @@ const AVAIL_FAGELVAG_MAX_KM = 150;             // fågelväg > 150 km → "för 
 const AVAIL_FAGELVAG_KMH = 70;                 // uppskattad medelhastighet för "för långt"-par (ger alltid > maxEnkelRestid)
 const AVAIL_MATRIX_BATCH = 25;                 // max destinationer per Distance Matrix-anrop (spec 5.8)
 const AVAIL_MATRIX_MAX_PER_FRAGA = 50;         // skydd: fler nya par än så i en förfrågan → schablon för resten
+const AVAIL_PREVIEW_MAX_PAR = 60;              // steg 2c: högst 60 nya (ocachade) ankarpar per calendar-preview-anrop – resten 'okand' till nästa anrop
+const AVAIL_PREVIEW_MAX_GEO = 60;              // steg 2c: högst 60 nya Geocoding-anrop (ocachade platstexter) per calendar-preview-anrop – resten nästa anrop
+const AVAIL_OMRADE_MAX = 60;                   // steg 2c: områdesetikett klipps till 60 tecken
 const AVAIL_CACHE_TTL_RESTID_S = 21600;        // CacheService-max 6 h (spec 5.8: TTL 6 h)
 const AVAIL_CACHE_TTL_GEO_OK_S = 21600;
 const AVAIL_CACHE_TTL_GEO_OKAND_S = 3600;      // ej tolkad adress: kort cache så upprepade anrop inte kostar
+const AVAIL_BACKFILL_FEL_MAX = 3;              // steg 2c: backfillOmrade_ avbryter natten efter så många icke-ZERO_RESULTS-fel i rad
+const AVAIL_GEO_OKAND_FIL_DAGAR = 30;          // ZERO_RESULTS sparas i cache-filen som { status:'okand', ts } och gäller så länge (kalendertexter Google inte tolkar kostar annars ett element per timme)
 const AVAIL_MAPS_BLOCK_S = 60;                 // OVER_QUERY_LIMIT → inga nya Maps-anrop i 60 s (CacheService maps:block)
 const AVAIL_MAPS_VARNING_S = 21600;            // maps:varning (ping läser den ur CacheService; 6 h är CacheService-max, spec säger 24 h)
 const AVAIL_AC_CACHE_S = 21600;                // adressförslag per normaliserad fråga (steg 2b säger 24 h – CacheService-max är 6 h)
@@ -316,11 +325,17 @@ function dayPlan(D, cfg, typ, X, busyDay, T) {
   };
 }
 function arbetstidFor(at) { return at ? { start: at.start, slut: at.slut, lunch: at.lunch ? [at.lunch.start, at.lunch.slut] : null } : undefined; }
-// Block för rendering: möte + cooldown sammanslaget; aldrig titel, adress eller källa (spec 5.12).
-// egen:true + kundnamn/bokningId bara för anropande bokarens egna bokningar/reservation.
+// Block för rendering: möte + cooldown sammanslaget; aldrig titel, adress eller källa (spec 5.12). omrade (steg 2c) = områdesetikett
+// när platsen är geokodad (även egna bokningar och reservationer) – men ALDRIG för kalla 'privat' (kalender i läge "bara tider":
+// den exporterar tider, inte var CJ befinner sig; platsen används bara för restiden). egen:true + kundnamn/bokningId bara för
+// anropande bokarens egna bokningar/reservation.
 function blockFor(aktiva, at, bokareId) {
   const block = aktiva.map(b => {
     const o = { typ: 'upptaget', start: minToHhmm(b._s), slut: minToHhmm(Math.min(1440, b._e + (b.cooldownMin || 0))), egen: false };
+    // Områdesetikett (steg 2c, A56): stad · stadsdel för geokodade platser – det enda om platsen som når bokaren (aldrig adress/titel/källa);
+    // privat ('tider') → aldrig omrade.
+    const omrade = b.kalla === 'privat' ? '' : platsOmrade(b.plats);
+    if (omrade) o.omrade = omrade;
     const egenKalla = b.kalla === 'bokningar' || b.kalla === 'reservation';
     if (egenKalla && (b.egen === true || (!!bokareId && b.bokareId === bokareId))) {
       o.egen = true;
@@ -412,13 +427,16 @@ function computeAvailabilityCore(req, deps) {
       geo = { status: g.status === 'ok' ? 'ok' : 'okand', formaterad: g.status === 'ok' ? String(g.formaterad || '') : '' };
       X = g.status === 'ok' ? { lat: g.lat, lng: g.lng, geokodad: true } : { geokodad: false };
     }
-    // Ankare vars plats bara är text (privat Google-kalender, Bokningar utan inkorgspost, Outlook-ICS) geokodas här
-    // (spec 5.2 hasPlace = platsen geokodas, 4.6 bara händelser som räknas, 5.8 par mot varje unik plats). Misslyckas
-    // geokodningen förblir ankaret ett ankare med schablon (5.13). Går via samma cachekedja som bokarens adress och
-    // räknar bara mot MAPS_DAILY_CAP – per-kod-gränserna gäller enbart bokarens adress (Code.gs checkAdressLimits).
-    if (X && X.geokodad) busy = geokodaAnkare(busy, deps.geocode);
-    T = buildTravelTable(X, X && X.geokodad ? unikaPlatser(busy, cfg) : [], cfg, deps.travelSek);
   }
+  // Ankare vars plats bara är text (privat Google-kalender, Bokningar utan inkorgspost, Outlook-ICS) geokodas här
+  // (spec 5.2 hasPlace = platsen geokodas, 4.6 bara händelser som räknas, 5.8 par mot varje unik plats). Misslyckas
+  // geokodningen förblir ankaret ett ankare med schablon (5.13). Går via samma cachekedja som bokarens adress och
+  // räknar bara mot MAPS_DAILY_CAP – per-kod-gränserna gäller enbart bokarens adress (Code.gs checkAdressLimits).
+  // Körs oberoende av mötestyp och av om bokarens adress tolkats (efter bokarens adress, så att den får dagstaket först):
+  // områdesetiketten (A56) ska visas på samma block oavsett vilken mötestyp bokaren tittar på – calendar-preview geokodar
+  // samma texter till cache-filen, så anropet är i regel en cache-träff.
+  if (typeof deps.geocode === 'function') busy = geokodaAnkare(busy, deps.geocode);
+  if (typ.restid) T = buildTravelTable(X, X && X.geokodad ? unikaPlatser(busy, cfg) : [], cfg, deps.travelSek);
 
   // 7. Dag för dag
   const dagar = [];
@@ -465,12 +483,115 @@ function geokodaAnkare(busy, geocodeFn) {
       let g = null;
       try { g = geocodeFn(text); } catch (e) { g = null; }
       perText[text] = g && g.status === 'ok' && typeof g.lat === 'number' && typeof g.lng === 'number' && isFinite(g.lat) && isFinite(g.lng)
-        ? { lat: g.lat, lng: g.lng } : null;
+        ? { lat: g.lat, lng: g.lng, omrade: omradeRensa_(g.omrade && g.omrade.etikett) } : null;
     }
     const p = perText[text];
     if (!p) return b;
-    return Object.assign({}, b, { plats: Object.assign({}, b.plats, { lat: p.lat, lng: p.lng, geokodad: true }) });
+    const plats = Object.assign({}, b.plats, { lat: p.lat, lng: p.lng, geokodad: true });
+    if (p.omrade) plats.omrade = p.omrade;
+    return Object.assign({}, b, { plats });
   });
+}
+// Områdesetikett ur en BusyItem-plats (steg 2c): bara geokodade platser, rensad och klippt; '' annars.
+function platsOmrade(plats) {
+  if (!platsGeokodad(plats)) return '';
+  const o = plats.omrade;
+  return omradeRensa_(o && typeof o === 'object' ? o.etikett : o);
+}
+function omradeRensa_(s) {
+  return String(s || '').replace(/[<>]/g, ' ').replace(/[\u0000-\u001F\u007F]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, AVAIL_OMRADE_MAX);
+}
+// omrade-objekt ur en cachad post/inkorgens geo (sträng = etikett) → { stad, stadsdel, etikett } eller null när inget finns.
+function omradeObj_(v) {
+  if (v && typeof v === 'object') return { stad: omradeRensa_(v.stad), stadsdel: omradeRensa_(v.stadsdel), etikett: omradeRensa_(v.etikett) };
+  if (typeof v === 'string' && v.trim()) return { stad: '', stadsdel: '', etikett: omradeRensa_(v) };
+  return null;
+}
+// Områdesfält ur Geocoding address_components (steg 2c, A56): locality (annars postal_town) → stad; sublocality_level_1 (annars
+// sublocality, annars neighborhood) → stadsdel; etikett 'Stad · Stadsdel' (bara stad när stadsdel saknas eller är samma som staden).
+function omradeFranComponents_(comps) {
+  if (!Array.isArray(comps)) return { stad: '', stadsdel: '', etikett: '' };
+  const av = typer => {
+    for (let i = 0; i < typer.length; i++) {
+      const c = comps.find(x => x && Array.isArray(x.types) && x.types.indexOf(typer[i]) >= 0 && typeof x.long_name === 'string' && x.long_name.trim());
+      if (c) return omradeRensa_(c.long_name).slice(0, 40);
+    }
+    return '';
+  };
+  const stad = av(['locality', 'postal_town']);
+  let stadsdel = av(['sublocality_level_1', 'sublocality', 'neighborhood']);
+  if (stadsdel && stad && stadsdel.toLowerCase() === stad.toLowerCase()) stadsdel = '';
+  return { stad, stadsdel, etikett: omradeRensa_([stad, stadsdel].filter(Boolean).join(' · ')) };
+}
+// ---------- 1k. previewResor (steg 2c, A57) – restid mellan dagens restidsankare för Kalenderkoll (calendar-preview) ----------
+// busy = BusyItem-segment i Calendar.gs-form (datum/startMin/slutMin, gärna efter geokodaAnkare), cfg = mapCfg(inst),
+// parFn(par:[{ a, b }]) → { svar:{ cachenyckel: sek | { sek, forLangt } | null }, overCap } (travelSecondsForPairs_ eller stubb).
+// Kedja per dag: på varandra följande ankare (isTravelMeeting, ej ignorerade, ej heldag) i starttidsordning; platslösa händelser
+// (Teams m.fl.) hoppas över utan att bryta kedjan men är hinder för resans placering (placeTravel, 5.6). Plus bas→första när
+// cfg.restidTillForsta och sista→bas när cfg.restidEfterSista – som i dayPlan: är basen inte geokodad blir bas-benet schablon
+// (samma tid som bokarna blockeras av). Ett segment som börjar 00:00 eller slutar 24:00 (händelse över midnatt, splitToDays) får
+// inget bas-ben vid dygnsgränsen – händelsen fortsätter från/in i grannsdagen, ingen resa hem/hit sker där.
+// Resa: { datum, franId|'bas', tillId|'bas', start:'HH:MM', slut:'HH:MM', minuter, status:'ok'|'schablon'|'okand', konflikt }.
+//   minuter: Distance Matrix + marginal (5.8) → 'ok'; "för långt" (fågelväg > 150 km) → uppskattning (fågelväg/70 km/h + marginal,
+//   samma som availability) → 'ok'; ogeokodad ändpunkt → schablonminuter → 'schablon'; par som inte fick beräknas (taket
+//   AVAIL_PREVIEW_MAX_PAR, dagstak, API-fel) → schablonminuter + 'okand'.
+//   Placering: inresa slutar vid mötets start (hoppar bakåt över platslösa hinder); utresa efter sista mötet börjar vid mötets slut
+//   + cooldown. Ryms resan inte mellan föregående mötes slut + cooldown och nästa mötes start (för tajt) → konflikt:true och resan
+//   ritas ändå närmast mötet (överlappar föregående möte/cooldown).
+// → { resor:[…], overCap }. Ren funktion (inga Google-tjänster).
+function previewResor(busy, cfg, parFn) {
+  const perDag = {};
+  (busy || []).forEach(b => {
+    if (!b || b.ignore || b.heldag || typeof b.datum !== 'string' || typeof b.startMin !== 'number' || typeof b.slutMin !== 'number') return;
+    (perDag[b.datum] = perDag[b.datum] || []).push(b);
+  });
+  const bas = cfg.basadress ? { lat: cfg.basadress.lat, lng: cfg.basadress.lng, geokodad: !!cfg.basadress.geokodad } : null;
+  const ben = [];
+  Object.keys(perDag).sort().forEach(D => {
+    const dag = perDag[D].slice().sort((x, y) => x.startMin - y.startMin || x.slutMin - y.slutMin);
+    const ankare = dag.filter(b => b.isTravelMeeting);
+    if (!ankare.length) return;
+    const platslos = dag.filter(b => !b.isTravelMeeting).map(b => [b.startMin, b.slutMin + (b.cooldownMin || 0)]);
+    const forsta = ankare[0], sista = ankare[ankare.length - 1];
+    if (bas && cfg.restidTillForsta && forsta.startMin > 0) ben.push({ datum: D, fran: 'bas', till: forsta, platslos });
+    for (let i = 1; i < ankare.length; i++) ben.push({ datum: D, fran: ankare[i - 1], till: ankare[i], platslos });
+    if (bas && cfg.restidEfterSista && sista.slutMin < 1440) ben.push({ datum: D, fran: sista, till: 'bas', platslos });
+  });
+  const platsAv = x => x === 'bas' ? bas : (x.plats || null);
+  const par = [];
+  ben.forEach(l => {
+    const a = platsAv(l.fran), b = platsAv(l.till);
+    if (!platsGeokodad(a) || !platsGeokodad(b)) return;
+    par.push(l.till === 'bas' ? { a: b, b: a } : { a, b });   // basen som origin när den ingår → färre Distance Matrix-anrop
+  });
+  let svar = {}, overCap = 0;
+  if (par.length && typeof parFn === 'function') { const r = parFn(par) || {}; svar = r.svar || {}; overCap = r.overCap | 0; }
+  const schablon = cfg.restid.schablonMin;
+  const resor = ben.map(l => {
+    const a = platsAv(l.fran), b = platsAv(l.till);
+    let minuter = schablon, status = 'schablon';
+    if (platsGeokodad(a) && platsGeokodad(b)) {
+      const v = svar[cachenyckel(a, b)];
+      if (typeof v === 'number' && isFinite(v) && v >= 0) { minuter = travelWithMargin(v, cfg.restid); status = 'ok'; }
+      else if (v && typeof v === 'object' && typeof v.sek === 'number') { minuter = travelWithMargin(v.sek, cfg.restid); status = 'ok'; }   // "för långt" = uppskattning, inte schablon
+      else status = 'okand';
+    }
+    let start, slut, konflikt = false, block = null;
+    if (l.till !== 'bas') {
+      slut = l.till.startMin; start = slut - minuter;
+      const gapStart = l.fran === 'bas' ? 0 : l.fran.slutMin + (l.fran.cooldownMin || 0);
+      block = placeTravel(gapStart, slut, l.platslos, minuter, 'in');
+    } else {
+      start = l.fran.slutMin + (l.fran.cooldownMin || 0); slut = start + minuter;
+      block = placeTravel(start, 1440, l.platslos, minuter, 'ut');
+    }
+    if (block) { start = block[0]; slut = block[1]; } else konflikt = true;
+    return {
+      datum: l.datum, franId: l.fran === 'bas' ? 'bas' : String(l.fran.id || ''), tillId: l.till === 'bas' ? 'bas' : String(l.till.id || ''),
+      start: minToHhmm(Math.max(0, start)), slut: minToHhmm(Math.min(1440, slut)), minuter, status, konflikt
+    };
+  });
+  return { resor, overCap };
 }
 // Tar bort råa restidsminuter (restidMin) före export till bokaren (spec 5.12).
 function stripInternAvailability(data) {
@@ -568,7 +689,9 @@ function normalizeAdressKey(adress) {
     .replace(/\bsverige\b/g, ' ')
     .replace(/\s+/g, ' ').trim();
 }
-// geocodeAddress(adress, opts?) → { status:'ok', lat, lng, formaterad } | { status:'okand' } | { status:'saknas' }.
+// geocodeAddress(adress, opts?) → { status:'ok', lat, lng, formaterad, omrade?:{ stad, stadsdel, etikett } } | { status:'okand' } | { status:'saknas' }.
+// omrade (steg 2c, A56) följer med genom hela cachekedjan (memo, CacheService geo:, cache-filens geokodpost); saknas det i en äldre
+// cachepost utelämnas fältet (etikett '') tills dailyMaintenance backfillOmrade_ geokodat om posten.
 // Cachekedja (adress): körningens memo (AVAIL_GEO_MEMO) → CacheService geo:<hash(nyckel)> → cache-filens geokod[nyckel]
 // → Geocoding API (region=se, components=country:SE). Resultatet cachas under den skrivna adressens nyckel (Google tolkade texten).
 // opts.placeId (steg 2b, från adressforslag): Geocoding API anropas med place_id=… i stället för address=… – exakt träff, ingen
@@ -582,6 +705,11 @@ function normalizeAdressKey(adress) {
 // adressen) träffar utan nytt anrop; nästa request (availability → reserve → book) bär placeId igen → geo:pid-träff.
 // Inaktuellt place-id (Google: place-id:n kan bli inaktuella; INVALID_REQUEST/NOT_FOUND) → adressgeokodning i samma anrop (ett
 // element till) – det resultatet är Googles tolkning av texten och cachas som vanlig adressgeokodning.
+// ZERO_RESULTS (Google tolkade frågan men fann inget – kalendertexter som 'Konferensrum 3') sparas i cache-filen som
+// { status:'okand', ts } och gäller AVAIL_GEO_OKAND_FIL_DAGAR (gallraCacheFil rensar > 180 dagar); en sådan filpost ger 'okand' utan
+// API-anrop. Andra fel ('okand' utan ingaTraffar) memoiseras bara 1 h i CacheService.
+// opts.utanApi (calendar-preview-taket AVAIL_PREVIEW_MAX_GEO): hela cachekedjan som vanligt men INGET API-anrop – i stället
+// { status:'okand', overCap:true } (cachas inte; nästa anrop försöker igen).
 // Per-kod-gränserna (20 geokodningar/h, 20 adresser/dag) kontrolleras av Code.gs (checkAdressLimits) före anropet;
 // här räknas bara dagstaket MAPS_DAILY_CAP. Kastar aldrig – fel ger 'okand' (schablon).
 function geocodeAddress(adress, opts) {
@@ -598,9 +726,22 @@ function geocodeAddress(adress, opts) {
   const post = fil && fil.geokod ? fil.geokod[key] : null;
   if (post && post.status === 'ok' && typeof post.lat === 'number' && typeof post.lng === 'number') {
     const ut = { status: 'ok', lat: post.lat, lng: post.lng, formaterad: String(post.formaterad || '') };
+    const om = omradeObj_(post.omrade); if (om) ut.omrade = om;   // äldre poster utan omrade → ingen etikett tills nattens backfill
     cachePutJson(cacheKey, ut, AVAIL_CACHE_TTL_GEO_OK_S);
     AVAIL_GEO_MEMO[key] = ut;
     return ut;
+  }
+  if (post && post.status === 'okand' && geoOkandPostGiltig_(post)) {
+    const ut = { status: 'okand' };
+    cachePutJson(cacheKey, ut, AVAIL_CACHE_TTL_GEO_OKAND_S);
+    AVAIL_GEO_MEMO[key] = ut;
+    return ut;
+  }
+  if (opts && opts.utanApi === true) return { status: 'okand', overCap: true };
+  if (!mapsApiKey()) {   // ingen nyckel: memoisera 1 h så att inte varje availability-anrop läser cache-filen för samma ankartexter
+    cachePutJson(cacheKey, { status: 'okand' }, AVAIL_CACHE_TTL_GEO_OKAND_S);
+    AVAIL_GEO_MEMO[key] = { status: 'okand' };
+    return { status: 'okand' };
   }
   if (!mapsKanAnropa(1)) return { status: 'okand' };
   const svar = geocodeViaApi(adress);
@@ -611,9 +752,15 @@ function geocodeAddress(adress, opts) {
   } else if (svar.status === 'okand') {
     cachePutJson(cacheKey, { status: 'okand' }, AVAIL_CACHE_TTL_GEO_OKAND_S);
     AVAIL_GEO_MEMO[key] = { status: 'okand' };
+    if (svar.ingaTraffar === true) geoSparaOkand_(key);
   }
   // nyttAnrop:true = Geocoding-API:t anropades (Code.gs räknar MAX_GEOCODE_PER_KOD_H bara på sådana; cachas aldrig).
   return Object.assign({ nyttAnrop: true }, svar);
+}
+// Filpost { status:'okand', ts } gäller AVAIL_GEO_OKAND_FIL_DAGAR från ts; utan/ogiltig ts → ogiltig (geokodas om).
+function geoOkandPostGiltig_(post) {
+  const t = post && typeof post.ts === 'string' ? new Date(post.ts).getTime() : NaN;
+  return !isNaN(t) && Date.now() - t < AVAIL_GEO_OKAND_FIL_DAGAR * 86400000;
 }
 // place_id-grenen av geocodeAddress (se kommentaren ovan). key = den skrivna adressens normaliserade nyckel (bara memo).
 function geocodeViaPlaceId_(adress, key, placeId) {
@@ -626,6 +773,7 @@ function geocodeViaPlaceId_(adress, key, placeId) {
   if (svar.placeIdOgiltigt === true) return Object.assign({ nyttAnrop: true }, geocodeAddress(adress));
   if (svar.status === 'ok') {
     const ut = { status: 'ok', lat: svar.lat, lng: svar.lng, formaterad: svar.formaterad };
+    if (svar.omrade) ut.omrade = svar.omrade;
     cachePutJson(pidKey, ut, AVAIL_CACHE_TTL_GEO_OK_S);
     AVAIL_GEO_MEMO[key] = ut;
     const fk = normalizeAdressKey(svar.formaterad);
@@ -644,12 +792,20 @@ function geocodeViaPlaceId_(adress, key, placeId) {
 function geoPrimeMemo_(adress, geo) {
   const key = normalizeAdressKey(adress);
   if (!key || !geo || geo.status !== 'ok' || typeof geo.lat !== 'number' || typeof geo.lng !== 'number' || !isFinite(geo.lat) || !isFinite(geo.lng)) return false;
-  AVAIL_GEO_MEMO[key] = { status: 'ok', lat: geo.lat, lng: geo.lng, formaterad: String(geo.formaterad || '') };
+  const memo = { status: 'ok', lat: geo.lat, lng: geo.lng, formaterad: String(geo.formaterad || '') };
+  const om = omradeObj_(geo.omrade); if (om) memo.omrade = om;
+  AVAIL_GEO_MEMO[key] = memo;
   return true;
 }
 // Ny geokodpost till cache-filen (skrivs samlat av availFlushGeokod_ i doPost) + körningens fil-memo.
 function geoSparaPost_(k, svar) {
-  const post = { lat: svar.lat, lng: svar.lng, formaterad: svar.formaterad, status: 'ok', ts: availNowIso() };
+  const post = { lat: svar.lat, lng: svar.lng, formaterad: svar.formaterad, status: 'ok', ts: availNowIso(), omrade: omradeObj_(svar.omrade) || { stad: '', stadsdel: '', etikett: '' } };
+  AVAIL_GEOKOD_PENDING[k] = post;
+  if (AVAIL_FIL_MEMO && AVAIL_FIL_MEMO.geokod && typeof AVAIL_FIL_MEMO.geokod === 'object') AVAIL_FIL_MEMO.geokod[k] = post;
+}
+// ZERO_RESULTS-post till cache-filen: { status:'okand', ts } (giltig AVAIL_GEO_OKAND_FIL_DAGAR; backfillOmrade_ rör aldrig sådana).
+function geoSparaOkand_(k) {
+  const post = { status: 'okand', ts: availNowIso() };
   AVAIL_GEOKOD_PENDING[k] = post;
   if (AVAIL_FIL_MEMO && AVAIL_FIL_MEMO.geokod && typeof AVAIL_FIL_MEMO.geokod === 'object') AVAIL_FIL_MEMO.geokod[k] = post;
 }
@@ -672,11 +828,47 @@ function geocodeViaApi(adress, placeId) {
   // place_id som Google inte känner igen svarar INVALID_REQUEST/NOT_FOUND (inaktuellt id) – ingen "Nyckeln avvisad"-varning,
   // geocodeAddress faller tillbaka på adressgeokodning.
   if (placeId && (json.status === 'INVALID_REQUEST' || json.status === 'NOT_FOUND' || json.status === 'ZERO_RESULTS')) return { status: 'okand', placeIdOgiltigt: true };
-  if (mapsHanteraToppstatus(json.status, json.error_message)) return { status: 'okand' };
+  if (mapsHanteraToppstatus(json.status, json.error_message)) return { status: 'okand', toppfel: true };   // nyckel/kvot-fel (backfillOmrade_ avbryter natten)
+  if (json.status === 'ZERO_RESULTS') return { status: 'okand', ingaTraffar: true };   // tolkningsbart svar utan träff (backfillOmrade_ skiljer det från fel)
   const r = json.status === 'OK' && Array.isArray(json.results) && json.results[0];
   const loc = r && r.geometry && r.geometry.location;
   if (!loc || typeof loc.lat !== 'number' || typeof loc.lng !== 'number') return { status: 'okand' };
-  return { status: 'ok', lat: loc.lat, lng: loc.lng, formaterad: String(r.formatted_address || '').replace(/[<>]/g, ' ').slice(0, 200) };
+  return { status: 'ok', lat: loc.lat, lng: loc.lng, formaterad: String(r.formatted_address || '').replace(/[<>]/g, ' ').slice(0, 200),
+    omrade: omradeFranComponents_(r.address_components) };
+}
+// Engångs-backfill (steg 2c, dailyMaintenance): geokodposter i cache-filen som saknar omrade geokodas om (Googles formaterade adress,
+// annars nyckeln), högst max per körning, räknat mot MAPS_DAILY_CAP (stopp när taket/blocket hindrar). Poster märkta gallrad:true
+// (adress till gallrad bokning, på väg bort) och status:'okand'-poster hoppas över. ZERO_RESULTS → tomt omrade (försöks inte igen);
+// nyckel/kvot-fel (toppfel) → natten avbryts; annat fel (undantag, svar utan geometri) → posten lämnas till nästa natt och nästa post
+// försöks – efter AVAIL_BACKFILL_FEL_MAX sådana fel i rad avbryts natten (en enstaka trasig post får inte stoppa alla andra).
+// Skriver filen en gång. → antal omgeokodade poster. Kastar aldrig.
+function backfillOmrade_(max) {
+  let fil = null;
+  try { fil = readCacheFile(); } catch (e) { return 0; }
+  if (!fil || !fil.geokod || typeof fil.geokod !== 'object') return 0;
+  const nycklar = Object.keys(fil.geokod).filter(k => {
+    const p = fil.geokod[k];
+    return p && typeof p === 'object' && p.status === 'ok' && typeof p.lat === 'number' && p.gallrad !== true && (p.omrade === undefined || p.omrade === null);
+  }).slice(0, Math.max(0, max | 0));
+  const nya = {};
+  let fel = 0;
+  for (let i = 0; i < nycklar.length; i++) {
+    if (!mapsKanAnropa(1)) break;
+    const k = nycklar[i], p = fil.geokod[k];
+    const svar = geocodeViaApi(typeof p.formaterad === 'string' && p.formaterad.trim() ? p.formaterad : k);
+    if (svar.status === 'ok') { nya[k] = omradeObj_(svar.omrade) || { stad: '', stadsdel: '', etikett: '' }; fel = 0; }
+    else if (svar.ingaTraffar === true) { nya[k] = { stad: '', stadsdel: '', etikett: '' }; fel = 0; }
+    else if (svar.toppfel === true || ++fel >= AVAIL_BACKFILL_FEL_MAX) break;
+  }
+  const antal = Object.keys(nya).length;
+  if (!antal) return 0;
+  updateCacheFile(obj => {
+    if (!obj.geokod || typeof obj.geokod !== 'object') return false;
+    let andrad = false;
+    Object.keys(nya).forEach(k => { if (obj.geokod[k] && typeof obj.geokod[k] === 'object') { obj.geokod[k].omrade = nya[k]; andrad = true; } });
+    return andrad;
+  });
+  return antal;
 }
 
 // --- Adressförslag via Places API (New) Autocomplete (steg 2b) ---
@@ -771,47 +963,76 @@ function debugPlaces(q) {
 // Cachekedja per par: CacheService (6 h) → cache-filens restid[nyckel] → Distance Matrix (batch ≤ 25, symmetriantagande).
 // Returnerar { <cachenyckel>: sek | { sek, forLangt:true } | null }. null = schablon.
 function travelSecondsFor(X, platser) {
-  const ut = {}, saknas = [];
-  platser.forEach(p => {
-    const key = cachenyckel(X, p);
-    if (ut[key] !== undefined) return;
+  return travelSecondsForPairs_(platser.map(p => ({ a: X, b: p })), AVAIL_MATRIX_MAX_PER_FRAGA).svar;
+}
+// Generisk parversion (steg 2c, A57 – delas av availability och calendar-preview): par = [{ a, b }] med geokodade platser.
+// Samma cachekedja per par; bara par som saknas i CacheService/cache-filen (och inte är "för långt") anropar Distance Matrix,
+// högst maxNya per körning – resten blir null (schablon/okand) och räknas i overCap. Anropen grupperas per origin (den punkt som
+// förekommer i flest par, vid lika den första i paret) i batchar om ≤ 25 destinationer; taket/blocket eller ett toppnivåfel avbryter
+// resterande anrop. → { svar:{ <cachenyckel>: sek | { sek, forLangt:true } | null }, overCap:antal }.
+function travelSecondsForPairs_(par, maxNya) {
+  const ut = {}, saknas = [], sett = {};
+  (par || []).forEach(p => {
+    if (!p || !platsGeokodad(p.a) || !platsGeokodad(p.b)) return;
+    const key = cachenyckel(p.a, p.b);
+    if (sett[key]) return;
+    sett[key] = true;
     const hit = cacheGetJson('restid:' + key);
-    if (hit && typeof hit.sek === 'number') ut[key] = hit.sek; else saknas.push({ key, p });
+    if (hit && typeof hit.sek === 'number') ut[key] = hit.sek; else saknas.push({ key, a: p.a, b: p.b });
   });
-  if (!saknas.length) return ut;
+  if (!saknas.length) return { svar: ut, overCap: 0 };
 
   const fil = readCacheFileSafe();
   const attAnropa = [];
   saknas.forEach(s => {
     const post = fil && fil.restid ? fil.restid[s.key] : null;
     if (post && typeof post.sek === 'number') { ut[s.key] = post.sek; cachePutJson('restid:' + s.key, { sek: post.sek }, AVAIL_CACHE_TTL_RESTID_S); return; }
-    const km = haversineKm(X, s.p);
+    // Samma plats i båda ändar (två möten på samma adress, eller bokarens adress = ett ankare) → 0 s utan anrop (marginalen läggs på som förut).
+    if (platsnyckel(s.a) === platsnyckel(s.b)) { ut[s.key] = 0; cachePutJson('restid:' + s.key, { sek: 0 }, AVAIL_CACHE_TTL_RESTID_S); return; }
+    const km = haversineKm(s.a, s.b);
     if (km > AVAIL_FAGELVAG_MAX_KM) { ut[s.key] = { sek: Math.round(km / AVAIL_FAGELVAG_KMH * 3600), forLangt: true }; return; }   // "för långt" utan anrop
     attAnropa.push(s);
   });
-  if (!attAnropa.length) return ut;
+  if (!attAnropa.length) return { svar: ut, overCap: 0 };
 
   const nya = {};
-  const batchLista = attAnropa.slice(0, AVAIL_MATRIX_MAX_PER_FRAGA);
-  for (let i = 0; i < batchLista.length; i += AVAIL_MATRIX_BATCH) {
-    const batch = batchLista.slice(i, i + AVAIL_MATRIX_BATCH);
-    if (!mapsKanAnropa(batch.length)) break;
-    const svar = distanceBatch(X, batch.map(b => b.p));
-    if (!svar) break;
-    batch.forEach((b, j) => {
-      const sek = svar[j];
-      if (typeof sek === 'number') {
-        ut[b.key] = sek; nya[b.key] = sek;
-        cachePutJson('restid:' + b.key, { sek }, AVAIL_CACHE_TTL_RESTID_S);
-      }
-    });
-  }
+  const gransNya = typeof maxNya === 'number' && maxNya >= 0 ? maxNya : AVAIL_MATRIX_MAX_PER_FRAGA;
+  const batchLista = attAnropa.slice(0, gransNya);
+  const overCap = attAnropa.length - batchLista.length;
+  // Gruppera per origin: punkten som förekommer i flest par (vid lika: a) – kedjor runt bas/ett nav blir få anrop.
+  const frekvens = {};
+  batchLista.forEach(s => { [platsnyckel(s.a), platsnyckel(s.b)].forEach(k => { frekvens[k] = (frekvens[k] || 0) + 1; }); });
+  const grupper = {}, ordning = [];
+  batchLista.forEach(s => {
+    const ka = platsnyckel(s.a), kb = platsnyckel(s.b);
+    const origin = frekvens[kb] > frekvens[ka] ? s.b : s.a, dest = origin === s.b ? s.a : s.b, ko = platsnyckel(origin);
+    if (!grupper[ko]) { grupper[ko] = { origin, lista: [] }; ordning.push(ko); }
+    grupper[ko].lista.push({ key: s.key, p: dest });
+  });
+  let stopp = false;
+  ordning.forEach(ko => {
+    if (stopp) return;
+    const g = grupper[ko];
+    for (let i = 0; i < g.lista.length && !stopp; i += AVAIL_MATRIX_BATCH) {
+      const batch = g.lista.slice(i, i + AVAIL_MATRIX_BATCH);
+      if (!mapsKanAnropa(batch.length)) { stopp = true; break; }
+      const svar = distanceBatch(g.origin, batch.map(b => b.p));
+      if (!svar) { stopp = true; break; }
+      batch.forEach((b, j) => {
+        const sek = svar[j];
+        if (typeof sek === 'number') {
+          ut[b.key] = sek; nya[b.key] = sek;
+          cachePutJson('restid:' + b.key, { sek }, AVAIL_CACHE_TTL_RESTID_S);
+        }
+      });
+    }
+  });
   attAnropa.forEach(s => { if (ut[s.key] === undefined) ut[s.key] = null; });
   if (Object.keys(nya).length) {
     const ts = availNowIso();
-    updateCacheFile(obj => { Object.keys(nya).forEach(k => { obj.restid[k] = { sek: nya[k], ts }; }); return true; });
+    updateCacheFile(obj => { if (!obj.restid || typeof obj.restid !== 'object') obj.restid = {}; Object.keys(nya).forEach(k => { obj.restid[k] = { sek: nya[k], ts }; }); return true; });
   }
-  return ut;
+  return { svar: ut, overCap };
 }
 // Ett Distance Matrix-anrop: mode=driving, statisk duration (utan departure_time), units=metric, region=se, language=sv.
 // Returnerar array (sek | null per destination) eller null vid toppnivåfel/undantag. Elementen räknas mot dagstaket oavsett utfall.
@@ -1093,5 +1314,5 @@ if (typeof module !== 'undefined' && module.exports) {
   }
   module.exports = { mapCfg, swedishHolidays, easterSunday, isRedDay, isWorkingDay, firstBookableDay, dayStatus, travelWithMargin, placeTravel,
     availBusyForDay, platsnyckel, cachenyckel, buildTravelTable, dayPlan, computeAvailabilityCore, stripInternAvailability,
-    normalizeAdressKey, runAvailabilityTests };
+    normalizeAdressKey, runAvailabilityTests, geokodaAnkare, previewResor, platsOmrade, omradeFranComponents_ };
 }

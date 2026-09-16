@@ -11,10 +11,12 @@
  *                      admin-endpoints setup/config-push/calendars-list/inbox-list/ack/reject (M3),
  *                      calendar-preview/rebook/cancel (M4), purge + dailyMaintenance på riktigt (M5),
  *                      bokar-endpoints egen-rebook/egen-cancel/egen-update (steg 2a, SCRIPT_VERSION 4),
- *                      adressforslag + placeId-stöd i geokodningen (steg 2b, SCRIPT_VERSION 5).
+ *                      adressforslag + placeId-stöd i geokodningen (steg 2b, SCRIPT_VERSION 5),
+ *                      områdesetikett för bokare + restid (resor) i calendar-preview + omrade-backfill i dailyMaintenance
+ *                      (steg 2c, SCRIPT_VERSION 6).
  *   Calendar.gs      – readBusy(fran, till), parseIcs, mergeBusy, applyIgnore, buildBusyList(from, to).
  *   Availability.gs  – computeAvailability(req), dayPlan, placeTravel, geocodeAddress(adress, { placeId }), hamtaAdressforslag(q, token),
- *                      travelMinutes, swedishHolidays.
+ *                      travelMinutes, travelSecondsForPairs_, previewResor, geokodaAnkare, backfillOmrade_, swedishHolidays.
  *
  * Regler som gäller hela filen (spec 4.1, 4.3, 9):
  *   - Inga hemligheter i koden. MAPS_API_KEY, ADMIN_KEY och fil-id:n finns bara i Script Properties.
@@ -28,7 +30,7 @@
 // Konstanter
 // ============================================================
 
-const SCRIPT_VERSION = 5;                       // MIN_SCRIPT_VERSION i index.html/bokning.js jämförs mot denna (4.12); 3 = M5 (purge, dailyMaintenance, nya ping-fält); 4 = steg 2a (egen-rebook/egen-cancel/egen-update, hello.egna med kanAndras); 5 = steg 2b (adressforslag via Places, placeId i geokodning – valfritt: MIN_SCRIPT_VERSION förblir 4)
+const SCRIPT_VERSION = 6;                       // MIN_SCRIPT_VERSION i index.html/bokning.js jämförs mot denna (4.12); 3 = M5 (purge, dailyMaintenance, nya ping-fält); 4 = steg 2a (egen-rebook/egen-cancel/egen-update, hello.egna med kanAndras); 5 = steg 2b (adressforslag via Places, placeId i geokodning – valfritt: MIN_SCRIPT_VERSION förblir 4); 6 = steg 2c (block.omrade i availability, omrade + resor i calendar-preview – valfria fält: MIN_SCRIPT_VERSION förblir 4)
 const TZ = 'Europe/Stockholm';
 const APP_URL = 'https://speeedfreeak.github.io/telexia-pipeline/';   // länk i notismejlet (4.9)
 const MAX_BODY_BYTES = 16384;                   // body kontrolleras före JSON.parse (4.3)
@@ -51,6 +53,9 @@ const INBOX_LIST_MAX = 500;
 const ACK_MAX_IDS = 200;
 const ORSAK_MAX = 500;                          // reject/cancel/rebook-orsak (mejlas till bokaren)
 const PREVIEW_MAX_DAGAR = 56;                   // calendar-preview: högst 8 veckor per förfrågan (M4)
+const PREVIEW_RESTID_VARNING = 'Restid för fler par än taket beräknas nästa gång';   // steg 2c: > AVAIL_PREVIEW_MAX_PAR nya ankarpar i ett anrop
+const PREVIEW_GEO_VARNING = 'Fler platser än taket geokodas nästa gång';              // steg 2c: > AVAIL_PREVIEW_MAX_GEO ocachade platstexter i ett anrop
+const MAINT_BACKFILL_OMRADE_MAX = 50;             // steg 2c: dailyMaintenance geokodar om högst 50 geokodposter/natt som saknar omrade (mot MAPS_DAILY_CAP)
 const AVSTAMNING_CACHE_KEY = 'avstamning:saknas'; // CacheService (≤ 6 h): JSON-lista av bokningId som saknas i inkorgen (4.11) – läses även av calendar-preview
 const AVSTAMNING_PROP = 'avstamning_saknas';      // Script Property { ts, ids } – dailyMaintenance skriver, calendar-preview läser (24 h-fönstret, A48)
 const AVSTAMNING_GILTIG_MS = 36 * 3600000;        // avstämningens varning gäller tills nästa körning; efter 36 h utan körning tystnar den
@@ -855,14 +860,19 @@ function bokningarKalenderId(inst) {
 // placeId (valfritt, steg 2b – redan validerat med placeIdField/validateBookFalt) → Geocoding med place_id (exakt; samma Geocoding-SKU).
 // Anropas före låset i reserve/book och före computeAvailability i availability: värmer CacheService så att
 // geocodeAddress inuti beräkningen/låset (som bara har adressen) blir cache-träff.
+// → { lat, lng, formaterad, status, omrade? } – omrade (steg 2c) bara när geokodningen gav en etikett (äldre cacheposter saknar den).
 function geoForBooking(adress, ctx, placeId) {
   const tom = { lat: null, lng: null, formaterad: '', status: 'okand' };
   if (!adress) return Object.assign(tom, { status: 'saknas' });
   try {
     const g = geocodeAddress(adress, placeId ? { placeId: placeId } : undefined);
     if (g && g.nyttAnrop === true) countGeocodeCall(ctx);
-    if (g && g.status === 'ok' && typeof g.lat === 'number' && typeof g.lng === 'number')
-      return { lat: g.lat, lng: g.lng, formaterad: str(g.formaterad), status: 'ok' };
+    if (g && g.status === 'ok' && typeof g.lat === 'number' && typeof g.lng === 'number') {
+      const ut = { lat: g.lat, lng: g.lng, formaterad: str(g.formaterad), status: 'ok' };
+      const omrade = g.omrade && typeof g.omrade === 'object' ? cleanText(str(g.omrade.etikett)).slice(0, 60) : '';
+      if (omrade) ut.omrade = omrade;   // steg 2c: områdesetikett (stad · stadsdel) – följer inkorgspostens geo till BusyItem.plats.omrade
+      return ut;
+    }
     return Object.assign(tom, { formaterad: g ? str(g.formaterad) : '' });
   } catch (e) {
     if (errorCode(e) === 'E_RATE') throw e;
@@ -1083,6 +1093,7 @@ function handleReserve(req, ctx) {
     checkAdressLimits(ctx, adress);
     const g = geoForBooking(adress, ctx, placeId);
     plats = { text: adress, lat: g.lat, lng: g.lng, geokodad: g.status === 'ok' };
+    if (plats.geokodad && g.omrade) plats.omrade = g.omrade;   // steg 2c: reservationen bär områdesetiketten (block.omrade för andra bokare)
   }
   const slutIso = toIsoWithOffset(st.datum, minToTid(tidToMin(st.tid) + typ.langdMin));
   const egenId = ownReservationId(ctx);
@@ -1967,6 +1978,14 @@ function notifyBokareAvvisad(config, bokning, orsak) {
 // "Många obesvarade …", Maps-varning, avstämningens "saknas i inkorgen" (4.11, fylls av dailyMaintenance – Script Property + CacheService),
 // "N avbokade/avvisade möten ligger kvar i kalendern" (4.7: händelse vars bokningId är avbokad/avvisad i inkorgen, t.ex. efter
 // misslyckad Calendar.Events.remove – posten får varning "Avbokad/Avvisad i inkorgen men händelsen finns kvar …").
+// Steg 2c (A56/A57): ankare med bara platstext geokodas (geokodaAnkare – samma cachekedja som availability, räknas mot MAPS_DAILY_CAP)
+// så att varje händelse med geokodad plats får omrade (områdesetikett 'Stad · Stadsdel') och restiden mellan dagens ankare kan
+// beräknas: resor:[{ datum, franId|'bas', tillId|'bas', start, slut, minuter, status:'ok'|'schablon'|'okand', konflikt }] via
+// previewResor + travelSecondsForPairs_ (Distance Matrix med samma cache som availability; högst AVAIL_PREVIEW_MAX_PAR nya par per
+// anrop – resten 'okand' + varningen PREVIEW_RESTID_VARNING; upprepade anrop är gratis tack vare cachen). Geokodningen har eget tak:
+// högst AVAIL_PREVIEW_MAX_GEO nya Geocoding-anrop per anrop (fönstret är upp till 56 dagar; varje ocachad text är ett synkront
+// UrlFetch-anrop) – resten förblir ogeokodade (schablon, inget omrade) + varningen PREVIEW_GEO_VARNING; ZERO_RESULTS-texter
+// sparas i cache-filen (AVAIL_GEO_OKAND_FIL_DAGAR) så att otolkbara kalendertexter inte kostar varje timme.
 function handleCalendarPreview(req, ctx) {
   authAdmin(req, ctx);
   const config = loadConfig(ctx), inst = config.installningar;
@@ -1983,7 +2002,17 @@ function handleCalendarPreview(req, ctx) {
   let inbox = null;
   try { inbox = readInbox(); } catch (e) { inbox = null; }             // null → buildBusyList läser själv och varnar
   const dodaPoster = avbokadeIInkorgen(inbox);
-  const busy = buildBusyList(from, to, { config: config, inbox: inbox, farsk: false });
+  const busyRa = buildBusyList(from, to, { config: config, inbox: inbox, farsk: false });
+  let geoNya = 0, geoOverCap = false;   // steg 2c: platstexter → koordinater + omrade (kopior), högst AVAIL_PREVIEW_MAX_GEO nya API-anrop
+  const busy = geokodaAnkare(busyRa, adress => {
+    const g = geocodeAddress(adress, { utanApi: geoNya >= AVAIL_PREVIEW_MAX_GEO });
+    if (g && g.nyttAnrop === true) geoNya++;
+    if (g && g.overCap === true) geoOverCap = true;
+    return g;
+  });
+  busy.varningar = busyRa.varningar || [];
+  const cfg = mapCfg(inst);
+  const resor = previewResor(busy, cfg, par => travelSecondsForPairs_(par, AVAIL_PREVIEW_MAX_PAR));
   // Avstämning (4.11, A52): den nattliga listan (Script Property/CacheService) + en LIVE jämförelse av vyn mot inkorgen, så att
   // "Kontrollera avstämning" ser en föräldralös händelse (bokningId utan inkorgspost) direkt – även före första nattkörningen,
   // efter att en händelse skapats under dagen och när triggern dött (V1). Anonymiserade händelser (PURGE_ANONYM_TITEL) räknas inte.
@@ -2006,10 +2035,12 @@ function handleCalendarPreview(req, ctx) {
   if (mapsVarning) lagg('Maps: ' + mapsVarning);
   const saknasIVyn = handelser.filter(h => h.bokningId && saknas[h.bokningId]).length;
   if (saknas.antal) lagg('Kalenderhändelser som saknas i inkorgen: ' + saknas.antal + (saknasIVyn ? ' (' + saknasIVyn + ' i vyn)' : ''));
+  if (resor.overCap > 0) lagg(PREVIEW_RESTID_VARNING);
+  if (geoOverCap) lagg(PREVIEW_GEO_VARNING);
   const obesvarade = handelser.filter(h => h.preliminar).length;
   return {
     from: from, to: to, idag: idag, horisontTom: horisontTom, genererad: nowIso(),
-    handelser: handelser, icsStatus: icsStatusForPing(config), obesvarade: obesvarade, varningar: varningar
+    handelser: handelser, resor: resor.resor, icsStatus: icsStatusForPing(config), obesvarade: obesvarade, varningar: varningar
   };
 }
 // Avstämningens lista "saknas i inkorgen" (4.11): Script Property AVSTAMNING_PROP { ts, ids } + CacheService AVSTAMNING_CACHE_KEY
@@ -2048,6 +2079,7 @@ function avbokadeIInkorgen(inbox) {
   return ut;
 }
 // BusyItem-segment → Kalenderkoll-post. Titel/plats bara för 'bokningar', 'ics' och 'reservation' – aldrig 'privat' (läge 'tider').
+// omrade (steg 2c) = områdesetikett för varje händelse med geokodad plats (även 'privat' – bara stad · stadsdel, aldrig adressen); '' annars.
 // dodaPoster (valfri) = avbokadeIInkorgen(inbox): händelse med bokningId som är avbokad/avvisad i inkorgen får en varning.
 function previewExport(x, saknas, dodaPoster) {
   const kalla = ['bokningar', 'privat', 'ics', 'reservation'].indexOf(x.kalla) >= 0 ? x.kalla : 'privat';
@@ -2067,6 +2099,7 @@ function previewExport(x, saknas, dodaPoster) {
     id: str(x.id), ignoreraId: matchIds[0] || '', matchIds: matchIds,
     kalla: kalla, datum: str(x.datum), start: str(x.start), slut: str(x.slut), heldag: x.heldag === true,
     titel: titel, plats: visaText && kalla !== 'reservation' ? text(platsText) : '',
+    omrade: cleanText(platsOmrade(x.plats)).slice(0, 60),
     hasPlace: x.hasPlace === true, restid: x.isTravelMeeting === true, cooldownMin: Number(x.cooldownMin) || 0,
     preliminar: x.preliminar === true, raknad: x.raknad === true, ignorerad: x.ignorerad === true,
     bokningId: str(x.bokningId), bokareId: str(x.bokareId), motestypId: str(x.motestypId),
@@ -2142,7 +2175,10 @@ function rebookForbered(req, config, bokare, typ, post0, ctx) {
   // körningens memo, så att findSlot inte geokodar adresstexten på nytt (steg 2b: place_id-resultat cachas inte under texten).
   let geo;
   if (!typ.restid) geo = { lat: null, lng: null, formaterad: '', status: 'saknas' };
-  else if (sammaAdress && !placeId && post0.geo && geoPrimeMemo_(adress, post0.geo)) geo = { lat: post0.geo.lat, lng: post0.geo.lng, formaterad: str(post0.geo.formaterad), status: 'ok' };
+  else if (sammaAdress && !placeId && post0.geo && geoPrimeMemo_(adress, post0.geo)) {
+    geo = { lat: post0.geo.lat, lng: post0.geo.lng, formaterad: str(post0.geo.formaterad), status: 'ok' };
+    if (str(post0.geo.omrade)) geo.omrade = str(post0.geo.omrade);   // steg 2c
+  }
   else geo = geoForBooking(adress, ctx, placeId);
   if (typeof readIcs === 'function') { try { readIcs(config, { farsk: false }); } catch (e) { /* avgörs under låset */ } }
   try { findSlot(bokare, config, typ, adress, st, reservationId, str(post0.bokningId), false); } catch (e) { if (errorCode(e) === 'E_RATE') throw e; }
@@ -2578,7 +2614,7 @@ function dailyMaintenance() {
   const t0 = Date.now();
   if (typeof availResetMemo_ === 'function') availResetMemo_();   // egen körning – memona ska vara tomma som i doPost
   if (typeof kalResetMemo_ === 'function') kalResetMemo_();
-  const rad = { trigger: 'dailyMaintenance', ok: true, ms: 0, raknare: 0, inkorg: 0, utanImport: 0, geokod: 0, restid: 0, saknas: 0, fel: [] };
+  const rad = { trigger: 'dailyMaintenance', ok: true, ms: 0, raknare: 0, inkorg: 0, utanImport: 0, geokod: 0, restid: 0, omrade: 0, saknas: 0, fel: [] };
   const nuMs = Date.now();
   // 1. Räknare i Script Properties äldre än 7 dagar (4.2, 4.11) – oberoende av brevlådan.
   try { rad.raknare = gallraRaknare(todayStr()); } catch (e) { rad.ok = false; rad.fel.push('raknare:' + felKlass(e)); }
@@ -2598,6 +2634,9 @@ function dailyMaintenance() {
         updateCacheFile(obj => { const c = gallraCacheFil(obj, nuMs, gallradeNycklar); rad.geokod = c.geokod; rad.restid = c.restid; return c.andrad; });
       }, MAINT_LOCK_WAIT_MS);
     } catch (e) { rad.ok = false; rad.fel.push('inkorg:' + (errorCode(e) || felKlass(e))); }
+    // 2b. Engångs-backfill av omrade (steg 2c, A56): geokodposter utan områdesfält geokodas om, högst 50 per natt (Geocoding-anrop
+    //     mot MAPS_DAILY_CAP; stopp vid tak/block/fel). Utanför låset – cache-filen är en ren cache (updateCacheFile tar inget lås).
+    try { rad.omrade = backfillOmrade_(MAINT_BACKFILL_OMRADE_MAX); } catch (e) { rad.ok = false; rad.fel.push('omrade:' + felKlass(e)); }
     // 3. Avstämning kalender ↔ inkorg (4.11, A52): Bokningar-kalenderns händelser i [nu−7 d, horisont+7 d] med
     //    extendedProperties.private.bokningId som saknar inkorgspost → Script Property + CacheService (calendar-preview/ping visar).
     //    Events.list körs efter att låset släppts; en bokning som skapas däremellan finns i kalendern men inte i det redan lästa

@@ -16,11 +16,13 @@
  * BusyItem (spec 5.2) – en post per DAG-SEGMENT (händelse över midnatt delas per dag, 5.13):
  *   { id, kalla:'privat'|'bokningar'|'ics'|'reservation', datum:'YYYY-MM-DD',
  *     start, slut (ISO med offset), startMin, slutMin (minuter sedan midnatt, 0–1440),
- *     heldag, hasPlace, plats:{ text, lat, lng, geokodad }, isTravelMeeting, cooldownMin,
+ *     heldag, hasPlace, plats:{ text, lat, lng, geokodad, omrade? }, isTravelMeeting, cooldownMin,
  *     ignore, preliminar, raknad, ignorerad, egen, egenReservation,
  *     bokningId, bokareId, motestypId, kundnamn (bara egna), summary (bara internt/Kalenderkoll),
  *     sammanslagenMed:[], matchIds:[] (event-id, recurringEventId, ICS UID – för ignorera-listan),
  *     varning:'' }
+ *   plats.omrade (steg 2c, A56) = områdesetikett 'Stad · Stadsdel' när platsen är geokodad – ur inkorgspostens geo.omrade,
+ *   reservationens plats.omrade (Code.gs) eller geokodaAnkare (Availability.gs) för platstexter; aldrig satt utan koordinater.
  *
  * Inget av det som läses här loggas: ICS-url, titlar och platser stannar i minnet/CacheService.
  */
@@ -100,7 +102,9 @@ function newBusyItem(base) {
 function kalPlats(plats) {
   if (plats && typeof plats === 'object') {
     const geo = typeof plats.lat === 'number' && typeof plats.lng === 'number' && isFinite(plats.lat) && isFinite(plats.lng);
-    return { text: String(plats.text || '').trim(), lat: geo ? plats.lat : null, lng: geo ? plats.lng : null, geokodad: geo && plats.geokodad !== false };
+    const ut = { text: String(plats.text || '').trim(), lat: geo ? plats.lat : null, lng: geo ? plats.lng : null, geokodad: geo && plats.geokodad !== false };
+    if (ut.geokodad && typeof plats.omrade === 'string' && plats.omrade.trim()) ut.omrade = plats.omrade.trim().slice(0, 60);   // steg 2c
+    return ut;
   }
   const t = String(plats || '').trim();
   return { text: t, lat: null, lng: null, geokodad: false };
@@ -575,6 +579,7 @@ function inboxBookingToBusy(b, opts) {
   };
   if (b.geo && typeof b.geo.lat === 'number' && typeof b.geo.lng === 'number') {
     base.plats.lat = b.geo.lat; base.plats.lng = b.geo.lng; base.plats.geokodad = true; base.hasPlace = true;
+    if (typeof b.geo.omrade === 'string' && b.geo.omrade.trim()) base.plats.omrade = b.geo.omrade.trim().slice(0, 60);   // steg 2c: områdesetikett
   }
   return splitToDays(new Date(b.start), new Date(b.slut), base);
 }

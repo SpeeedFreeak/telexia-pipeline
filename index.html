@@ -429,6 +429,16 @@
   .bok-kb-tid { font-weight: 700; margin-right: 4px; }
   .bok-kb-ikoner { margin-right: 3px; font-size: 10px; }
   .bok-kb-titel { white-space: nowrap; }
+  /* Steg 2c: områdesetikett under titeln + restidsblock (.kb-resa, rödrandig som restid på sajten) */
+  .bok-kb-omrade { display: block; font-size: 10px; color: #9ca3af; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .bok-kb.bok-kb-chip .bok-kb-omrade { display: none; }
+  .kb-resa { position: absolute; box-sizing: border-box; border: 1px dashed #7f1d1d; border-radius: 6px; background: repeating-linear-gradient(45deg, rgba(248,113,113,.28) 0 6px, rgba(248,113,113,.08) 6px 12px); color: #fca5a5; font-size: 10px; line-height: 1.2; padding: 1px 5px; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; z-index: 2; cursor: default; }
+  .kb-resa.is-schablon { border-style: dotted; }
+  .kb-resa.is-okand { background: repeating-linear-gradient(45deg, rgba(251,191,36,.22) 0 6px, rgba(251,191,36,.06) 6px 12px); border-color: #b45309; color: #fbbf24; }
+  .kb-resa.is-konflikt { border: 2px solid #ef4444; color: #fecaca; z-index: 3; box-shadow: 0 0 0 1px rgba(239,68,68,.45); }
+  .bok-kal-legend i.kb-resa { position: static; border: 1px dashed #7f1d1d; background: repeating-linear-gradient(45deg, rgba(248,113,113,.28) 0 3px, rgba(248,113,113,.08) 3px 6px); }
+  .bok-koll-restid { white-space: nowrap; font-size: 12px; color: #cbd5e1; }
+  .bok-koll-restid .is-konflikt { color: #f87171; font-weight: 600; }
   .bok-kb.bok-kb-chip { position: static; display: inline-flex; align-items: center; gap: 3px; max-width: 100%; padding: 1px 6px; font-size: 10px; }
   .bok-kb.bok-kb-chip .bok-kb-titel { overflow: hidden; text-overflow: ellipsis; }
   .bok-kal-legend { display: flex; flex-wrap: wrap; gap: 6px 14px; font-size: 11px; color: #9ca3af; margin-top: 8px; }
@@ -554,6 +564,7 @@
     .bok-kal-rubrik { flex: 1 1 100%; font-size: 15px; margin: 2px 0; }
     .bok-kal-grid { grid-template-columns: 40px repeat(var(--dagar), minmax(100px, 1fr)); }
     .bok-kb { font-size: 12px; }
+    .bok-kb-omrade, .kb-resa { font-size: 11px; }
     .bok-kal-detalj { font-size: 14px; }
     .bok-kal-detalj .rad { font-size: 13px; }
     .bok-actions-sm button { font-size: 13px; padding: 8px 12px; }
@@ -5379,7 +5390,7 @@ function sparaBokningsinstallningarFranFormular() {
 const BOK_KAL_RAD_PX = 22;                 // px per 30-minutersrad i vecko-/dagsvyn
 const BOK_KAL_DATUM_RE = /^\d{4}-\d{2}-\d{2}$/;
 const BOK_KAL_KALLA_NAMN = { privat: 'Privat kalender', bokningar: 'Bokningar', ics: 'Outlook (ICS)', reservation: 'Reservation (bokare väljer tid just nu)', lokal: 'Bara lokalt' };
-let bokKal = { vy: '', datum: todayStr(), lage: 'grid', panel: '', seq: 0, data: null, segment: [], valdSid: -1, cache: new Map(), sjalv: { bokareId: '', kundId: '', kontaktId: '' } };
+let bokKal = { vy: '', datum: todayStr(), lage: 'grid', panel: '', seq: 0, data: null, segment: [], resor: [], valdSid: -1, cache: new Map(), sjalv: { bokareId: '', kundId: '', kontaktId: '' } };
 function bokKalArMobil() { return window.innerWidth <= 720; }
 function bokKalVy() { if (!bokKal.vy) bokKal.vy = bokKalArMobil() ? 'dag' : 'vecka'; return bokKal.vy; }
 function veckoStart(datum) { return addDays(datum, -((weekdayOf(datum) + 6) % 7)); }
@@ -5414,6 +5425,10 @@ function bokKalRubrik() {
 //     kalla:'bokningar'|'privat'|'ics'|'reservation', datum, start, slut (ISO per segment), heldag, titel, plats (bara fullt/ics),
 //     hasPlace, restid:bool, cooldownMin, preliminar, raknad, ignorerad, bokningId, bokareId, motestypId, sammanslagenMed:[],
 //     varning, varningar:[] }] }. Allt valideras/klipps; saknas datum delas start/slut per dag lokalt.
+// Steg 2c (script ≥ 6, valfritt – saknas fälten ritas vyn som förut): omrade (toppnivåfält, stad · stadsdel, ≤ 60 tecken; '' utan
+//   etikett – plats.omrade godtas också om plats är ett objekt) per geokodad händelse och resor:[{ datum, franId|'bas', tillId|'bas',
+//   start:'HH:MM', slut:'HH:MM', minuter, status:'ok'|'schablon'|'okand',
+//   konflikt:bool }] mellan på varandra följande restidsankare samma dag (+ bas→första / sista→bas enligt inställningarna).
 function bokKalFonster() { const idag = todayStr(); return { lo: addDays(idag, -7), hi: addDays(idag, bokHorisontVeckor() * 7 + 7) }; }
 async function hamtaKalenderPreview(fran, till, tvinga) {
   const key = fran + '|' + till;
@@ -5425,10 +5440,24 @@ async function hamtaKalenderPreview(fran, till, tvinga) {
   const handelser = [];
   (Array.isArray(d.handelser) ? d.handelser : []).filter(isPlainObject).forEach(h => { normKalHandelse(h).forEach(s => handelser.push(s)); });
   const varningar = (Array.isArray(d.varningar) ? d.varningar : []).filter(v => typeof v === 'string').map(v => v.slice(0, 300)).slice(0, 20);
-  const res = { ok: true, handelser, varningar, fran, till, hamtadTs: new Date().toISOString() };
+  const res = { ok: true, handelser, resor: normKalResor(d.resor), varningar, fran, till, hamtadTs: new Date().toISOString() };
   bokKal.cache.set(key, { ts: Date.now(), res });
   sparaKalKollAvstamning(res); renderBokStatus();   // avstämningsvarningar (4.11) → Drift och kvoter + statusraden
   return res;
+}
+// Restid mellan restidsankare (steg 2c): valideras/klipps fält för fält, högst 400 resor per svar; ogiltiga poster hoppas över.
+function normKalResor(lista) {
+  const ut = [];
+  (Array.isArray(lista) ? lista : []).filter(isPlainObject).slice(0, 400).forEach(r => {
+    const datum = bstr(r.datum, 10);
+    const franId = r.franId === 'bas' ? 'bas' : bstr(r.franId, 200), tillId = r.tillId === 'bas' ? 'bas' : bstr(r.tillId, 200);
+    const start = bstr(r.start, 5), slut = bstr(r.slut, 5);
+    if (!BOK_KAL_DATUM_RE.test(datum) || !franId || !tillId || (franId === 'bas' && tillId === 'bas') || !/^\d{2}:\d{2}$/.test(start) || !/^\d{2}:\d{2}$/.test(slut)) return;
+    const startMin = bokMinOf(start), slutMin = Math.max(startMin, bokMinOf(slut));
+    ut.push({ datum, franId, tillId, startMin, slutMin, minuter: Math.max(0, Math.min(1440, Math.round(Number(r.minuter) || 0))),
+      status: ['ok', 'schablon', 'okand'].includes(r.status) ? r.status : 'okand', konflikt: r.konflikt === true });
+  });
+  return ut;
 }
 // Normaliserar en händelse ur svaret till dagssegment { datum, startMin, slutMin, … } (händelse över midnatt delas per dag).
 function normKalHandelse(h) {
@@ -5439,11 +5468,12 @@ function normKalHandelse(h) {
   const rawId = bstr(h.id, 200);
   const ignoreId = kalla === 'reservation' ? '' : (bstr(h.ignoreraId, 200) || bstr(h.ignoreId, 200) || matchIds[0] || rawId.replace(/^gcal:/, ''));   // id utan prefix (3.5)
   const plats = bstr(isPlainObject(h.plats) ? h.plats.text : h.plats, BOK_MAXLEN.adress);
+  const omrade = bstr(typeof h.omrade === 'string' ? h.omrade : (isPlainObject(h.plats) ? h.plats.omrade : ''), BOK_MAXLEN.etikett).replace(/\s+/g, ' ').trim();   // steg 2c: "Stad · Stadsdel" – scriptets toppnivåfält omrade (plats förblir en sträng); plats.omrade godtas om plats är ett objekt (bara etikett, aldrig koordinater)
   const bokningId = BOKNING_ID_RE.test(String(h.bokningId || '')) ? String(h.bokningId) : '';
   const varningar = (Array.isArray(h.varningar) ? h.varningar : []).filter(v => typeof v === 'string').map(v => v.slice(0, 300)).slice(0, 5);
   const bas = {
     id: rawId || ignoreId || (kalla + ':' + start), ignoreId, matchIds, kalla, heldag,
-    titel: bstr(h.titel, 120) || bstr(h.summary, 120), plats, hasPlace: h.hasPlace === true || (!!plats && h.hasPlace !== false),
+    titel: bstr(h.titel, 120) || bstr(h.summary, 120), plats, omrade, hasPlace: h.hasPlace === true || (!!plats && h.hasPlace !== false),
     preliminar: h.preliminar === true, raknad: h.raknad === true, ignorerad: h.ignorerad === true,
     bokningId, restid: h.restid === true, varning: Array.from(new Set([bstr(h.varning, 300)].concat(varningar).filter(Boolean))).join(' · '),   // alla varningar (scriptets varning = varningar[0])
     sammanslagenMed: (Array.isArray(h.sammanslagenMed) ? h.sammanslagenMed : []).map(x => bstr(x, 200)).filter(Boolean).slice(0, 10),
@@ -5489,7 +5519,7 @@ function byggKalSegment(res, fran, till) {
     const sm = ev.tid ? bokMinOf(ev.tid) : 0;
     const em = ev.tid ? Math.min(1440, sm + (Number(ev.langdMin) || 60)) : 1440;
     seg.push({ id: 'lokal:' + ev.id, ignoreId: '', matchIds: [], kalla: 'lokal', heldag: !ev.tid, titel: '', datum: ev.datum, startMin: sm, slutMin: em,
-      plats: ev.adress || '', hasPlace: !!ev.adress, preliminar: false, raknad: false, ignorerad: false, bokningId: ev.bokningId, restid: false,
+      plats: ev.adress || '', omrade: '', hasPlace: !!ev.adress, preliminar: false, raknad: false, ignorerad: false, bokningId: ev.bokningId, restid: false,
       varning: 'Saknas i kalendern – bokningen finns bara lokalt', sammanslagenMed: [], lokal: { lead, ev }, sid: -1 });
   }));
   seg.forEach(s => { if (s.kalla === 'bokningar' && s.bokningId && !s.lokal) s.lokal = hittaLokalBokning(s.bokningId); });
@@ -5497,6 +5527,37 @@ function byggKalSegment(res, fran, till) {
   ut.sort((a, b) => a.datum.localeCompare(b.datum) || a.startMin - b.startMin || b.slutMin - a.slutMin);
   ut.forEach((s, i) => { s.sid = i; });
   return ut;
+}
+// Resor (steg 2c) i intervallet, kopplade till vyns segment via händelse-id ('bas' = basadressen). Saknas ett ankare i vyn
+// (dold pipeline, filtrerat, heldag) ritas resan inte. fran/till = segmentobjekt eller null (bas).
+function byggKalResor(res, seg, fran, till) {
+  const byId = new Map();   // nyckel id|datum – en händelse över midnatt har ett segment per dag med samma id
+  seg.forEach(s => { if (s.heldag) return; if (s.id && !byId.has(s.id + '|' + s.datum)) byId.set(s.id + '|' + s.datum, s); if (s.ignoreId && !byId.has(s.ignoreId + '|' + s.datum)) byId.set(s.ignoreId + '|' + s.datum, s); });
+  const ut = [];
+  (Array.isArray(res.resor) ? res.resor : []).forEach(r => {
+    if (r.datum < fran || r.datum > till) return;
+    const f = r.franId === 'bas' ? null : byId.get(r.franId + '|' + r.datum), t = r.tillId === 'bas' ? null : byId.get(r.tillId + '|' + r.datum);
+    if (r.franId !== 'bas' && !f) return;
+    if (r.tillId !== 'bas' && !t) return;
+    ut.push({ datum: r.datum, startMin: r.startMin, slutMin: r.slutMin, minuter: r.minuter, status: r.status, konflikt: r.konflikt, fran: f || null, till: t || null, rid: 0 });
+  });
+  ut.sort((a, b) => a.datum.localeCompare(b.datum) || a.startMin - b.startMin);
+  ut.forEach((r, i) => { r.rid = i; });
+  return ut;
+}
+function kalResaTill(s) { return bokKal.resor.find(r => r.till === s) || null; }   // resan som slutar vid händelsen (från föregående/bas)
+function kalResaFran(s) { return bokKal.resor.find(r => r.fran === s) || null; }   // resan som börjar efter händelsen (till nästa/bas)
+function kalResaNamn(seg) { return seg ? kalBlockTitel(seg) : 'basadressen'; }
+function kalResaMin(r, kort) {
+  if (r.status === 'okand') return kort ? '?' : 'okänd';
+  return (r.status === 'schablon' ? '~' : '') + r.minuter + ' min' + (r.status === 'schablon' && !kort ? ' (schablon)' : '');
+}
+function kalResaEtikett(r, kort) {
+  const bas = !r.fran ? ' från bas' : (!r.till ? ' till bas' : '');
+  return (r.konflikt ? '⚠ ' : (kort ? '' : '⇄ ')) + kalResaMin(r, true) + (kort ? '' : bas);
+}
+function kalResaTitel(r) {
+  return 'Restid ' + bokTidOf(r.startMin) + '–' + bokTidOf(r.slutMin) + ' · ' + kalResaMin(r) + ' · ' + kalResaNamn(r.fran) + ' → ' + kalResaNamn(r.till) + (r.konflikt ? ' · ryms inte' : '');
 }
 // Lokal ignorera-post för ett segment (3.5): matchar id utan prefix eller något av matchIds, samma källa.
 function kalIgnPost(s) {
@@ -5635,7 +5696,7 @@ async function laddaBokKalVy(tvinga) {
   const seq = ++bokKal.seq;
   const vyEl = document.getElementById('bkVy');
   if (fran > till) {   // helt utanför scriptets fönster – inget anrop
-    bokKal.data = null; bokKal.segment = [];
+    bokKal.data = null; bokKal.segment = []; bokKal.resor = [];
     if (vyEl) vyEl.innerHTML = '<div class="bok-placeholder">Utanför förhandsgranskningsfönstret (7 dagar bakåt t.o.m. bokningshorisonten + 7 dagar). Bläddra tillbaka eller ändra horisonten under Inställningar.</div>';
     ritaKalVarningar(); ritaKalDetalj(); rensaBokKalKoll();
     return;
@@ -5646,7 +5707,7 @@ async function laddaBokKalVy(tvinga) {
   const el = document.getElementById('bkVy');
   if (!el) return;
   if (!res.ok) {
-    bokKal.data = null; bokKal.segment = [];
+    bokKal.data = null; bokKal.segment = []; bokKal.resor = [];
     el.innerHTML = `<div class="bok-placeholder">Kunde inte hämta kalendern: ${escapeHtml(res.fel)}${res.kod === 'E_NOT_IMPLEMENTED' ? '<br>Scriptet saknar calendar-preview – uppdatera scriptet (Inställningar › Script).' : ''}<br><button type="button" class="btn ghost" id="bkIgen" style="margin-top:8px">Försök igen</button></div>`;
     el.querySelector('#bkIgen').addEventListener('click', () => laddaBokKalVy(true));
     ritaKalVarningar(); ritaKalDetalj(); rensaBokKalKoll();
@@ -5659,14 +5720,16 @@ function ritaBokKalVy() {
   const vyEl = document.getElementById('bkVy');
   if (!vyEl || !bokKal.data) return;
   const { fran, till } = bokKal.vyIntervall || bokKal.data;   // vyns dagar (kan vara bredare än hämtat intervall i fönsterkanten)
+  const valdId = bokKal.valdSid >= 0 && bokKal.segment[bokKal.valdSid] ? bokKal.segment[bokKal.valdSid].id : '';
   bokKal.segment = byggKalSegment(bokKal.data, fran, till);
-  if (bokKal.valdSid >= bokKal.segment.length) bokKal.valdSid = -1;
+  bokKal.resor = byggKalResor(bokKal.data, bokKal.segment, fran, till);
+  if (bokKal.valdSid >= 0) { const ny = valdId ? bokKal.segment.findIndex(x => x.id === valdId) : -1; bokKal.valdSid = ny; }   // valet följer händelsen, inte indexet
   ritaKalVarningar();
   ritaKalDetalj();
   const kollEl = document.getElementById('bkKoll');
   if (bokKal.lage === 'koll') { ritaBokKalKoll(vyEl, bokKal.segment, fran, till, ''); if (kollEl) kollEl.innerHTML = ''; }
   else {
-    ritaBokKalGrid(vyEl, bokKal.segment, fran, till);
+    ritaBokKalGrid(vyEl, bokKal.segment, bokKal.resor, fran, till);
     if (kollEl) ritaBokKalKoll(kollEl, bokKal.segment, fran, till, 'Kalenderkoll · ' + bokKalRubrik());   // 6.3: listan under vyn följer vald vecka/dag
   }
 }
@@ -5681,12 +5744,13 @@ function ritaKalVarningar() {
     if (obesvarade > 10 && !bokKal.data.varningar.some(v => /obesvarade/i.test(v))) rader.push({ text: 'Många obesvarade Outlook-inbjudningar (' + obesvarade + ') – de räknas inte som upptaget; använd Räkna/Ignorera i Kalenderkoll', kind: 'warn' });
     const saknas = bokKal.segment.filter(s => s.kalla === 'lokal').length;
     if (saknas) rader.push({ text: saknas + (saknas === 1 ? ' lokal bokning saknas' : ' lokala bokningar saknas') + ' i kalendern (visas rödstreckade)', kind: 'warn' });
-    rader.push({ text: 'Hämtat ' + kortTidLabel(bokKal.data.hamtadTs).split(' ')[1] + ' · ' + bokKal.segment.length + ' händelser', kind: 'info' });
+    bokKal.resor.filter(r => r.konflikt).slice(0, 20).forEach(r => rader.push({ text: 'Restiden mellan ' + kalResaNamn(r.fran) + ' och ' + kalResaNamn(r.till) + ' ' + kortDatumLabel(r.datum) + ' ryms inte (' + kalResaMin(r) + ')', kind: 'warn' }));   // steg 2c
+    rader.push({ text: 'Hämtat ' + kortTidLabel(bokKal.data.hamtadTs).split(' ')[1] + ' · ' + bokKal.segment.length + ' händelser' + (bokKal.resor.length ? ' · ' + bokKal.resor.length + ' restider' : ''), kind: 'info' });
   }
   el.innerHTML = rader.map(r => `<div class="bok-status-row ${r.kind}">${escapeHtml(r.text)}</div>`).join('');
   el.className = rader.length ? 'bok-kal-varningar' : '';
 }
-function ritaBokKalGrid(el, seg, fran, till) {
+function ritaBokKalGrid(el, seg, resor, fran, till) {
   const dagar = [];
   for (let d = fran, i = 0; d <= till && i < 7; d = addDays(d, 1), i++) dagar.push(d);
   const at = isPlainObject(BOKNINGSINSTALLNINGAR.arbetstider) ? BOKNINGSINSTALLNINGAR.arbetstider : {};
@@ -5695,6 +5759,7 @@ function ritaBokKalGrid(el, seg, fran, till) {
   let g0 = 8 * 60, g1 = 17 * 60, forsta = true;
   dagar.forEach(d => { const a = arbetstid(d); if (!a) return; const s = bokMinOf(a.start), e = bokMinOf(a.slut); if (forsta) { g0 = s; g1 = e; forsta = false; } else { g0 = Math.min(g0, s); g1 = Math.max(g1, e); } });
   seg.forEach(s => { if (s.heldag) return; g0 = Math.min(g0, s.startMin); g1 = Math.max(g1, s.slutMin); });
+  resor.forEach(r => { g0 = Math.min(g0, r.startMin); g1 = Math.max(g1, r.slutMin); });   // bas-resor kan ligga före/efter arbetstiden
   g0 = Math.max(0, Math.floor(g0 / 30) * 30); g1 = Math.min(1440, Math.ceil(g1 / 30) * 30);
   if (g1 - g0 < 60) { g0 = Math.max(0, g0 - 30); g1 = Math.min(1440, g1 + 30); }
   const y = m => Math.round((m - g0) / 30 * BOK_KAL_RAD_PX), hojd = y(g1);
@@ -5706,7 +5771,7 @@ function ritaBokKalGrid(el, seg, fran, till) {
     html += '<div class="bok-kal-heldag-label">Heldag</div>';
     dagar.forEach(d => {
       html += '<div class="bok-kal-heldag">' + seg.filter(s => s.heldag && s.datum === d).map(s =>
-        `<span class="bok-kb bok-kb-chip ${kalBlockKlass(s)}${bokKal.valdSid === s.sid ? ' is-vald' : ''}" data-sid="${s.sid}" style="${kalBlockStil(s)}" title="${escapeHtml(kalBlockTitel(s))}">${kalBlockIkoner(s)}${escapeHtml(kalBlockTitel(s))}</span>`).join('') + '</div>';
+        `<span class="bok-kb bok-kb-chip ${kalBlockKlass(s)}${bokKal.valdSid === s.sid ? ' is-vald' : ''}" data-sid="${s.sid}" style="${kalBlockStil(s)}" title="${escapeHtml(kalBlockTitel(s) + (s.omrade ? ' · ' + s.omrade : ''))}">${kalBlockIkoner(s)}${escapeHtml(kalBlockTitel(s))}</span>`).join('') + '</div>';
     });
   }
   html += `<div class="bok-kal-gutter" style="height:${hojd}px">`;
@@ -5726,17 +5791,25 @@ function ritaBokKalGrid(el, seg, fran, till) {
       }
     }
     if (d === idag) { const nu = bokMinOf(nowTimeStr()); if (nu >= g0 && nu <= g1) html += `<div class="bok-kal-nu" style="top:${y(nu)}px"></div>`; }
-    const dagSeg = seg.filter(s => !s.heldag && s.datum === d).sort((p, q) => p.startMin - q.startMin || q.slutMin - p.slutMin);
-    kalLanes(dagSeg);
+    const dagSeg = seg.filter(s => !s.heldag && s.datum === d);
+    const dagResor = resor.filter(r => r.datum === d);
+    // Lane-läggning för händelser och restidsblock tillsammans: en resa mellan två möten får hela bredden, en resa som överlappar
+    // föregående möte (konflikt) läggs bredvid det i egen lane så att båda syns (steg 2c).
+    kalLanes(dagSeg.concat(dagResor).sort((p, q) => p.startMin - q.startMin || q.slutMin - p.slutMin));
     dagSeg.forEach(s => {
       const top = y(Math.max(s.startMin, g0)), h = Math.max(BOK_KAL_RAD_PX - 2, y(Math.min(s.slutMin, g1)) - top - 2);
       const w = 100 / s.lanes, left = w * s.lane;
-      html += `<div class="bok-kb ${kalBlockKlass(s)}${bokKal.valdSid === s.sid ? ' is-vald' : ''}" data-sid="${s.sid}" style="top:${top}px;height:${h}px;left:calc(${left}% + 2px);width:calc(${w}% - 4px);${kalBlockStil(s)}" title="${escapeHtml(bokTidOf(s.startMin) + '–' + bokTidOf(s.slutMin) + ' ' + kalBlockTitel(s))}"><span class="bok-kb-tid">${bokTidOf(s.startMin)}</span>${kalBlockIkoner(s)}<span class="bok-kb-titel">${escapeHtml(kalBlockTitel(s))}</span></div>`;
+      html += `<div class="bok-kb ${kalBlockKlass(s)}${bokKal.valdSid === s.sid ? ' is-vald' : ''}" data-sid="${s.sid}" style="top:${top}px;height:${h}px;left:calc(${left}% + 2px);width:calc(${w}% - 4px);${kalBlockStil(s)}" title="${escapeHtml(bokTidOf(s.startMin) + '–' + bokTidOf(s.slutMin) + ' ' + kalBlockTitel(s) + (s.omrade ? ' · ' + s.omrade : ''))}"><span class="bok-kb-tid">${bokTidOf(s.startMin)}</span>${kalBlockIkoner(s)}<span class="bok-kb-titel">${escapeHtml(kalBlockTitel(s))}</span>${s.omrade ? '<span class="bok-kb-omrade">📍 ' + escapeHtml(s.omrade) + '</span>' : ''}</div>`;
+    });
+    dagResor.forEach(r => {
+      const top = y(Math.max(r.startMin, g0)), h = Math.max(10, y(Math.min(r.slutMin, g1)) - top - 2);
+      const w = 100 / r.lanes, left = w * r.lane;
+      html += `<div class="kb-resa is-${r.status}${r.konflikt ? ' is-konflikt' : ''}" data-rid="${r.rid}" style="top:${top}px;height:${h}px;left:calc(${left}% + 2px);width:calc(${w}% - 4px)" title="${escapeHtml(kalResaTitel(r))}">${escapeHtml(kalResaEtikett(r, h < 16 || w < 50))}</div>`;
     });
     html += '</div>';
   });
   html += '</div>';
-  html += '<div class="bok-kal-legend"><span><i class="kb-bokningar"></i>Bokning (pipeline-färg)</span><span><i class="kb-privat"></i>Privat</span><span><i class="kb-ics"></i>Outlook</span><span><i class="is-prel"></i>Preliminär</span><span><i class="is-ign"></i>Ignorerad</span><span><i class="kb-lokal"></i>Saknas i kalendern</span><span><i class="kb-reservation"></i>Reservation (bokare väljer tid)</span></div>';
+  html += '<div class="bok-kal-legend"><span><i class="kb-bokningar"></i>Bokning (pipeline-färg)</span><span><i class="kb-privat"></i>Privat</span><span><i class="kb-ics"></i>Outlook</span><span><i class="is-prel"></i>Preliminär</span><span><i class="is-ign"></i>Ignorerad</span><span><i class="kb-lokal"></i>Saknas i kalendern</span><span><i class="kb-reservation"></i>Reservation (bokare väljer tid)</span>' + (resor.length ? '<span><i class="kb-resa"></i>Restid (⚠ = ryms inte)</span>' : '') + '</div>';
   el.innerHTML = html;
   el.querySelectorAll('.bok-kb[data-sid]').forEach(b => b.addEventListener('click', () => { bokKal.valdSid = Number(b.dataset.sid); ritaBokKalVy(); const dEl = document.getElementById('bkDetalj'); if (dEl) dEl.scrollIntoView({ block: 'nearest' }); }));
 }
@@ -5751,7 +5824,8 @@ function ritaKalDetalj() {
   el.innerHTML = `<div class="bok-kal-detalj">
     <div class="bok-kal-detalj-head"><div><b>${escapeHtml(kalBlockTitel(s))}</b> ${kalKallaBadge(s)}${s.preliminar && !st.raknad ? ' <span class="bok-prel-badge">Preliminär – ej besvarad</span>' : ''}${st.ignorerad ? ' <span class="bok-muted">🚫 ignorerad</span>' : ''}</div><button type="button" class="bok-x" data-act="stang" title="Stäng">✕</button></div>
     <div class="rad">🕒 ${escapeHtml(longDateLabel(s.datum))} ${s.heldag ? 'heldag' : escapeHtml(bokTidOf(s.startMin) + '–' + bokTidOf(s.slutMin))}</div>
-    ${s.plats ? `<div class="rad">📍 <a href="${mapsUrl(s.plats)}" target="_blank" rel="noopener" style="color:#60a5fa;text-decoration:none">${escapeHtml(s.plats)}</a>${s.restid ? ' · restid beräknas runt händelsen' : ''}</div>` : ''}
+    ${s.plats || s.omrade ? `<div class="rad">📍 ${s.plats ? `<a href="${mapsUrl(s.plats)}" target="_blank" rel="noopener" style="color:#60a5fa;text-decoration:none">${escapeHtml(s.plats)}</a>` : ''}${s.omrade ? (s.plats ? ' <span class="bok-muted">(' + escapeHtml(s.omrade) + ')</span>' : '<span class="bok-muted">' + escapeHtml(s.omrade) + '</span>') : ''}${s.restid ? ' · restid beräknas runt händelsen' : ''}</div>` : ''}
+    ${kalDetaljRestidRad(s)}
     ${lokal ? `<div class="rad">Kund: <b>${escapeHtml(kund ? kund.namn : 'Namnlös kund')}</b>${kund && kund.orgnr ? ' (' + escapeHtml(kund.orgnr) + ')' : ''} · ${escapeHtml(mt ? mt.titel : lokal.ev.text)} · Bokad av ${escapeHtml(bokarNamn(lokal.ev.bokadAv))} · Status: ${escapeHtml(lokal.ev.status || '–')}${lokal.ev.restid && lokal.ev.restid.status !== 'ok' ? '<span class="ev-warn">⚠ restid ' + (lokal.ev.restid.status === 'schablon' ? 'schablon' : 'okänd') + '</span>' : ''}${PIPELINES.length > 1 ? ' ' + plBadge(lokal.lead.pipelineId) : ''}</div>` : ''}
     ${s.kalla === 'bokningar' && !lokal ? '<div class="rad bok-warn-text">Bokningen finns i kalendern men inte lokalt – kör "Hämta nu" i Inkorg</div>' : ''}
     <div class="rad">Källa: ${escapeHtml(BOK_KAL_KALLA_NAMN[s.kalla] || s.kalla)} · Tillgänglighet: ${kalStatusText(s)}</div>
@@ -5761,11 +5835,24 @@ function ritaKalDetalj() {
   </div>`;
   el.querySelectorAll('[data-act]').forEach(b => b.addEventListener('click', () => kalAtgard(b.dataset.act, s.sid)));
 }
+// Steg 2c: "Restid från föregående: N min · till nästa: M min" (från/till bas när resan går mot basadressen); tom när inga resor finns.
+function kalDetaljRestidRad(s) {
+  const rIn = kalResaTill(s), rUt = kalResaFran(s);
+  if (!rIn && !rUt) return '';
+  const del = (r, txt) => r ? txt + ': ' + escapeHtml(kalResaMin(r)) + (r.konflikt ? ' <span class="bok-warn-text">⚠ ryms inte</span>' : '') : txt + ': –';
+  return '<div class="rad">🚗 Restid ' + del(rIn, rIn && !rIn.fran ? 'från bas' : 'från föregående') + ' · ' + del(rUt, rUt && !rUt.till ? 'till bas' : 'till nästa') + '</div>';
+}
+function kalKollRestid(s) {   // Kalenderkoll-kolumnen Restid: in/ut i minuter
+  const rIn = kalResaTill(s), rUt = kalResaFran(s);
+  if (!rIn && !rUt) return '<span class="bok-muted">–</span>';
+  const del = r => r ? '<span class="' + (r.konflikt ? 'is-konflikt' : '') + '" title="' + escapeHtml(kalResaTitel(r)) + '">' + (r.konflikt ? '⚠ ' : '') + escapeHtml(kalResaMin(r, true)) + '</span>' : '–';
+  return '<span class="bok-koll-restid">in ' + del(rIn) + ' · ut ' + del(rUt) + '</span>';
+}
 function ritaBokKalKoll(el, seg, fran, till, rubrik) {
   let html = (rubrik ? `<div class="section-title" style="margin-top:14px">${escapeHtml(rubrik)}</div>` : '') +
     `<div class="bok-muted" style="margin-bottom:6px">Alla händelser ${escapeHtml(kortDatumLabel(fran))}–${escapeHtml(kortDatumLabel(till))} exakt som scriptet ser dem efter sammanslagning. Ignorera = utesluts ur tillgängligheten; Räkna = en preliminär/obesvarad Outlook-inbjudan räknas som upptaget.</div>
-    <div class="table-wrap bok-koll"><table><thead><tr><th>Datum</th><th>Tid</th><th>Källa</th><th>Titel / plats</th><th>Tillgänglighet</th><th>Varning</th><th></th></tr></thead><tbody>`;
-  if (!seg.length) html += `<tr><td colspan="7" style="color:#6b7280;text-align:center;padding:20px">${rubrik ? 'Inga händelser i vyn' : 'Inga händelser i horisonten'}</td></tr>`;
+    <div class="table-wrap bok-koll"><table><thead><tr><th>Datum</th><th>Tid</th><th>Källa</th><th>Titel / plats</th><th>Restid</th><th>Tillgänglighet</th><th>Varning</th><th></th></tr></thead><tbody>`;
+  if (!seg.length) html += `<tr><td colspan="8" style="color:#6b7280;text-align:center;padding:20px">${rubrik ? 'Inga händelser i vyn' : 'Inga händelser i horisonten'}</td></tr>`;
   seg.forEach(s => {
     const st = kalEffStatus(s);
     const varn = [s.varning, s.sammanslagenMed.length ? 'Slås ihop med ' + s.sammanslagenMed.join(', ') : ''].filter(Boolean).join(' · ');
@@ -5773,7 +5860,8 @@ function ritaBokKalKoll(el, seg, fran, till, rubrik) {
       <td style="white-space:nowrap">${escapeHtml(SV_WEEKDAYS[weekdayOf(s.datum)].slice(0, 3))} ${escapeHtml(kortDatumLabel(s.datum))}</td>
       <td style="white-space:nowrap">${s.heldag ? 'Heldag' : escapeHtml(bokTidOf(s.startMin) + '–' + bokTidOf(s.slutMin))}</td>
       <td>${kalKallaBadge(s)}</td>
-      <td>${escapeHtml(kalBlockTitel(s))}${s.plats ? '<div class="bok-muted">📍 ' + escapeHtml(s.plats) + (s.restid ? ' · restid' : '') + '</div>' : ''}</td>
+      <td>${escapeHtml(kalBlockTitel(s))}${s.plats || s.omrade ? '<div class="bok-muted">📍 ' + (s.plats ? escapeHtml(s.plats) + (s.omrade ? ' (' + escapeHtml(s.omrade) + ')' : '') : escapeHtml(s.omrade)) + (s.restid ? ' · restid' : '') + '</div>' : ''}</td>
+      <td>${kalKollRestid(s)}</td>
       <td>${kalStatusText(s)}</td>
       <td class="bok-koll-varning">${escapeHtml(varn)}</td>
       <td><div class="bok-actions-sm">${kalAtgardKnappar(s)}</div></td></tr>`;
