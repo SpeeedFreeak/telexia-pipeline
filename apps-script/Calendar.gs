@@ -4,7 +4,7 @@
  * Uppdelning:
  *   1. RENA FUNKTIONER (inga Apps Script-tjänster – kan enhetstestas i Node):
  *      parseIcs, expandRrule, icsInstances, normalizeGoogleEvent, normalizeIcsItem,
- *      reservationToBusy, inboxBookingToBusy, mergeBusy, applyIgnore, finalizeBusy, busyForDay.
+ *      reservationToBusy, inboxBookingToBusy, mergeBusy, applyIgnore (ignorera/räkna + restid-override, version 9), finalizeBusy, busyForDay.
  *   2. WRAPPERS runt Apps Script-tjänster (Calendar advanced service v3, UrlFetchApp, CacheService,
  *      Utilities, Session) – små och utbytbara.
  *   3. SAMMANSÄTTNING: readIcs, readBusy, buildBusyList, getIcsStatus.
@@ -25,6 +25,9 @@
  *   reservationens plats.omrade (Code.gs) eller geokodaAnkare (Availability.gs) för platstexter; aldrig satt utan koordinater.
  *   hasPlace (Teams-fix, version 7): en bokning vars mötestyp saknar restid (kalRestidFn_, via motestypId) får alltid hasPlace:false
  *   – plats/omrade kan finnas kvar för visning men posten blir aldrig restidsankare (isTravelMeeting).
+ *   override (version 9, bara internt – exporteras aldrig till bokaren): { online:true|false|null, adress } när en KALENDER_IGNORERA-post
+ *   (3.5) bär manuell restidsklassning (online) och/eller rättad adress för händelsen; sätts i applyIgnore, respekteras av finalizeBusy
+ *   och speglas i calendar-preview som overrideOnline/overrideAdress (Code.gs previewExport).
  *
  * Inget av det som läses här loggas: ICS-url, titlar och platser stannar i minnet/CacheService.
  */
@@ -673,36 +676,85 @@ function mergeBusy(list) {
 }
 
 /**
- * applyIgnore(list, ignorerade) → ny lista. `ignorerade` = config.ignorerade (KALENDER_IGNORERA, 3.5):
+ * applyIgnore(list, ignorerade) → ny lista. `ignorerade` = config.ignorerade (KALENDER_IGNORERA, 3.5; version 9: restid-override):
  *   lage 'ignorera' → ignore:true, ignorerad:true (visas gråad i Kalenderkoll, aldrig hinder)
  *   lage 'rakna'    → preliminär post räknas: ignore:false, raknad:true
- * Matchar på id utan prefix: Google event-id, recurringEventId eller ICS UID (item.matchIds).
+ *   lage 'restid'   → varken ignorera eller räkna – posten bär BARA restid-override (online/adress nedan)
+ *   Bara exakt 'ignorera'/'rakna' räknas (version 9) – saknat, tomt eller okänt lage gör varken ignorera eller räkna. Gamla poster
+ *   utan lage (3.5-migreringen) får 'ignorera' av appens uppstartsnormalisering innan de pushas; scriptet gissar inte längre.
+ * Restid-override (version 9, oberoende av lage) – manuell klassning vinner över automatiken (kalLooksLikePlace/KAL_ONLINE_RE och
+ * mötestypens restid-flagga): se kalTillampaOverride. En post per händelse-id; Ignorera/Räkna och online/adress samsas i samma post.
+ * Matchar på id utan prefix mot item.matchIds (Google event-id, recurringEventId, ICS UID). Räckvidd: en post med instans-id:t
+ * (Googles `<serie>_<tid>Z`, = calendar-preview ignoreraId) träffar bara den instansen; en post med recurringEventId
+ * (calendar-preview serieId) eller ICS UID (delas av seriens alla instanser) träffar hela serien.
  */
 function applyIgnore(list, ignorerade) {
-  const ign = {}, rakna = {};
+  const ign = {}, rakna = {}, over = {};
   (ignorerade || []).forEach(p => {
     if (!p || !p.id) return;
-    const lage = p.lage || 'ignorera';
-    if (lage === 'ignorera') ign[String(p.id)] = true; else if (lage === 'rakna') rakna[String(p.id)] = true;
+    const id = String(p.id), o = kalOverrideAv(p);
+    if (p.lage === 'ignorera') ign[id] = true; else if (p.lage === 'rakna') rakna[id] = true;
+    if (o) over[id] = o;
   });
   return (list || []).map(x => {
     const item = Object.assign({}, x);
     const ids = item.matchIds || [];
     if (ids.some(id => ign[id])) { item.ignore = true; item.ignorerad = true; }
     else if (item.preliminar && ids.some(id => rakna[id])) { item.ignore = false; item.raknad = true; }
+    const oid = ids.find(id => over[id] !== undefined);
+    if (oid !== undefined) kalTillampaOverride(item, over[oid]);
     return item;
   });
+}
+/** KALENDER_IGNORERA-post → restid-override { online:true|false|null, adress, lat, lng, omrade } eller null när posten saknar online/adress.
+ *  Fälten saneras redan i normalizeConfig (Code.gs) – här bara typkontroll: adress ≤ 200 tecken, lat/lng finita tal (annars ingen
+ *  koordinat), omrade ≤ 60 tecken och bara tillsammans med koordinater (som kalPlats). */
+function kalOverrideAv(p) {
+  const online = p.online === true ? true : p.online === false ? false : null;
+  const adress = typeof p.adress === 'string' ? p.adress.trim().slice(0, 200) : '';
+  if (online === null && !adress) return null;
+  const geo = !!adress && typeof p.lat === 'number' && typeof p.lng === 'number' && isFinite(p.lat) && isFinite(p.lng);
+  const omrade = geo && typeof p.omrade === 'string' && p.omrade.trim() ? p.omrade.trim().slice(0, 60) : '';
+  return { online, adress, lat: geo ? p.lat : null, lng: geo ? p.lng : null, omrade };
+}
+/** Tillämpar en restid-override på ett BusyItem (muterar item – applyIgnore arbetar redan på en kopia; plats kopieras här):
+ *    adress med lat/lng → plats = { text: adress, lat, lng, geokodad:true, omrade? } och hasPlace:true (om inte online === true)
+ *    adress utan lat/lng → plats.text byts, geokodad:false (geokodaAnkare i Availability.gs geokodar texten som förut), hasPlace:true (dito)
+ *    online === true    → hasPlace:false – vinner över allt (även adress och mötestypens flagga)
+ *    online === false   → hasPlace:true när platsen har text eller koordinater (åsidosätter KAL_ONLINE_RE och restidFor).
+ *                         Är texten ett online-ord/URL (kalLooksLikePlace false, t.ex. "Microsoft Teams-möte") utan rättad adress
+ *                         töms plats.text: ankare med schablon (5.13) i stället för att geokodaAnkare slår upp texten hos Google
+ *                         (ett felankare någonstans i landet vore värre än schablon). Kalenderkoll visar då tom plats – rätta adressen.
+ *  item.override = { online, adress } markerar posten för finalizeBusy (restidFor-skyddsnätet) och previewExport. */
+function kalTillampaOverride(item, o) {
+  const plats = Object.assign({}, item.plats || kalPlats(''));
+  if (o.adress) {
+    const geo = o.lat !== null;
+    plats.text = o.adress; plats.lat = geo ? o.lat : null; plats.lng = geo ? o.lng : null; plats.geokodad = geo;
+    if (geo && o.omrade) plats.omrade = o.omrade; else delete plats.omrade;
+  }
+  if (o.online === true) item.hasPlace = false;
+  else if (o.online === false) {
+    item.hasPlace = !!(plats.text || plats.geokodad);
+    if (!o.adress && !plats.geokodad && plats.text && !kalLooksLikePlace(plats.text)) plats.text = '';
+  }
+  else if (o.adress) item.hasPlace = true;
+  item.plats = plats;
+  item.override = { online: o.online, adress: o.adress };
 }
 
 /** Sätter härledda fält (isTravelMeeting = hasPlace && !ignore, heldag aldrig ankare) och rensar kundnamn på andras poster.
  *  opts.restidFor (Teams-fix, version 7): en sammanslagen post med motestypId vars typ saknar restid får hasPlace:false – fångar
  *  Outlooks ICS-kopia av en äldre Teams-bokning (LOCATION satt före version 7): den vinner sammanslagningen på hasPlace och bär
- *  förlorarens bokningId/motestypId, så regeln i normalizeGoogleEvent/inboxBookingToBusy räcker inte ensam. */
+ *  förlorarens bokningId/motestypId, så regeln i normalizeGoogleEvent/inboxBookingToBusy räcker inte ensam.
+ *  Skyddsnätet gäller INTE en post med manuell override (version 9: item.override med online === false eller adress, applyIgnore) –
+ *  CJ:s klassning vinner över mötestypens flagga. */
 function finalizeBusy(list, opts) {
   opts = opts || {};
   return (list || []).map(x => {
     const item = Object.assign({}, x);
-    if (item.motestypId && typeof opts.restidFor === 'function' && opts.restidFor(item.motestypId) === false) item.hasPlace = false;
+    const manuell = !!item.override && (item.override.online === false || !!item.override.adress);
+    if (!manuell && item.motestypId && typeof opts.restidFor === 'function' && opts.restidFor(item.motestypId) === false) item.hasPlace = false;
     item.isTravelMeeting = !!item.hasPlace && !item.ignore && !item.heldag;
     if (item.kalla === 'bokningar' || item.kalla === 'reservation') {
       item.egen = item.egen || (!!opts.bokareId && item.bokareId === opts.bokareId);
@@ -1108,7 +1160,7 @@ function readBusy(fran, till, opts) {
 /**
  * buildBusyList(from, to, opts) → sammanslagen, ignorera-filtrerad lista av BusyItem-segment (spec 5.2):
  *   readBusy + bekräftade bokningar ur inkorgen (ny/importerad, framtida) + aktiva reservationer
- *   → mergeBusy → applyIgnore → finalizeBusy.
+ *   → mergeBusy → applyIgnore (ignorera/räkna + restid-override, 3.5) → finalizeBusy.
  * opts: { config, inbox, farsk, reservationId (anropande bokarens egen), bokareId (för egen/kundnamn),
  *         undantaBokningId (ombokning: alla poster med samma bokningId tas bort helt, samt ICS-poster vars UID är bokningens
  *         Google-iCalUID – Outlooks accepterade kopia; se kalUndantaBokning_) }

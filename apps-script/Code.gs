@@ -15,8 +15,10 @@
  *                      områdesetikett för bokare + restid (resor) i calendar-preview + omrade-backfill i dailyMaintenance
  *                      (steg 2c, SCRIPT_VERSION 6),
  *                      inkorg i CacheService + Drive-filmemo + ICS-värmare refreshIcsCache + Teams-fix (location bara vid restid)
- *                      + rebook släpper reservationen (version 7, SCRIPT_VERSION 7).
- *   Calendar.gs      – readBusy(fran, till), parseIcs, mergeBusy, applyIgnore, buildBusyList(from, to).
+ *                      + rebook släpper reservationen (version 7, SCRIPT_VERSION 7),
+ *                      manuell restidsklassning (online/fysiskt) och rättad adress per kalenderhändelse via KALENDER_IGNORERA
+ *                      (normalizeConfig sanerar, previewExport speglar overrideOnline/overrideAdress + serieId, geocode svarar omrade – version 9, SCRIPT_VERSION 9).
+ *   Calendar.gs      – readBusy(fran, till), parseIcs, mergeBusy, applyIgnore (ignorera/räkna + restid-override), buildBusyList(from, to).
  *   Availability.gs  – computeAvailability(req), dayPlan, placeTravel, geocodeAddress(adress, { placeId }), hamtaAdressforslag(q, token),
  *                      travelMinutes, travelSecondsForPairs_, previewResor, geokodaAnkare, backfillOmrade_, swedishHolidays.
  *
@@ -32,7 +34,7 @@
 // Konstanter
 // ============================================================
 
-const SCRIPT_VERSION = 8;                       // 8 = online-möten ("Microsoft Teams-möte" m.fl. i platsfältet är aldrig restidsankare, Calendar.gs kalLooksLikePlace – MIN_SCRIPT_VERSION förblir 4); MIN_SCRIPT_VERSION i index.html/bokning.js jämförs mot denna (4.12); 3 = M5 (purge, dailyMaintenance, nya ping-fält); 4 = steg 2a (egen-rebook/egen-cancel/egen-update, hello.egna med kanAndras); 5 = steg 2b (adressforslag via Places, placeId i geokodning – valfritt: MIN_SCRIPT_VERSION förblir 4); 6 = steg 2c (block.omrade i availability, omrade + resor i calendar-preview – valfria fält: MIN_SCRIPT_VERSION förblir 4); 7 = optimering (inkorg i CacheService, en cache-filskrivning per körning, ICS-värmare) + restid tydlig (paus-block, 0 min samma adress, Teams-fix, mejltext) + rebook släpper reservation (valfria fält: MIN_SCRIPT_VERSION förblir 4)
+const SCRIPT_VERSION = 9;                       // 9 = manuell restidsklassning + rättad adress per händelse (KALENDER_IGNORERA-postens valfria online/adress/lat/lng/omrade och lage 'restid', Calendar.gs applyIgnore; calendar-preview overrideOnline/overrideAdress/serieId, geocode.omrade – valfria fält: MIN_SCRIPT_VERSION förblir 4); 8 = online-möten ("Microsoft Teams-möte" m.fl. i platsfältet är aldrig restidsankare, Calendar.gs kalLooksLikePlace – MIN_SCRIPT_VERSION förblir 4); MIN_SCRIPT_VERSION i index.html/bokning.js jämförs mot denna (4.12); 3 = M5 (purge, dailyMaintenance, nya ping-fält); 4 = steg 2a (egen-rebook/egen-cancel/egen-update, hello.egna med kanAndras); 5 = steg 2b (adressforslag via Places, placeId i geokodning – valfritt: MIN_SCRIPT_VERSION förblir 4); 6 = steg 2c (block.omrade i availability, omrade + resor i calendar-preview – valfria fält: MIN_SCRIPT_VERSION förblir 4); 7 = optimering (inkorg i CacheService, en cache-filskrivning per körning, ICS-värmare) + restid tydlig (paus-block, 0 min samma adress, Teams-fix, mejltext) + rebook släpper reservation (valfria fält: MIN_SCRIPT_VERSION förblir 4)
 const TZ = 'Europe/Stockholm';
 const APP_URL = 'https://speeedfreeak.github.io/telexia-pipeline/';   // länk i notismejlet (4.9)
 const MAX_BODY_BYTES = 16384;                   // body kontrolleras före JSON.parse (4.3)
@@ -523,7 +525,7 @@ function normalizeConfig(raw) {
     motestyper: Array.isArray(raw.motestyper) ? raw.motestyper.filter(isPlainObject) : [],
     formular: fillDefaults(isPlainObject(raw.formular) ? raw.formular : {}, DEFAULT_BOKNINGSFORMULAR),
     installningar: fillDefaults(isPlainObject(raw.installningar) ? raw.installningar : {}, DEFAULT_BOKNINGSINSTALLNINGAR),
-    ignorerade: Array.isArray(raw.ignorerade) ? raw.ignorerade.filter(isPlainObject) : [],
+    ignorerade: Array.isArray(raw.ignorerade) ? raw.ignorerade.filter(isPlainObject).map(normalizeIgnoreradPost) : [],
     pipelines: Array.isArray(raw.pipelines) ? raw.pipelines.filter(isPlainObject) : []
   };
   if (!Array.isArray(cfg.formular.extrafalt)) cfg.formular.extrafalt = [];
@@ -533,6 +535,22 @@ function normalizeConfig(raw) {
   cfg.installningar.adminNyckel = '';
   cfg.installningar.brevladaFiler = { config: '', inbox: '', cache: '' };
   return cfg;
+}
+
+// KALENDER_IGNORERA-post (3.5; version 9): { id, kalla, lage:'ignorera'|'rakna'|'restid', online?, adress?, lat?, lng?, omrade?, ts }.
+// De valfria restid-fälten saneras här (Calendar.gs applyIgnore litar på typerna): online bara boolean; adress cleanText ≤ MAXLEN.adress;
+// lat/lng bara finita tal och bara tillsammans med adress; omrade cleanText ≤ 60 och bara tillsammans med koordinater. Ogiltiga fält
+// utelämnas tyst (posten behålls – ett trasigt adressfält får aldrig slå ut ett Ignorera/Räkna). Övriga fält lämnas orörda.
+function normalizeIgnoreradPost(p) {
+  const ut = Object.assign({}, p);
+  delete ut.online; delete ut.adress; delete ut.lat; delete ut.lng; delete ut.omrade;
+  if (p.online === true || p.online === false) ut.online = p.online;
+  const adress = typeof p.adress === 'string' ? cleanText(p.adress).slice(0, MAXLEN.adress) : '';
+  if (adress) ut.adress = adress;
+  if (adress && typeof p.lat === 'number' && typeof p.lng === 'number' && isFinite(p.lat) && isFinite(p.lng)) { ut.lat = p.lat; ut.lng = p.lng; }
+  const omrade = typeof p.omrade === 'string' ? cleanText(p.omrade).slice(0, 60) : '';
+  if (ut.lat !== undefined && omrade) ut.omrade = omrade;
+  return ut;
 }
 
 // --- Inkorg (skrivs bara av scriptet, alltid under lås) ---
@@ -1553,7 +1571,9 @@ function handleGeocode(req, ctx) {
   const placeId = placeIdField(req.placeId);
   if (bokare) checkAdressLimits(ctx, adress);
   const g = geoForBooking(adress, bokare ? ctx : null, placeId);
-  return { status: g.status === 'ok' ? 'ok' : 'okand', lat: g.lat, lng: g.lng, formaterad: g.formaterad };
+  // omrade (version 9, valfritt): områdesetikett 'Stad · Stadsdel' när geokodningen gav en (appens "Adress för restid" i Kalenderkoll
+  // sparar den på KALENDER_IGNORERA-posten) – '' annars. Äldre klienter ignorerar fältet.
+  return { status: g.status === 'ok' ? 'ok' : 'okand', lat: g.lat, lng: g.lng, formaterad: g.formaterad, omrade: g.status === 'ok' ? str(g.omrade) : '' };
 }
 
 // ============================================================
@@ -2068,9 +2088,9 @@ function notifyBokareAvvisad(config, bokning, orsak) {
 // In:  { adminKey, from, to }  ('YYYY-MM-DD' inklusive; även spec-formen { fran, till }). Högst PREVIEW_MAX_DAGAR (8 veckor),
 //      fönstret måste ligga inom [idag−7, horisont+7] (E_VALIDATION, falt.from/to).
 // Ut:  { from, to, idag, horisontTom, genererad,
-//        handelser:[{ id, ignoreraId, matchIds, kalla:'bokningar'|'privat'|'ics'|'reservation', datum, start, slut, heldag,
-//                     titel, plats, hasPlace, restid, cooldownMin, preliminar, raknad, ignorerad, bokningId, bokareId, motestypId,
-//                     sammanslagenMed:[], varning, varningar:[] }],
+//        handelser:[{ id, ignoreraId, serieId, matchIds, kalla:'bokningar'|'privat'|'ics'|'reservation', datum, start, slut, heldag,
+//                     titel, plats, omrade, overrideOnline, overrideAdress, hasPlace, restid, cooldownMin, preliminar, raknad, ignorerad,
+//                     bokningId, bokareId, motestypId, sammanslagenMed:[], varning, varningar:[] }],
 //        icsStatus:{ ok, hamtadTs, antal, medPlats, preliminara }, obesvarade, varningar:[] }
 // Exakt det scriptet ser efter sammanslagning (buildBusyList med ALLA källor: Google 'tider'/'fullt', Outlook-ICS, inkorgens
 // bokningar, aktiva reservationer). Ignorerade händelser är MED (ignorerad:true) i stället för uteslutna; preliminära ICS-poster
@@ -2079,7 +2099,9 @@ function notifyBokareAvvisad(config, bokning, orsak) {
 // ALDRIG för läge 'tider' (kalla 'privat'): där är titel/plats alltid '' (hasPlace/restid är bara boolska). Inga kundnamn ur
 // inkorgen (appen har dem lokalt) – bokningId räcker för att matcha. `id` = intern busy-id (unik per segment, prefix anger källa,
 // används i sammanslagenMed); `ignoreraId` = det id KALENDER_IGNORERA ska lagra (Google event-id / ICS UID / bokningens
-// kalenderhändelse-id), `matchIds` = alla id:n posten matchas på (event-id, recurringEventId, UID). Varningar: ICS-fel,
+// kalenderhändelse-id), `matchIds` = alla id:n posten matchas på (event-id, recurringEventId, UID); `serieId` (version 9, valfritt) =
+// Googles recurringEventId när händelsen är en instans av en återkommande Google-händelse, annars '' – en KALENDER_IGNORERA-post
+// med id = ignoreraId träffar bara instansen (Google) resp. hela serien (ICS UID), en post med id = serieId hela Google-serien. Varningar: ICS-fel,
 // "Många obesvarade …", Maps-varning, avstämningens "saknas i inkorgen" (4.11, fylls av dailyMaintenance – Script Property + CacheService),
 // "N avbokade/avvisade möten ligger kvar i kalendern" (4.7: händelse vars bokningId är avbokad/avvisad i inkorgen, t.ex. efter
 // misslyckad Calendar.Events.remove – posten får varning "Avbokad/Avvisad i inkorgen men händelsen finns kvar …").
@@ -2185,6 +2207,11 @@ function avbokadeIInkorgen(inbox) {
 }
 // BusyItem-segment → Kalenderkoll-post. Titel/plats bara för 'bokningar', 'ics' och 'reservation' – aldrig 'privat' (läge 'tider').
 // omrade (steg 2c) = områdesetikett för varje händelse med geokodad plats (även 'privat' – bara stad · stadsdel, aldrig adressen); '' annars.
+// overrideOnline/overrideAdress (version 9, valfria) = händelsens manuella restidsinställning ur KALENDER_IGNORERA (Calendar.gs
+// applyIgnore → item.override): true|false|null resp. rättad adress eller '' – så appen kan visa "manuellt". CJ:s egen inmatning, visas
+// även för 'privat' (adminanrop; platsfältet förblir '' för läge tider). Själva override-objektet exporteras aldrig.
+// serieId (version 9, valfri) = Googles recurringEventId (BusyItem.recurringEventId, vinnaren efter mergeBusy) för en instans av en
+// återkommande Google-händelse, annars '' – appen lagrar restid-poster med id = serieId så att klassningen gäller hela serien (K3-hinten).
 // dodaPoster (valfri) = avbokadeIInkorgen(inbox): händelse med bokningId som är avbokad/avvisad i inkorgen får en varning.
 function previewExport(x, saknas, dodaPoster) {
   const kalla = ['bokningar', 'privat', 'ics', 'reservation'].indexOf(x.kalla) >= 0 ? x.kalla : 'privat';
@@ -2201,10 +2228,12 @@ function previewExport(x, saknas, dodaPoster) {
   const dod = x.bokningId && dodaPoster ? dodaPoster[x.bokningId] : '';
   if (dod === 'avbokad' || dod === 'avvisad') varningarPost.push((dod === 'avbokad' ? 'Avbokad' : 'Avvisad') + ' i inkorgen men händelsen finns kvar i kalendern – ta bort den manuellt');
   return {
-    id: str(x.id), ignoreraId: matchIds[0] || '', matchIds: matchIds,
+    id: str(x.id), ignoreraId: matchIds[0] || '', serieId: kalla === 'reservation' ? '' : str(x.recurringEventId), matchIds: matchIds,
     kalla: kalla, datum: str(x.datum), start: str(x.start), slut: str(x.slut), heldag: x.heldag === true,
     titel: titel, plats: visaText && kalla !== 'reservation' ? text(platsText) : '',
     omrade: cleanText(platsOmrade(x.plats)).slice(0, 60),
+    overrideOnline: x.override && x.override.online === true ? true : x.override && x.override.online === false ? false : null,
+    overrideAdress: x.override ? text(x.override.adress) : '',
     hasPlace: x.hasPlace === true, restid: x.isTravelMeeting === true, cooldownMin: Number(x.cooldownMin) || 0,
     preliminar: x.preliminar === true, raknad: x.raknad === true, ignorerad: x.ignorerad === true,
     bokningId: str(x.bokningId), bokareId: str(x.bokareId), motestypId: str(x.motestypId),

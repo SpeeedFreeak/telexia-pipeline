@@ -456,6 +456,14 @@
   .bok-kal-detalj { background: #161922; border: 1px solid #3b82f6; border-radius: 10px; padding: 12px 14px; margin-bottom: 10px; font-size: 13px; color: #e5e7eb; }
   .bok-kal-detalj-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 8px; }
   .bok-kal-detalj .rad { margin-top: 5px; color: #cbd5e1; font-size: 12px; line-height: 1.4; }
+  /* Version 9 (K3): blocket Restid i detaljpanelen – toggle online/fysiskt + kompakt adressfält */
+  .bok-kal-restid { border-top: 1px dashed #262b36; padding-top: 6px; margin-top: 8px; }
+  .bok-kal-restid .bok-actions-sm { margin-top: 4px; align-items: center; }
+  .bok-kal-restid .bok-actions-sm .bok-muted { font-size: 11px; }
+  .bok-kal-restid .bok-note { margin-top: 2px; }
+  .bok-kal-adress { margin-top: 4px; gap: 6px; }
+  .bok-kal-adress input[type="text"] { flex: 1 1 200px; padding: 4px 8px; font-size: 12px; }
+  .bok-kal-adress .bok-actions-sm { margin-top: 0; }
   .bok-x { border: 1px solid #2a2e37; background: #1a1d27; color: #9ca3af; border-radius: 5px; font-size: 12px; padding: 2px 7px; cursor: pointer; line-height: 1.4; }
   .bok-x:hover { color: #e5e7eb; border-color: #3b82f6; }
   .bok-actions-sm { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 8px; }
@@ -571,6 +579,7 @@
     .bok-kal-detalj { font-size: 14px; }
     .bok-kal-detalj .rad { font-size: 13px; }
     .bok-actions-sm button { font-size: 13px; padding: 8px 12px; }
+    .bok-kal-adress input[type="text"] { font-size: 16px; flex-basis: 100%; }
     #bokningView .bok-koll table, #bokningView .bok-form-table { min-width: 640px; }
     .bok-form-grid { grid-template-columns: 1fr; }
     #bkPanel select { font-size: 16px; width: 100%; }
@@ -1507,6 +1516,17 @@ function saveBokningImport(list) {
 function getMotestypById(id) { return MOTESTYPER.find(m => m.id === id) || null; }   // returnerar även inaktiva typer (spec 3.5)
 function getBokareById(id) { return BOKARE.find(b => b.id === id) || null; }
 
+// Restid-override i en KALENDER_IGNORERA-post (version 9, K1): online true|false (manuell klassning, vinner över automatiken) och/eller
+// adress (+ lat/lng/omrade ur geocode) som scriptet använder som restidsankare. Körs vid boot – bara literaler och hoistade hjälpare
+// (BOK_MAXLEN deklareras senare i filen).
+function kalSaneraOverride(p) {
+  if (typeof p.online !== 'boolean') delete p.online;
+  if (typeof p.adress !== 'string' || !p.adress.trim()) { delete p.adress; delete p.lat; delete p.lng; delete p.omrade; return; }
+  p.adress = p.adress.trim().slice(0, 200);
+  if (bnum(p.lat) === null || bnum(p.lng) === null) { delete p.lat; delete p.lng; }   // adress utan koordinater → scriptet geokodar texten
+  if (typeof p.omrade !== 'string' || !p.omrade.trim()) delete p.omrade; else p.omrade = p.omrade.trim().slice(0, 60);
+}
+function kalHarOverride(p) { return typeof p.online === 'boolean' || !!p.adress; }
 // Idempotent migrering av bokningsposter (spec 3.6): defaults + dubblettskydd för bokningId.
 // Körs vid boot (efter migratePipelines) och efter Drive-pull. Refererar inte TAG_DEFAULT_COLOR (deklareras senare i filen).
 function migrateBokning() {
@@ -1572,10 +1592,12 @@ function migrateBokning() {
   KALENDER_IGNORERA.forEach(p => {
     if (typeof p.id !== 'string') p.id = '';
     if (!['privat','bokningar','ics'].includes(p.kalla)) p.kalla = 'privat';
-    if (p.lage !== 'ignorera' && p.lage !== 'rakna') p.lage = 'ignorera';   // gamla poster utan lage
+    if (!['ignorera', 'rakna', 'restid'].includes(p.lage)) p.lage = 'ignorera';   // gamla poster utan lage; 'restid' = posten bär bara restid-override (version 9, K1)
     if (typeof p.ts !== 'string') p.ts = '';
     delete p.titel;   // ingen titel lagras – visas live ur calendar-preview
+    kalSaneraOverride(p);   // online/adress/lat/lng/omrade (valfria, K1)
   });
+  KALENDER_IGNORERA = KALENDER_IGNORERA.filter(p => p.lage !== 'restid' || kalHarOverride(p));   // restid-post utan override är tom → bort
   BOKNING_IMPORT = gallraBokningImport(BOKNING_IMPORT);
   BOKNING_IMPORT.forEach(p => {
     if (typeof p.bokningId !== 'string') p.bokningId = '';
@@ -5447,6 +5469,8 @@ function bokKalRubrik() {
 //     kalla:'bokningar'|'privat'|'ics'|'reservation', datum, start, slut (ISO per segment), heldag, titel, plats (bara fullt/ics),
 //     hasPlace, restid:bool, cooldownMin, preliminar, raknad, ignorerad, bokningId, bokareId, motestypId, sammanslagenMed:[],
 //     varning, varningar:[] }] }. Allt valideras/klipps; saknas datum delas start/slut per dag lokalt.
+// Version 9 (K2, valfritt): overrideOnline: true|false|null och overrideAdress: ''|text per händelse = scriptets tillämpade manuella
+//   restidsinställning (KALENDER_IGNORERA-postens online/adress) – appen visar "manuellt" även när posten saknas lokalt.
 // Steg 2c (script ≥ 6, valfritt – saknas fälten ritas vyn som förut): omrade (toppnivåfält, stad · stadsdel, ≤ 60 tecken; '' utan
 //   etikett – plats.omrade godtas också om plats är ett objekt) per geokodad händelse och resor:[{ datum, franId|'bas', tillId|'bas',
 //   start:'HH:MM', slut:'HH:MM', minuter, status:'ok'|'schablon'|'okand',
@@ -5554,8 +5578,11 @@ function normKalHandelse(h) {
     titel: bstr(h.titel, 120) || bstr(h.summary, 120), plats, omrade, hasPlace: h.hasPlace === true || (!!plats && h.hasPlace !== false),
     preliminar: h.preliminar === true, raknad: h.raknad === true, ignorerad: h.ignorerad === true,
     bokningId, restid: h.restid === true, varning: Array.from(new Set([bstr(h.varning, 300)].concat(varningar).filter(Boolean))).join(' · '),   // alla varningar (scriptets varning = varningar[0])
+    serieId: kalla === 'reservation' ? '' : bstr(h.serieId, 200),   // version 9: Googles recurringEventId (ICS: '' – UID:t i matchIds gäller redan hela serien); restid-poster lagras på serien
     cooldownMin: Math.max(0, Math.min(600, Math.round(Number(h.cooldownMin) || 0))),   // K2: paus efter mötet (ritas som ljus remsa efter slutet)
     sammanslagenMed: (Array.isArray(h.sammanslagenMed) ? h.sammanslagenMed : []).map(x => bstr(x, 200)).filter(Boolean).slice(0, 10),
+    overrideOnline: h.overrideOnline === true ? true : (h.overrideOnline === false ? false : null),   // version 9 (K2, valfritt): scriptets tillämpade restid-override – null = automatik
+    overrideAdress: bstr(h.overrideAdress, BOK_MAXLEN.adress),
     lokal: null, sid: -1
   };
   const seg = [];
@@ -5642,13 +5669,82 @@ function kalResaTitel(r) {
   return 'Restid ' + bokTidOf(r.startMin) + '–' + bokTidOf(r.slutMin) + ' · ' + kalResaMin(r) + (kalResaMedMarginal(r) ? ' · inkl. marginal' : '') + ' · ' + kalResaNamn(r.fran) + ' → ' + kalResaNamn(r.till) + (r.konflikt ? ' · ryms inte' : '');
 }
 // Lokal ignorera-post för ett segment (3.5): matchar id utan prefix eller något av matchIds, samma källa.
-function kalIgnPost(s) {
-  if (!s.ignoreId && !s.matchIds.length) return null;
-  return KALENDER_IGNORERA.find(p => p.kalla === s.kalla && p.id && (p.id === s.ignoreId || s.matchIds.includes(p.id))) || null;
+// Poster som matchar händelsen (p.id = ignoreraId, serieId eller något av matchIds) i scriptets prioritetsordning: instansens id först,
+// därefter serien (recurringEventId/UID) – samma ordning som matchIds i calendar-preview och som applyIgnore använder.
+function kalMatchandePoster(s) {
+  if (!s.ignoreId && !s.matchIds.length) return [];
+  const ordning = [s.ignoreId].concat(s.matchIds, [s.serieId]).filter(Boolean);
+  return KALENDER_IGNORERA.filter(p => p.kalla === s.kalla && p.id && ordning.includes(p.id)).sort((a, b) => ordning.indexOf(a.id) - ordning.indexOf(b.id));
 }
+// Ignorera/Räkna-posten: den med lage ignorera/rakna (instans före serie); saknas en sådan → första matchande post (bakåtkompatibelt).
+function kalIgnPost(s) {
+  const lista = kalMatchandePoster(s);
+  return lista.find(p => p.lage === 'ignorera' || p.lage === 'rakna') || lista[0] || null;
+}
+// Restid-override-posten (version 9): första matchande post med online/adress – instansens post vinner över seriens (scriptets regel).
+function kalOverridePostFor(s) { return kalMatchandePoster(s).find(kalHarOverride) || null; }
 function kalEffStatus(s) {   // lokal post vinner över serverns flaggor (efter push/hämtning stämmer de överens)
-  const post = kalIgnPost(s);
-  return { post, ignorerad: post ? post.lage === 'ignorera' : s.ignorerad, raknad: post ? post.lage === 'rakna' : s.raknad };
+  const post = kalIgnPost(s), opost = kalOverridePostFor(s);
+  // Version 9 (K1/K2): restid-override – online true|false|null (null = automatik) och rättad adress ur override-posten (instans eller serie);
+  // scriptets overrideOnline/overrideAdress (calendar-preview) som reserv när ingen lokal post finns (t.ex. före Drive-pull på en annan enhet).
+  const online = opost ? (typeof opost.online === 'boolean' ? opost.online : null) : (typeof s.overrideOnline === 'boolean' ? s.overrideOnline : null);
+  const adress = opost ? bstr(opost.adress, 200) : bstr(s.overrideAdress, 200);
+  const ignorerad = post ? post.lage === 'ignorera' : s.ignorerad;
+  // ankare = post.online ?? s.restid (K3); en ignorerad händelse har alltid restid:false (isTravelMeeting = hasPlace && !ignore) – då
+  // säger scriptets hasPlace om platsen är ankare, så toggeln inte erbjuder "fysiskt möte" för ett ignorerat fysiskt möte.
+  const autoAnkare = s.restid === true || (ignorerad && s.hasPlace === true);
+  return { post, ignorerad, raknad: post ? post.lage === 'rakna' : s.raknad,
+    online, adress, manuell: online !== null || !!adress, ankare: online === null ? autoAnkare : online === false };
+}
+// Version 9 (K1): en post per händelse-id – Ignorera/Räkna (lage) och restid-override (online/adress) samsas i samma post.
+// Ändrar KALENDER_IGNORERA (inte sparat) och returnerar statustext, '' = ingen ändring. Anropas av kalIgnoreraAtgard/kalOverrideAtgard.
+function kalIgnoreraPost(s, lage) {
+  const id = s.ignoreId || s.matchIds[0] || '';
+  if (!id) return '';
+  // Ignorera/Räkna gäller instansen: posten med lage, annars instansens egen post (aldrig en seriepost med bara restid-override –
+  // lage på den skulle ignorera hela serien). Finns bara en seriepost skapas en ny instanspost bredvid den.
+  const ign = kalIgnPost(s);
+  const idx = ign && (ign.lage === 'ignorera' || ign.lage === 'rakna' || ign.id === id) ? KALENDER_IGNORERA.indexOf(ign) : -1;
+  const post = idx >= 0 ? KALENDER_IGNORERA[idx] : null;
+  if (post && post.lage === lage) return '';
+  if (post && post.lage !== 'restid') {   // motsatt åtgärd → lage nollas; posten tas bort om ingen override finns kvar
+    if (kalHarOverride(post)) { post.lage = 'restid'; post.ts = nowIsoWithOffset(); } else KALENDER_IGNORERA.splice(idx, 1);
+    return lage === 'rakna' ? 'Ignoreringen borttagen – händelsen räknas igen' : 'Räkna-posten borttagen – den preliminära händelsen räknas inte längre';
+  }
+  if (lage === 'rakna' && !s.preliminar) return '';
+  if (post) { post.lage = lage; post.ts = nowIsoWithOffset(); }   // restid-post → Ignorera/Räkna läggs ovanpå, online/adress kvar
+  else KALENDER_IGNORERA.push({ id: id.slice(0, 200), kalla: s.kalla, lage, ts: nowIsoWithOffset() });
+  return lage === 'ignorera' ? 'Händelsen ignoreras i tillgängligheten' : 'Den preliminära händelsen räknas som upptaget';
+}
+// andring = { online: true|false|null } (null = återställ automatik) och/eller { adress, lat, lng, omrade } ('' = ta bort adressen).
+// Återställs det sista override-fältet på en post med lage 'restid' tas posten bort. Returnerar true vid ändring – även när den lokala
+// posten är oförändrad/saknas men scriptet fortfarande tillämpar en annan override (overrideOnline/overrideAdress, t.ex. satt på en annan
+// enhet före Drive-pull, eller efter rensad lokal lagring): då behövs pushen för att brevlådans config ska följa den lokala listan.
+function kalOverridePost(s, andring) {
+  // Restid-override lagras på SERIEN när den finns (s.serieId = Googles recurringEventId; ICS-UID:t är redan seriens id) så att
+  // "hela serien"-hinten stämmer; en befintlig override-post (instans eller serie) uppdateras där den ligger. Ignorera/Räkna-posten
+  // på instansen rörs inte – de två posterna samsas (scriptet tillämpar båda: lage från instansposten, override från den första
+  // matchande med override).
+  const id = s.serieId || s.ignoreId || s.matchIds[0] || '';
+  if (!id) return false;
+  let post = kalOverridePostFor(s);
+  if (!post) { const egen = kalMatchandePoster(s).find(p => p.id === id); if (egen) post = egen; }
+  if (!post) { post = { id: id.slice(0, 200), kalla: s.kalla, lage: 'restid', ts: '' }; KALENDER_IGNORERA.push(post); }
+  const fore = JSON.stringify(Object.assign({}, post, { ts: '' })), tsFore = post.ts;
+  if ('online' in andring) { if (typeof andring.online === 'boolean') post.online = andring.online; else delete post.online; }
+  if ('adress' in andring) {
+    post.adress = bstr(andring.adress, 200).trim(); post.lat = bnum(andring.lat); post.lng = bnum(andring.lng); post.omrade = bstr(andring.omrade, 60).trim();
+  }
+  post.ts = nowIsoWithOffset();
+  kalSaneraOverride(post);   // tomma fält och ofullständiga koordinater bort (samma sanering som vid boot)
+  if (post.lage === 'restid' && !kalHarOverride(post)) { KALENDER_IGNORERA.splice(KALENDER_IGNORERA.indexOf(post), 1); return tsFore !== '' || kalServerOverrideAvviker(s, null); }   // fanns posten → borttagen = ändring
+  if (JSON.stringify(Object.assign({}, post, { ts: '' })) === fore) { post.ts = tsFore; return kalServerOverrideAvviker(s, post); }   // inget ändrades lokalt (t.ex. Återställ utan klassning)
+  return true;
+}
+// Scriptets tillämpade override ur calendar-preview (K2) skiljer sig från den lokala posten (null = ingen post) → en push behövs.
+function kalServerOverrideAvviker(s, post) {
+  const online = post && typeof post.online === 'boolean' ? post.online : null, adress = post && post.adress ? post.adress : '';
+  return (typeof s.overrideOnline === 'boolean' ? s.overrideOnline : null) !== online || bstr(s.overrideAdress, 200) !== adress;
 }
 function kalBlockTitel(s) {
   if (s.lokal) { const k = getCustomerById(s.lokal.lead.kundId); return (k ? k.namn : 'Namnlös kund') + ' · ' + (s.lokal.ev.text || 'Möte'); }
@@ -5675,6 +5771,7 @@ function kalBlockIkoner(s) {
   if (s.preliminar && !st.raknad) h += '<span title="Preliminär – ej besvarad">?</span>';
   if (s.restid) h += '<span title="Restid beräknas">🚗</span>';
   else if (s.hasPlace) h += '<span title="Plats">📍</span>';
+  if (st.manuell) h += '<span title="manuell restidsinställning">✎</span>';   // version 9 (K3): online/fysiskt eller rättad adress satt manuellt
   if (s.varning) h += '<span title="' + escapeHtml(s.varning) + '">⚠</span>';
   return h ? '<span class="bok-kb-ikoner">' + h + '</span>' : '';
 }
@@ -5923,15 +6020,21 @@ function ritaKalDetalj() {
   const el = document.getElementById('bkDetalj');
   if (!el) return;
   const s = bokKal.segment[bokKal.valdSid];
-  if (!s) { el.innerHTML = ''; el.style.display = 'none'; return; }
+  if (!s) { el.innerHTML = ''; el.style.display = 'none'; delete el.dataset.handelse; return; }
   el.style.display = 'block';
   const st = kalEffStatus(s);
   const lokal = s.lokal, kund = lokal ? getCustomerById(lokal.lead.kundId) : null, mt = lokal ? getMotestypById(lokal.ev.motestypId) : null;
+  // Pågående inmatning i adressfältet överlever omritning i bakgrunden (intervallimport, Drive-pull, svar på pågående hämtning) –
+  // samma skydd som Inställningar ger sina fält. Bara när samma händelse (id + datum) ritas om igen.
+  const adrFore = document.getElementById('bkOvAdress'), nyckel = s.id + '|' + s.datum;
+  const utkast = adrFore && el.dataset.handelse === nyckel && (document.activeElement === adrFore || adrFore.value !== adrFore.defaultValue) ? { value: adrFore.value, fokus: document.activeElement === adrFore } : null;   // defaultValue = värdet som ritades senast
+  el.dataset.handelse = nyckel;
   el.innerHTML = `<div class="bok-kal-detalj">
     <div class="bok-kal-detalj-head"><div><b>${escapeHtml(kalBlockTitel(s))}</b> ${kalKallaBadge(s)}${s.preliminar && !st.raknad ? ' <span class="bok-prel-badge">Preliminär – ej besvarad</span>' : ''}${st.ignorerad ? ' <span class="bok-muted">🚫 ignorerad</span>' : ''}</div><button type="button" class="bok-x" data-act="stang" title="Stäng">✕</button></div>
     <div class="rad">🕒 ${escapeHtml(longDateLabel(s.datum))} ${s.heldag ? 'heldag' : escapeHtml(bokTidOf(s.startMin) + '–' + bokTidOf(s.slutMin))}</div>
     ${s.plats || s.omrade ? `<div class="rad">📍 ${s.plats ? `<a href="${mapsUrl(s.plats)}" target="_blank" rel="noopener" style="color:#60a5fa;text-decoration:none">${escapeHtml(s.plats)}</a>` : ''}${s.omrade ? (s.plats ? ' <span class="bok-muted">(' + escapeHtml(s.omrade) + ')</span>' : '<span class="bok-muted">' + escapeHtml(s.omrade) + '</span>') : ''}${s.restid ? ' · restid beräknas runt händelsen' : ''}</div>` : ''}
     ${kalDetaljRestidRad(s)}
+    ${kalDetaljOverrideBlock(s, st)}
     ${lokal ? `<div class="rad">Kund: <b>${escapeHtml(kund ? kund.namn : 'Namnlös kund')}</b>${kund && kund.orgnr ? ' (' + escapeHtml(kund.orgnr) + ')' : ''} · ${escapeHtml(mt ? mt.titel : lokal.ev.text)} · Bokad av ${escapeHtml(bokarNamn(lokal.ev.bokadAv))} · Status: ${escapeHtml(lokal.ev.status || '–')}${lokal.ev.restid && lokal.ev.restid.status !== 'ok' ? '<span class="ev-warn">⚠ restid ' + (lokal.ev.restid.status === 'schablon' ? 'schablon' : 'okänd') + '</span>' : ''}${PIPELINES.length > 1 ? ' ' + plBadge(lokal.lead.pipelineId) : ''}</div>` : ''}
     ${s.kalla === 'bokningar' && !lokal ? '<div class="rad bok-warn-text">Bokningen finns i kalendern men inte lokalt – kör "Hämta nu" i Inkorg</div>' : ''}
     <div class="rad">Källa: ${escapeHtml(BOK_KAL_KALLA_NAMN[s.kalla] || s.kalla)} · Tillgänglighet: ${kalStatusText(s)}</div>
@@ -5940,6 +6043,41 @@ function ritaKalDetalj() {
     <div class="bok-actions-sm">${kalAtgardKnappar(s)}</div>
   </div>`;
   el.querySelectorAll('[data-act]').forEach(b => b.addEventListener('click', () => kalAtgard(b.dataset.act, s.sid)));
+  const adrInp = document.getElementById('bkOvAdress');
+  if (adrInp) {
+    adrInp.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); kalAtgard('spara-adress', s.sid); } });
+    if (utkast) { adrInp.value = utkast.value; if (utkast.fokus) { adrInp.focus(); adrInp.setSelectionRange(adrInp.value.length, adrInp.value.length); } }
+  }
+}
+// Version 9 (K3): blocket "Restid" i detaljpanelen – manuell klassning online/fysiskt (vinner över automatiken: KAL_ONLINE_RE, mötestypens
+// restid-flagga) och rättad adress för restiden. Reservationer och lokala poster får inga kontroller; modulbokningar får toggeln men inte
+// adressfältet (kundens adress ändras via Omboka). Alla ändringar går samma väg som Ignorera/Räkna (sparaKalenderIgnoreraOchHamta).
+function kalDetaljOverrideBlock(s, st) {
+  if (s.kalla === 'reservation' || s.kalla === 'lokal' || (!s.ignoreId && !s.matchIds.length)) return '';
+  const online = st.online, adress = st.adress;
+  let h = '<div class="rad bok-kal-restid"><b>Restid</b>';
+  if (s.heldag) {   // scriptets finalizeBusy: heldag är aldrig ankare – en klassning/adress skulle aldrig få effekt; bara borttagning erbjuds
+    h += ' <span class="bok-muted">Heldagshändelser får aldrig restid.</span>';
+    if (st.manuell) h += '<div class="bok-actions-sm"><span class="bok-muted">' + (online === null ? '' : (online ? 'online-möte' : 'fysiskt möte') + ' (manuellt)') + (adress ? (online === null ? '' : ' · ') + 'rättad adress' : '') + '</span>' + (online !== null ? '<button type="button" data-act="aterstall-online">Återställ automatik</button>' : '') + (adress ? '<button type="button" class="danger" data-act="tabort-adress">Ta bort adress</button>' : '') + '</div>';
+    return h + '</div>';
+  }
+  h += '<div class="bok-actions-sm">' + (st.ankare
+    ? `<button type="button" data-act="online" title="Händelsen får inget restidsankare – restid räknas inte till/från den">Markera som online-möte (ingen restid)</button>`
+    : `<button type="button" data-act="fysiskt" title="Händelsen blir restidsankare – restid räknas till/från platsen">Markera som fysiskt möte (räkna restid)</button>`);
+  if (online !== null) h += `<span class="bok-muted">${online ? 'online-möte' : 'fysiskt möte'} (manuellt)</span><button type="button" data-act="aterstall-online" title="Tar bort den manuella klassningen – automatiken avgör igen">Återställ automatik</button>`;
+  h += '</div><div class="bok-note" style="margin-top:4px">För återkommande möten gäller inställningen hela serien.</div>';
+  if (kalArBokning(s)) h += '<div class="bok-note">Kundens adress ändras via Omboka.</div>';
+  else {
+    // Signalen bygger på scriptets flaggor (hasPlace/restid/omrade), inte på platstexten – calendar-preview skickar aldrig plats för
+    // 'privat' (bara boolska flaggor + omrade), och just där är en rättad adress mest relevant.
+    const platsTxt = s.plats ? escapeHtml(s.plats) : (s.hasPlace ? '<span class="bok-muted">(plats dold – privat kalender)</span>' : '–');
+    const platsSignal = s.omrade ? ' <span title="geokodad">(' + escapeHtml(s.omrade) + ')</span>'
+      : (s.restid ? ' <span class="bok-warn-text">– ingen träff hos Google</span>' : (s.plats || s.hasPlace ? ' <span class="bok-muted">(inget restidsankare)</span>' : ''));
+    h += '<div class="bok-muted" style="margin-top:6px">Plats: ' + platsTxt + platsSignal + '</div>';
+    if (adress) h += `<div class="bok-muted">Adress för restid (manuellt): <b>${escapeHtml(adress)}</b></div>`;
+    h += `<div class="bok-inline bok-kal-adress"><input type="text" id="bkOvAdress" maxlength="200" placeholder="Adress för restid" value="${escapeHtml(adress)}" autocomplete="off"><div class="bok-actions-sm"><button type="button" data-act="spara-adress" title="Geokodas av scriptet och används som restidsankare i stället för kalenderns plats">Spara adress</button>${adress ? '<button type="button" class="danger" data-act="tabort-adress" title="Kalenderns plats används igen">Ta bort adress</button>' : ''}</div></div>`;
+  }
+  return h + '</div>';
 }
 // Steg 2c: "Restid från föregående: N min · till nästa: M min" (från/till bas när resan går mot basadressen); tom när inga resor finns.
 function kalDetaljRestidRad(s) {
@@ -5967,7 +6105,7 @@ function ritaBokKalKoll(el, seg, fran, till, rubrik) {
       <td style="white-space:nowrap">${escapeHtml(SV_WEEKDAYS[weekdayOf(s.datum)].slice(0, 3))} ${escapeHtml(kortDatumLabel(s.datum))}</td>
       <td style="white-space:nowrap">${s.heldag ? 'Heldag' : escapeHtml(bokTidOf(s.startMin) + '–' + bokTidOf(s.slutMin))}</td>
       <td>${kalKallaBadge(s)}</td>
-      <td>${escapeHtml(kalBlockTitel(s))}${s.plats || s.omrade ? '<div class="bok-muted">📍 ' + (s.plats ? escapeHtml(s.plats) + (s.omrade ? ' (' + escapeHtml(s.omrade) + ')' : '') : escapeHtml(s.omrade)) + (s.restid ? ' · restid' : '') + '</div>' : ''}</td>
+      <td>${escapeHtml(kalBlockTitel(s))}${st.manuell ? ' <span title="manuell restidsinställning">✎</span>' : ''}${s.plats || s.omrade ? '<div class="bok-muted">📍 ' + (s.plats ? escapeHtml(s.plats) + (s.omrade ? ' (' + escapeHtml(s.omrade) + ')' : '') : escapeHtml(s.omrade)) + (s.restid ? ' · restid' : '') + '</div>' : ''}</td>
       <td>${kalKollRestid(s)}</td>
       <td>${kalStatusText(s)}</td>
       <td class="bok-koll-varning">${escapeHtml(varn)}</td>
@@ -5978,12 +6116,20 @@ function ritaBokKalKoll(el, seg, fran, till, rubrik) {
   seg.forEach(s => { const p = kalIgnPost(s); if (p) traffade.add(p); });
   const utanfor = KALENDER_IGNORERA.map((p, i) => ({ p, i })).filter(x => !traffade.has(x.p));
   if (utanfor.length) {
-    html += '<div class="section-title">Ignorerade/räknade händelser utanför vyn</div><div class="bok-note" style="margin:0 0 6px">Posterna gäller händelser som inte finns i hämtat intervall (passerade, flyttade eller borttagna). Knappen (motsatt åtgärd) tar bort posten.</div>';
-    html += utanfor.map(x => `<div class="bok-koll-utanfor"><span>${x.p.lage === 'rakna' ? 'Räknad' : 'Ignorerad'} händelse (utanför vyn) · ${escapeHtml(BOK_KAL_KALLA_NAMN[x.p.kalla] || x.p.kalla)}${x.p.ts ? ' · ' + escapeHtml(kortTidLabel(x.p.ts)) : ''}</span><div class="bok-actions-sm"><button type="button" data-ign-i="${x.i}">${x.p.lage === 'rakna' ? 'Ignorera' : 'Räkna'}</button></div></div>`).join('');
+    html += '<div class="section-title">Ignorerade/räknade händelser utanför vyn</div><div class="bok-note" style="margin:0 0 6px">Posterna gäller händelser som inte finns i hämtat intervall (passerade, flyttade eller borttagna). Knappen tar bort posten (Ignorera/Räkna = motsatt åtgärd).</div>';
+    html += utanfor.map(x => `<div class="bok-koll-utanfor"><span>${escapeHtml(kalPostBeskrivning(x.p))} (utanför vyn) · ${escapeHtml(BOK_KAL_KALLA_NAMN[x.p.kalla] || x.p.kalla)}${x.p.ts ? ' · ' + escapeHtml(kortTidLabel(x.p.ts)) : ''}</span><div class="bok-actions-sm"><button type="button" data-ign-i="${x.i}">${kalHarOverride(x.p) ? 'Ta bort' : (x.p.lage === 'rakna' ? 'Ignorera' : 'Räkna')}</button></div></div>`).join('');
   }
   el.innerHTML = html;
   el.querySelectorAll('[data-act]').forEach(b => b.addEventListener('click', () => kalAtgard(b.dataset.act, Number(b.dataset.sid))));
   el.querySelectorAll('[data-ign-i]').forEach(b => b.addEventListener('click', () => taBortKalenderIgnorera(Number(b.dataset.ignI))));
+}
+// Beskrivning av en KALENDER_IGNORERA-post utan händelse i vyn (version 9: även restid-override).
+function kalPostBeskrivning(p) {
+  const delar = [];
+  if (p.lage === 'rakna') delar.push('Räknad händelse'); else if (p.lage === 'ignorera') delar.push('Ignorerad händelse');
+  if (p.online === true) delar.push('Online-möte (manuellt)'); else if (p.online === false) delar.push('Fysiskt möte (manuellt)');
+  if (p.adress) delar.push('Rättad adress');
+  return delar.join(' · ') || 'Post';
 }
 async function kalAtgard(act, sid) {
   const s = bokKal.segment[sid];
@@ -5994,6 +6140,9 @@ async function kalAtgard(act, sid) {
   if (act === 'avboka' && s.lokal) { await avbokaBokning(s.lokal.ev.bokningId); return; }
   if (act === 'tabort') { await taBortForaldralosHandelse(s); return; }
   if (act === 'ignorera' || act === 'rakna') await kalIgnoreraAtgard(s, act);
+  if (act === 'online' || act === 'fysiskt' || act === 'aterstall-online') await kalOverrideAtgard(s, { online: act === 'online' ? true : (act === 'fysiskt' ? false : null) });
+  if (act === 'spara-adress') await kalSparaOverrideAdress(s);
+  if (act === 'tabort-adress') await kalOverrideAtgard(s, { adress: '' });
 }
 // Föräldralös kalenderhändelse (saknas i inkorgen, ingen lokal bokning): purge { bokningIds:[s.bokningId], kalenderEventIds:[s.ignoreId] }
 // (A50) – inte cancel: purge raderar ett kommande möte (sendUpdates:'all' så Outlook-kopian avbokas), anonymiserar ett passerat
@@ -6012,24 +6161,42 @@ async function taBortForaldralosHandelse(s) {
   else setBokStatus(purge.anonymiserade ? 'Kalenderhändelsen anonymiserad (passerat möte)' : 'Kalenderhändelsen borttagen', 'ok');
   if (bokningSub === 'kalender') laddaBokKalVy(true);
 }
-// Ignorera/Räkna (3.5): motsatt åtgärd på befintlig post tar bort den; annars skapas posten. Sparas → config-push → ny hämtning.
+// Ignorera/Räkna (3.5): motsatt åtgärd på befintlig post tar bort den (eller nollar lage → 'restid' om posten bär en restid-override, K1); annars skapas posten. Sparas → config-push → ny hämtning.
 async function kalIgnoreraAtgard(s, lage) {
   if (s.kalla === 'lokal') return;
   if (kalArBokning(s) && !(lage === 'rakna' && kalEffStatus(s).ignorerad)) { setBokStatus('Bokningar avbokas eller ombokas – de kan inte ignoreras', 'warn'); return; }   // Räkna får ta bort en gammal ignorering
-  const id = s.ignoreId || s.matchIds[0] || '';
-  if (!id) { setBokStatus('Händelsen saknar id och kan inte ignoreras', 'warn'); return; }
-  const idx = KALENDER_IGNORERA.findIndex(p => p.kalla === s.kalla && p.id && (p.id === id || s.matchIds.includes(p.id)));
-  let text;
-  if (idx >= 0) {
-    if (KALENDER_IGNORERA[idx].lage === lage) return;
-    KALENDER_IGNORERA.splice(idx, 1);   // motsatt åtgärd → posten tas bort
-    text = lage === 'rakna' ? 'Ignoreringen borttagen – händelsen räknas igen' : 'Räkna-posten borttagen – den preliminära händelsen räknas inte längre';
-  } else {
-    if (lage === 'rakna' && !s.preliminar) return;
-    KALENDER_IGNORERA.push({ id: id.slice(0, 200), kalla: s.kalla, lage, ts: nowIsoWithOffset() });
-    text = lage === 'ignorera' ? 'Händelsen ignoreras i tillgängligheten' : 'Den preliminära händelsen räknas som upptaget';
-  }
+  if (!s.ignoreId && !s.matchIds.length) { setBokStatus('Händelsen saknar id och kan inte ignoreras', 'warn'); return; }
+  const text = kalIgnoreraPost(s, lage);   // version 9: samma post som ev. restid-override (K1)
+  if (text) await sparaKalenderIgnoreraOchHamta(text);
+}
+// Version 9 (K3): manuell online/fysiskt-klassning resp. rättad adress – posten delas med Ignorera/Räkna (kalOverridePost).
+async function kalOverrideAtgard(s, andring) {
+  if (s.kalla === 'lokal' || s.kalla === 'reservation') return;
+  if (!s.ignoreId && !s.matchIds.length) { setBokStatus('Händelsen saknar id – restiden kan inte ställas in manuellt', 'warn'); return; }
+  if ('adress' in andring && kalArBokning(s)) { setBokStatus('Kundens adress ändras via Omboka', 'warn'); return; }
+  if (s.heldag && (typeof andring.online === 'boolean' || andring.adress)) { setBokStatus('Heldagshändelser är aldrig restidsankare', 'warn'); return; }   // bara återställning/borttagning på heldag
+  if (!kalOverridePost(s, andring)) { setBokStatus('Ingen ändring – inställningen är redan sparad', 'info'); return; }
+  const inp = document.getElementById('bkOvAdress'), dEl = document.getElementById('bkDetalj');
+  if (inp && dEl && dEl.dataset.handelse === s.id + '|' + s.datum) inp.value = kalEffStatus(s).adress || '';   // fältet speglar den sparade adressen så omritningen inte behåller råtexten som utkast – bara om panelen fortfarande visar samma händelse
+  const text = 'online' in andring
+    ? (andring.online === true ? 'Markerat som online-möte – ingen restid' : andring.online === false ? 'Markerat som fysiskt möte – restid räknas' : 'Manuell klassning borttagen – automatiken avgör')
+    : (andring.adress ? 'Adress för restid sparad' : 'Rättad adress borttagen – kalenderns plats används');
   await sparaKalenderIgnoreraOchHamta(text);
+}
+// Adressen geokodas av scriptet (bokAdminApi 'geocode', som basadressen i Inställningar): status 'ok' med lat/lng krävs; formaterad adress
+// och omrade (K4, valfritt) sparas i posten. 'okand' sparas inte – texten rättas i stället.
+async function kalSparaOverrideAdress(s) {
+  const inp = document.getElementById('bkOvAdress');
+  const adress = inp ? inp.value.trim().slice(0, 200) : '';
+  if (!adress) { setBokStatus('Ange en adress för restid', 'warn'); return; }
+  if (kalArBokning(s)) { setBokStatus('Kundens adress ändras via Omboka', 'warn'); return; }
+  if (!bokAnsluten()) { setBokStatus('Anslut brevlådan först – geokodningen görs av scriptet', 'warn'); return; }
+  setBokStatus('Geokodar adressen…', 'info');
+  const r = await bokAdminApi('geocode', { adress });
+  if (!r.ok) { setBokStatus('Kunde inte geokoda adressen: ' + bokFelText(r), 'err'); return; }
+  const d = isPlainObject(r.data) ? r.data : {};
+  if (d.status !== 'ok' || bnum(d.lat) === null || bnum(d.lng) === null) { setBokStatus('Adressen hittades inte hos Google – kontrollera stavningen', 'warn'); return; }
+  await kalOverrideAtgard(s, { adress: bstr(d.formaterad, 200) || adress, lat: d.lat, lng: d.lng, omrade: bstr(d.omrade, 60) });
 }
 async function taBortKalenderIgnorera(i) {
   if (!KALENDER_IGNORERA[i]) return;
