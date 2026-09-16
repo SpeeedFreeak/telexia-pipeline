@@ -75,6 +75,10 @@ Höjs `SCRIPT_VERSION` i `Code.gs` ska `MIN_SCRIPT_VERSION` höjas i samma ordni
 
 **Version 7 = SCRIPT_VERSION 7** (optimering + restid tydlig + Teams-fix, CJ:s beslut 2026-09-16): **Ny version av den befintliga distributionen**. `MIN_SCRIPT_VERSION` **förblir 4** i appen och sajten – alla nya fält är valfria (`availability`-block av typ `paus`; `calendar-preview.resor` utelämnar 0-ben; mejltexten). **Driftinstruktion: kör `install()` en gång i redigeraren efter inklistringen** så att den nya triggern `refreshIcsCache` skapas (install tar bort och återskapar båda triggarna idempotent; Anslut-guidens `setup` gör detsamma). Se "Version 7" nedan.
 
+## Version 8 – online-möten är aldrig restidsankare (SCRIPT_VERSION 8)
+
+Outlook sätter `LOCATION` "Microsoft Teams-möte"/"Microsoft Teams Meeting" (ibland "Konferensrum X; Microsoft Teams-möte") på Teams-inbjudningar; det gamla filtret i `kalLooksLikePlace` fångade bara texter som *börjar* med teams/zoom/…, så sådana möten geokodades till en riktig plats och blev restidsankare med helt felaktiga ben ("145 min från bas" före ett Teams-möte, 195 min till nästa möte). Nu (`KAL_ONLINE_RE`) är en plats som innehåller ett online-ord var som helst i texten – microsoft teams, teams, zoom, google meet, webex, skype, telefon(möte), online, digitalt, distans, videomöte/-länk, virtuellt – aldrig ett ankare (ordgränser: "Telefonvägen 3" och "Distansgatan 5" är fortfarande platser). Bara `LOCATION`-texten bedöms – en riktig gatuadress med Teams-länk i beskrivningen förblir ett ankare (hellre ett ankare för mycket än en missad resa). Gäller Outlook-ICS och Google-kalendrar; modulens egna bokningar styrs av mötestypens restid-flagga (version 7). Gamla geokodposter för sådana texter i cache-filen är ofarliga (används aldrig, gallras efter 180 dagar). Deploy: New version; ingen `install()` behövs (inga nya triggers/scopes); `?action=ping` → `scriptVersion: 8`.
+
 ## Version 7 – optimering, restid tydlig, Teams-fix (SCRIPT_VERSION 7)
 
 **Optimering (färre Drive-/UrlFetch-omgångar per anrop):**

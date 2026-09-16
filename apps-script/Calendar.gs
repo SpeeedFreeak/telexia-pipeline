@@ -78,10 +78,17 @@ function kalTidOf(min) {                           // minuter → 'HH:MM' (1440 
   return String(h).padStart(2, '0') + ':' + String(mm).padStart(2, '0');
 }
 function kalIsUrl(text) { return /^\s*(https?:\/\/|www\.)/i.test(String(text || '')); }
-function kalLooksLikePlace(text) {                 // URL (Teams-länk) räknas inte som plats (5.2)
+// Online-möte i platsfältet (version 8): Outlook sätter LOCATION "Microsoft Teams-möte"/"Microsoft Teams Meeting" på Teams-inbjudningar
+// (ibland "Konferensrum X; Microsoft Teams-möte"), Google-synkade möten likaså. Sådana texter geokodades tidigare till en riktig plats
+// och gjorde varje Teams-möte till ett restidsankare med helt felaktiga ben (bas → "Teams-platsen" → nästa möte). Innehåller platsen
+// ett online-ord – var som helst i texten – är det inget ankare (platsen visas ändå i Kalenderkoll). Ordgränser (\b) gör att
+// "Telefonvägen 3"/"Distansgatan 5" fortfarande är platser. En riktig gatuadress med Teams-länk i beskrivningen påverkas inte
+// (bara LOCATION-texten bedöms) – hellre ett ankare för mycket än en missad resa.
+const KAL_ONLINE_RE = /\b(microsoft ?teams|teams|zoom|google ?meet|meet\.google|webex|skype|telefonm[öo]te|telefon|online|digitalt|distans|videom[öo]te|videol[äa]nk|virtuellt)\b/i;
+function kalLooksLikePlace(text) {                 // URL (Teams-länk) och online-möten räknas inte som plats (5.2, version 8)
   const t = String(text || '').trim();
   if (!t || kalIsUrl(t)) return false;
-  if (/^(teams|zoom|google meet|meet|telefon|online|digitalt)\b/i.test(t) && t.length < 40) return false;
+  if (KAL_ONLINE_RE.test(t)) return false;
   return true;
 }
 function kalMsOf(iso) { return new Date(iso).getTime(); }
