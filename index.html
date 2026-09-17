@@ -437,8 +437,9 @@
   .kb-resa.is-okand { background: repeating-linear-gradient(45deg, rgba(251,191,36,.22) 0 6px, rgba(251,191,36,.06) 6px 12px); border-color: #b45309; color: #fbbf24; }
   .kb-resa.is-konflikt { border: 2px solid #ef4444; color: #fecaca; z-index: 3; box-shadow: 0 0 0 1px rgba(239,68,68,.45); }
   .bok-kal-legend i.kb-resa { position: static; border: 1px dashed #7f1d1d; background: repeating-linear-gradient(45deg, rgba(248,113,113,.28) 0 3px, rgba(248,113,113,.08) 3px 6px); }
-  /* K2: paus efter mötet (cooldownMin) – ljus remsa under händelsen i samma lane, lägre z-index än .bok-kb och .kb-resa */
-  .kb-paus { position: absolute; box-sizing: border-box; border: 1px dashed rgba(148,163,184,.35); border-radius: 6px; background: rgba(148,163,184,.14); color: rgba(148,163,184,.7); font-size: 10px; line-height: 1.2; padding: 0 5px; overflow: hidden; white-space: nowrap; z-index: 0; pointer-events: none; }
+  /* K2/version 10: marginal efter mötet (handelser[].cooldownMin = effektiv buffert: mötestypens paus eller marginal fysiskt/online) – ljus remsa
+     under händelsen i samma lane, lägre z-index än .bok-kb och .kb-resa */
+  .kb-paus { position: absolute; box-sizing: border-box; border: 1px dashed rgba(148,163,184,.35); border-radius: 6px; background: rgba(148,163,184,.14); color: rgba(148,163,184,.7); font-size: 9px; line-height: 1.2; padding: 0 5px; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; z-index: 0; pointer-events: none; }
   .bok-kal-legend i.kb-paus { position: static; border: 1px dashed rgba(148,163,184,.35); background: rgba(148,163,184,.14); }
   .bok-koll-restid { white-space: nowrap; font-size: 12px; color: #cbd5e1; }
   .bok-koll-restid .is-konflikt { color: #f87171; font-weight: 600; }
@@ -1396,7 +1397,10 @@ const DEFAULT_BOKNINGSINSTALLNINGAR = {
   basadress: '', basLat: null, basLng: null, restidTillForsta: true, restidEfterSista: true,
   framforhallningFysiskDagar: 2, framforhallningTeamsDagar: 1, horisontVeckor: 6,
   startintervallMin: 30, maxFysiskaPerDag: 3, maxEnkelResaMin: 90,
-  schablonRestidMin: 45, marginalMinstMin: 15, marginalProcent: 25,
+  schablonRestidMin: 45,
+  // Version 10 (CJ 2026-09-17, ersätter spec 5.6/5.8): restiden är Googles råa körtid utan påslag; marginalen läggs i stället EFTER varje
+  // möte – fysiskt/online (mötestypens paus gäller om den är längre). Gamla marginalMinstMin/marginalProcent tas bort i migrateBokning.
+  marginalFysisktMin: 15, marginalOnlineMin: 5,
   rodaDagar: true, rodaDagarExtra: [], rodaDagarUndantag: [],
   paus: { aktiv: false, tom: '', meddelande: '' },
   // Tom tills Anslut-guiden (M3, calendars-list) fyller listan – inga kalender-id:n/e-postadresser i källkoden (publikt repo).
@@ -1588,6 +1592,9 @@ function migrateBokning() {
     BOKNINGSINSTALLNINGAR.bokningSidaUrl = DEFAULT_BOKNINGSINSTALLNINGAR.bokningSidaUrl;
   }
   if (!Array.isArray(BOKNINGSINSTALLNINGAR.kalendrar)) BOKNINGSINSTALLNINGAR.kalendrar = [];
+  // Version 10: marginal efter möte (fysiskt/online) ersätter restidspåslaget – gamla fält bort ur lokal kopia (config-push skickar dem inte heller)
+  delete BOKNINGSINSTALLNINGAR.marginalMinstMin; delete BOKNINGSINSTALLNINGAR.marginalProcent;
+  ['marginalFysisktMin', 'marginalOnlineMin'].forEach(k => { const v = Math.round(Number(BOKNINGSINSTALLNINGAR[k])); BOKNINGSINSTALLNINGAR[k] = (isFinite(v) && v >= 0 && v <= 120) ? v : DEFAULT_BOKNINGSINSTALLNINGAR[k]; });   // samma intervall som Inställningar › Regler (0–120) så formuläret alltid går att spara
   KALENDER_IGNORERA = KALENDER_IGNORERA.filter(isPlainObject);
   KALENDER_IGNORERA.forEach(p => {
     if (typeof p.id !== 'string') p.id = '';
@@ -3819,6 +3826,7 @@ async function byggBokningConfig(rev) {
   }
   const inst = deepClone(BOKNINGSINSTALLNINGAR);
   ['adminNyckel', 'brevladaFiler', 'senastSyncTs', 'senastSyncRev', 'senasteKonfigAndringTs', 'scriptUrl'].forEach(k => { delete inst[k]; });
+  delete inst.marginalMinstMin; delete inst.marginalProcent;   // version 10: utgångna restidspåslag skickas aldrig (scriptet ignorerar dem ändå)
   return {
     schemaVersion: 1, rev, updatedAt: nowIsoWithOffset(), updatedBy: 'app',
     bokare, motestyper: deepClone(MOTESTYPER), formular: deepClone(BOKNINGSFORMULAR), installningar: inst,
@@ -5030,9 +5038,10 @@ function renderBokInstallningar(body) {
       <div class="field"><label>Max fysiska möten per dag</label><input type="number" id="bsMaxFysiska" min="1" max="20"></div>
       <div class="field"><label>Max enkel resa (min)</label><input type="number" id="bsMaxResa" min="5" max="600"></div>
       <div class="field"><label>Schablonrestid (min)</label><input type="number" id="bsSchablon" min="0" max="600"></div>
-      <div class="field"><label>Marginal minst (min)</label><input type="number" id="bsMarginalMin" min="0" max="120"></div>
-      <div class="field"><label>Marginal (%)</label><input type="number" id="bsMarginalProcent" min="0" max="200"></div>
+      <div class="field"><label>Marginal efter fysiskt möte (min)</label><input type="number" id="bsMarginalFysiskt" min="0" max="120"></div>
+      <div class="field"><label>Marginal efter online-möte (min)</label><input type="number" id="bsMarginalOnline" min="0" max="120"></div>
     </div>
+    <div class="hint" style="margin-top:6px">Restiden räknas som Googles körtid utan påslag – marginalen läggs efter varje möte (mötestypens paus gäller om den är längre).</div>
   </div>
 
   <div class="bok-panel">
@@ -5142,8 +5151,8 @@ function bsFyll(s) {
   document.getElementById('bsMaxFysiska').value = s.maxFysiskaPerDag;
   document.getElementById('bsMaxResa').value = s.maxEnkelResaMin;
   document.getElementById('bsSchablon').value = s.schablonRestidMin;
-  document.getElementById('bsMarginalMin').value = s.marginalMinstMin;
-  document.getElementById('bsMarginalProcent').value = s.marginalProcent;
+  document.getElementById('bsMarginalFysiskt').value = s.marginalFysisktMin;
+  document.getElementById('bsMarginalOnline').value = s.marginalOnlineMin;
   document.getElementById('bsRodaDagar').checked = s.rodaDagar !== false;
   document.getElementById('bsRodaExtra').value = (s.rodaDagarExtra || []).join('\n');
   document.getElementById('bsRodaUndantag').value = (s.rodaDagarUndantag || []).join('\n');
@@ -5365,8 +5374,8 @@ function sparaBokningsinstallningarFranFormular() {
   s.maxFysiskaPerDag = bsInt('bsMaxFysiska', 1, 20, 'Max fysiska/dag', fel);
   s.maxEnkelResaMin = bsInt('bsMaxResa', 5, 600, 'Max enkel resa', fel);
   s.schablonRestidMin = bsInt('bsSchablon', 0, 600, 'Schablonrestid', fel);
-  s.marginalMinstMin = bsInt('bsMarginalMin', 0, 120, 'Marginal minst', fel);
-  s.marginalProcent = bsInt('bsMarginalProcent', 0, 200, 'Marginal %', fel);
+  s.marginalFysisktMin = bsInt('bsMarginalFysiskt', 0, 120, 'Marginal efter fysiskt möte', fel);   // version 10: buffert efter varje möte (K2/K3)
+  s.marginalOnlineMin = bsInt('bsMarginalOnline', 0, 120, 'Marginal efter online-möte', fel);
   s.rodaDagar = document.getElementById('bsRodaDagar').checked;
   s.rodaDagarExtra = bsDatumLista('bsRodaExtra', fel, 'Extra stängda datum');
   s.rodaDagarUndantag = bsDatumLista('bsRodaUndantag', fel, 'Undantag');
@@ -5474,9 +5483,12 @@ function bokKalRubrik() {
 // Steg 2c (script ≥ 6, valfritt – saknas fälten ritas vyn som förut): omrade (toppnivåfält, stad · stadsdel, ≤ 60 tecken; '' utan
 //   etikett – plats.omrade godtas också om plats är ett objekt) per geokodad händelse och resor:[{ datum, franId|'bas', tillId|'bas',
 //   start:'HH:MM', slut:'HH:MM', minuter, status:'ok'|'schablon'|'okand',
-//   konflikt:bool }] mellan på varandra följande restidsankare samma dag (+ bas→första / sista→bas enligt inställningarna).
-// Restider med minuter 0 (K3: identiska koordinater, ingen marginal) hoppas över i normKalResor – de ritas inte.
-// Paus efter mötet (K2): handelser[].cooldownMin (heltal 0–600) behålls per segment och ritas som en ljus remsa .kb-paus
+//   konflikt:bool, delar?:[{ start, slut }] }] mellan på varandra följande restidsankare samma dag (+ bas→första / sista→bas enligt inställningarna).
+// Version 10 (K5): minuter = Googles råa körtid (inget påslag); delar (valfritt, ≤ 8, kronologiskt) = restiden uppdelad runt platslösa
+//   möten (Teams m.m.) – start/slut förblir det yttre spannet så att äldre appar ritar som förut; appen ritar ett block per del.
+// Restider med minuter 0 (K3: identiska koordinater) hoppas över i normKalResor – de ritas inte.
+// Marginal efter mötet (K2/version 10): handelser[].cooldownMin (heltal 0–600) = effektiv buffert (mötestypens paus eller marginal
+// fysiskt/online ur inställningarna, scriptets finalizeBusy) behålls per segment och ritas som en ljus remsa .kb-paus
 // slutMin → slutMin+cooldownMin under händelsen i samma lane (bara om slutet ligger före midnatt).
 const BOK_KAL_SNAPSHOT_FARSK_MS = 120000;              // äldre snapshot ritas direkt men hämtas om i bakgrunden
 // Fönstret idag−7 … horisont+7 ur den LOKALA horisonten, klippt mot scriptets horisontTom+7 när det är känt från i dag (en osynkad
@@ -5556,9 +5568,22 @@ function normKalResor(lista) {
     const startMin = bokMinOf(start), slutMin = Math.max(startMin, bokMinOf(slut));
     const minuter = Math.max(0, Math.min(1440, Math.round(Number(r.minuter) || 0)));
     const status = ['ok', 'schablon', 'okand'].includes(r.status) ? r.status : 'okand';
-    if (!minuter && status === 'ok') return;   // K3: identiska koordinater → 0 min utan marginal; scriptet utelämnar benet men äldre script kan skicka det – ritas inte (schablon/okand behålls som markör även vid schablon 0)
-    ut.push({ datum, franId, tillId, startMin, slutMin, minuter, status, konflikt: r.konflikt === true });
+    if (!minuter && status === 'ok') return;   // K3: identiska koordinater → 0 min; scriptet utelämnar benet men äldre script kan skicka det – ritas inte (schablon/okand behålls som markör även vid schablon 0)
+    ut.push({ datum, franId, tillId, startMin, slutMin, minuter, status, konflikt: r.konflikt === true, delar: normKalResaDelar(r.delar).filter(d => d.startMin >= startMin && d.slutMin <= slutMin) });   // delar utanför det yttre spannet start–slut hoppas över
   });
+  return ut;
+}
+// Version 10 (K5): resans delar ur svaret → [{ startMin, slutMin }] kronologiskt. Högst 8, varje del HH:MM-par inom 00:00–24:00 med
+// slut > start; ogiltiga par hoppas över. Tom lista när fältet saknas (äldre script) → resan ritas som ett block start–slut.
+function normKalResaDelar(lista) {
+  const ut = [];
+  (Array.isArray(lista) ? lista : []).filter(isPlainObject).slice(0, 8).forEach(d => {
+    const a = bstr(d.start, 5), b = bstr(d.slut, 5);
+    if (!/^\d{2}:\d{2}$/.test(a) || !/^\d{2}:\d{2}$/.test(b)) return;
+    const sm = bokMinOf(a), em = bokMinOf(b);
+    if (sm >= 0 && em <= 1440 && em > sm) ut.push({ startMin: sm, slutMin: em });
+  });
+  ut.sort((p, q) => p.startMin - q.startMin);
   return ut;
 }
 // Normaliserar en händelse ur svaret till dagssegment { datum, startMin, slutMin, … } (händelse över midnatt delas per dag).
@@ -5579,7 +5604,7 @@ function normKalHandelse(h) {
     preliminar: h.preliminar === true, raknad: h.raknad === true, ignorerad: h.ignorerad === true,
     bokningId, restid: h.restid === true, varning: Array.from(new Set([bstr(h.varning, 300)].concat(varningar).filter(Boolean))).join(' · '),   // alla varningar (scriptets varning = varningar[0])
     serieId: kalla === 'reservation' ? '' : bstr(h.serieId, 200),   // version 9: Googles recurringEventId (ICS: '' – UID:t i matchIds gäller redan hela serien); restid-poster lagras på serien
-    cooldownMin: Math.max(0, Math.min(600, Math.round(Number(h.cooldownMin) || 0))),   // K2: paus efter mötet (ritas som ljus remsa efter slutet)
+    cooldownMin: Math.max(0, Math.min(600, Math.round(Number(h.cooldownMin) || 0))),   // K2/version 10: effektiv buffert efter mötet – mötestypens paus eller marginal fysiskt/online (ritas som ljus remsa efter slutet)
     sammanslagenMed: (Array.isArray(h.sammanslagenMed) ? h.sammanslagenMed : []).map(x => bstr(x, 200)).filter(Boolean).slice(0, 10),
     overrideOnline: h.overrideOnline === true ? true : (h.overrideOnline === false ? false : null),   // version 9 (K2, valfritt): scriptets tillämpade restid-override – null = automatik
     overrideAdress: bstr(h.overrideAdress, BOK_MAXLEN.adress),
@@ -5647,7 +5672,7 @@ function byggKalResor(res, seg, fran, till) {
     const f = r.franId === 'bas' ? null : byId.get(r.franId + '|' + r.datum), t = r.tillId === 'bas' ? null : byId.get(r.tillId + '|' + r.datum);
     if (r.franId !== 'bas' && !f) return;
     if (r.tillId !== 'bas' && !t) return;
-    ut.push({ datum: r.datum, startMin: r.startMin, slutMin: r.slutMin, minuter: r.minuter, status: r.status, konflikt: r.konflikt, fran: f || null, till: t || null, rid: 0 });
+    ut.push({ datum: r.datum, startMin: r.startMin, slutMin: r.slutMin, minuter: r.minuter, status: r.status, konflikt: r.konflikt, delar: Array.isArray(r.delar) ? r.delar : [], fran: f || null, till: t || null, rid: 0 });   // ett ben per gap – delarna expanderas först vid ritning (kalResaRitblock)
   });
   ut.sort((a, b) => a.datum.localeCompare(b.datum) || a.startMin - b.startMin);
   ut.forEach((r, i) => { r.rid = i; });
@@ -5664,9 +5689,22 @@ function kalResaEtikett(r, kort) {
   const bas = !r.fran ? ' från bas' : (!r.till ? ' till bas' : '');
   return (r.konflikt ? '⚠ ' : (kort ? '' : '→ ')) + kalResaMin(r, true) + (kort ? '' : bas);
 }
-function kalResaMedMarginal(r) { return !!r && r.status === 'ok'; }   // bara beräknade minuter innehåller marginalen (K5) – schablonen är rå ur inställningen, okänd saknar tal
+// Version 10 (K5): restiden är Googles råa körtid – inget "inkl. marginal" längre (marginalen ligger som egen remsa efter varje möte).
+// Ritblock för en resa: ett block per del (restid delad runt platslösa möten), annars ett block över start–slut. huvud = den längsta
+// delen (bär etiketten; övriga får bara title). lane/lanes sätts av kalLanes vid ritning.
+function kalResaRitblock(r) {
+  const delar = (Array.isArray(r.delar) && r.delar.length) ? r.delar : [{ startMin: r.startMin, slutMin: r.slutMin }];
+  let huvud = 0;
+  delar.forEach((d, i) => { if (d.slutMin - d.startMin > delar[huvud].slutMin - delar[huvud].startMin) huvud = i; });
+  return delar.map((d, i) => ({ startMin: d.startMin, slutMin: d.slutMin, resa: r, huvud: i === huvud, lane: 0, lanes: 1 }));
+}
+function kalResaDelad(r) { return !!r && Array.isArray(r.delar) && r.delar.length > 1; }
+function kalResaTider(r, ren) {   // 'HH:MM–HH:MM' eller, delad, 'HH:MM–HH:MM (+ HH:MM–HH:MM)'; ren → 'HH:MM–HH:MM + HH:MM–HH:MM' (för egen parentes)
+  const t = kalResaRitblock(r).map(b => bokTidOf(b.startMin) + '–' + bokTidOf(b.slutMin));
+  return ren ? t.join(' + ') : t[0] + (t.length > 1 ? ' (+ ' + t.slice(1).join(' + ') + ')' : '');
+}
 function kalResaTitel(r) {
-  return 'Restid ' + bokTidOf(r.startMin) + '–' + bokTidOf(r.slutMin) + ' · ' + kalResaMin(r) + (kalResaMedMarginal(r) ? ' · inkl. marginal' : '') + ' · ' + kalResaNamn(r.fran) + ' → ' + kalResaNamn(r.till) + (r.konflikt ? ' · ryms inte' : '');
+  return 'Restid ' + kalResaTider(r) + ' · ' + kalResaMin(r) + ' · ' + kalResaNamn(r.fran) + ' → ' + kalResaNamn(r.till) + (r.konflikt ? ' · ryms inte' : '');
 }
 // Lokal ignorera-post för ett segment (3.5): matchar id utan prefix eller något av matchIds, samma källa.
 // Poster som matchar händelsen (p.id = ignoreraId, serieId eller något av matchIds) i scriptets prioritetsordning: instansens id först,
@@ -5752,6 +5790,14 @@ function kalBlockTitel(s) {
   if (s.kalla === 'ics') return s.titel || 'Outlook';
   if (s.kalla === 'reservation') return 'Reservation (pågående bokning)';
   return s.titel || 'Upptaget';
+}
+// Version 10 (K5): marginalremsan efter en händelse ritas bara när händelsen är ett hinder i scriptet – ignorerade och obesvarade
+// preliminära (ej "Räkna") får cooldownMin ur finalizeBusy men spärrar ingen tid. Lokal post vinner (kalEffStatus) så remsan
+// försvinner direkt vid Ignorera, före push. Heldag = 0 i scriptet (ritas aldrig).
+function kalHarMarginal(s) {
+  if (s.heldag || !(s.cooldownMin > 0)) return false;
+  const st = kalEffStatus(s);
+  return !st.ignorerad && !(s.preliminar && !st.raknad);
 }
 function kalBlockKlass(s) {
   const st = kalEffStatus(s);
@@ -5957,8 +6003,8 @@ function ritaBokKalGrid(el, seg, resor, fran, till) {
   const arbetstid = d => { const a = at[String(weekdayOf(d))]; return (isPlainObject(a) && /^\d{2}:\d{2}$/.test(a.start) && /^\d{2}:\d{2}$/.test(a.slut)) ? a : null; };
   let g0 = 8 * 60, g1 = 17 * 60, forsta = true;
   dagar.forEach(d => { const a = arbetstid(d); if (!a) return; const s = bokMinOf(a.start), e = bokMinOf(a.slut); if (forsta) { g0 = s; g1 = e; forsta = false; } else { g0 = Math.min(g0, s); g1 = Math.max(g1, e); } });
-  seg.forEach(s => { if (s.heldag) return; g0 = Math.min(g0, s.startMin); g1 = Math.max(g1, s.slutMin + (s.cooldownMin || 0)); });   // pausremsan (K2) efter dagens sista möte ska få plats
-  resor.forEach(r => { g0 = Math.min(g0, r.startMin); g1 = Math.max(g1, r.slutMin); });   // bas-resor kan ligga före/efter arbetstiden
+  seg.forEach(s => { if (s.heldag) return; g0 = Math.min(g0, s.startMin); g1 = Math.max(g1, s.slutMin + (kalHarMarginal(s) ? s.cooldownMin : 0)); });   // marginalremsan (K2/version 10) efter dagens sista möte ska få plats
+  resor.forEach(r => { g0 = Math.min(g0, r.startMin); g1 = Math.max(g1, r.slutMin); kalResaRitblock(r).forEach(b => { g0 = Math.min(g0, b.startMin); g1 = Math.max(g1, b.slutMin); }); });   // bas-resor kan ligga före/efter arbetstiden; delarna (K5) räknas också
   g0 = Math.max(0, Math.floor(g0 / 30) * 30); g1 = Math.min(1440, Math.ceil(g1 / 30) * 30);
   if (g1 - g0 < 60) { g0 = Math.max(0, g0 - 30); g1 = Math.min(1440, g1 + 30); }
   const y = m => Math.round((m - g0) / 30 * BOK_KAL_RAD_PX), hojd = y(g1);
@@ -5991,28 +6037,32 @@ function ritaBokKalGrid(el, seg, resor, fran, till) {
     }
     if (d === idag) { const nu = bokMinOf(nowTimeStr()); if (nu >= g0 && nu <= g1) html += `<div class="bok-kal-nu" style="top:${y(nu)}px"></div>`; }
     const dagSeg = seg.filter(s => !s.heldag && s.datum === d);
-    const dagResor = resor.filter(r => r.datum === d);
+    const dagBlock = [];
+    resor.filter(r => r.datum === d).forEach(r => { kalResaRitblock(r).forEach(b => dagBlock.push(b)); });   // K5: ett ritblock per del
     // Lane-läggning för händelser och restidsblock tillsammans: en resa mellan två möten får hela bredden, en resa som överlappar
-    // föregående möte (konflikt) läggs bredvid det i egen lane så att båda syns (steg 2c).
-    kalLanes(dagSeg.concat(dagResor).sort((p, q) => p.startMin - q.startMin || q.slutMin - p.slutMin));
+    // föregående möte (konflikt) läggs bredvid det i egen lane så att båda syns (steg 2c). Delade resor lane-läggs per block, så att
+    // en del kan ligga i luckan mellan två platslösa möten utan att trängas med dem.
+    kalLanes(dagSeg.concat(dagBlock).sort((p, q) => p.startMin - q.startMin || q.slutMin - p.slutMin));
     dagSeg.forEach(s => {
       const top = y(Math.max(s.startMin, g0)), h = Math.max(BOK_KAL_RAD_PX - 2, y(Math.min(s.slutMin, g1)) - top - 2);
       const w = 100 / s.lanes, left = w * s.lane;
-      if (s.cooldownMin > 0 && s.slutMin < 1440 && s.slutMin < g1) {   // K2: paus efter mötet – ljus remsa i samma lane, under händelsen (segment över midnatt: bara om slutet ligger före midnatt)
+      if (kalHarMarginal(s) && s.slutMin < 1440 && s.slutMin < g1) {   // K2/version 10: marginal efter mötet (effektiv buffert) – ljus remsa i samma lane, under händelsen; bara för hinder (segment över midnatt: bara om slutet ligger före midnatt)
         const pTop = y(Math.max(s.slutMin, g0)), pH = Math.max(0, y(Math.min(s.slutMin + s.cooldownMin, g1)) - pTop - 1);
-        if (pH > 0) html += `<div class="kb-paus" style="top:${pTop}px;height:${pH}px;left:calc(${left}% + 2px);width:calc(${w}% - 4px)" title="Paus efter mötet · ${s.cooldownMin} min">${pH >= 12 ? 'paus' : ''}</div>`;
+        // Etiketten syns från 9 px (15 min = 10 px vid 22 px/30 min); smalare remsor (t.ex. 5 min) bär informationen i title
+        if (pH > 0) html += `<div class="kb-paus" style="top:${pTop}px;height:${pH}px;line-height:${Math.max(1, pH - 2)}px;left:calc(${left}% + 2px);width:calc(${w}% - 4px)" title="Marginal efter mötet · ${s.cooldownMin} min">${pH >= 9 ? 'Marginal ' + s.cooldownMin + ' min' : ''}</div>`;
       }
       html += `<div class="bok-kb ${kalBlockKlass(s)}${bokKal.valdSid === s.sid ? ' is-vald' : ''}" data-sid="${s.sid}" style="top:${top}px;height:${h}px;left:calc(${left}% + 2px);width:calc(${w}% - 4px);${kalBlockStil(s)}" title="${escapeHtml(bokTidOf(s.startMin) + '–' + bokTidOf(s.slutMin) + ' ' + kalBlockTitel(s) + (s.omrade ? ' · ' + s.omrade : ''))}"><span class="bok-kb-tid">${bokTidOf(s.startMin)}</span>${kalBlockIkoner(s)}<span class="bok-kb-titel">${escapeHtml(kalBlockTitel(s))}</span>${s.omrade ? '<span class="bok-kb-omrade">📍 ' + escapeHtml(s.omrade) + '</span>' : ''}</div>`;
     });
-    dagResor.forEach(r => {
-      const top = y(Math.max(r.startMin, g0)), h = Math.max(10, y(Math.min(r.slutMin, g1)) - top - 2);
-      const w = 100 / r.lanes, left = w * r.lane;
-      html += `<div class="kb-resa is-${r.status}${r.konflikt ? ' is-konflikt' : ''}" data-rid="${r.rid}" style="top:${top}px;height:${h}px;left:calc(${left}% + 2px);width:calc(${w}% - 4px)" title="${escapeHtml(kalResaTitel(r))}">${escapeHtml(kalResaEtikett(r, h < 16 || w < 50))}</div>`;
+    dagBlock.forEach(b => {   // K5: ett .kb-resa-block per del; etiketten bara på den längsta delen, alla får resans title
+      const r = b.resa;
+      const top = y(Math.max(b.startMin, g0)), h = Math.max(10, y(Math.min(b.slutMin, g1)) - top - 2);
+      const w = 100 / b.lanes, left = w * b.lane;
+      html += `<div class="kb-resa is-${r.status}${r.konflikt ? ' is-konflikt' : ''}" data-rid="${r.rid}" style="top:${top}px;height:${h}px;left:calc(${left}% + 2px);width:calc(${w}% - 4px)" title="${escapeHtml(kalResaTitel(r))}">${b.huvud ? escapeHtml(kalResaEtikett(r, h < 16 || w < 50)) : ''}</div>`;
     });
     html += '</div>';
   });
   html += '</div>';
-  html += '<div class="bok-kal-legend"><span><i class="kb-bokningar"></i>Bokning (pipeline-färg)</span><span><i class="kb-privat"></i>Privat</span><span><i class="kb-ics"></i>Outlook</span><span><i class="is-prel"></i>Preliminär</span><span><i class="is-ign"></i>Ignorerad</span><span><i class="kb-lokal"></i>Saknas i kalendern</span><span><i class="kb-reservation"></i>Reservation (bokare väljer tid)</span>' + (seg.some(s => s.cooldownMin > 0 && !s.heldag) ? '<span><i class="kb-paus"></i>Paus efter möte</span>' : '') + (resor.length ? '<span><i class="kb-resa"></i>Restid' + (resor.some(kalResaMedMarginal) ? ' inkl. marginal' : '') + ' (⚠ = ryms inte)</span>' : '') + '</div>';
+  html += '<div class="bok-kal-legend"><span><i class="kb-bokningar"></i>Bokning (pipeline-färg)</span><span><i class="kb-privat"></i>Privat</span><span><i class="kb-ics"></i>Outlook</span><span><i class="is-prel"></i>Preliminär</span><span><i class="is-ign"></i>Ignorerad</span><span><i class="kb-lokal"></i>Saknas i kalendern</span><span><i class="kb-reservation"></i>Reservation (bokare väljer tid)</span>' + (seg.some(kalHarMarginal) ? '<span><i class="kb-paus"></i>Marginal efter möte</span>' : '') + (resor.length ? '<span><i class="kb-resa"></i>Restid (⚠ = ryms inte)</span>' : '') + '</div>';
   el.innerHTML = html;
   el.querySelectorAll('.bok-kb[data-sid]').forEach(b => b.addEventListener('click', () => { bokKal.valdSid = Number(b.dataset.sid); ritaBokKalVy(); const dEl = document.getElementById('bkDetalj'); if (dEl) dEl.scrollIntoView({ block: 'nearest' }); }));
 }
@@ -6080,18 +6130,18 @@ function kalDetaljOverrideBlock(s, st) {
   return h + '</div>';
 }
 // Steg 2c: "Restid från föregående: N min · till nästa: M min" (från/till bas när resan går mot basadressen); tom när inga resor finns.
+// Version 10 (K5): minuterna är råa (ingen marginal); en resa delad runt platslösa möten visar sina tider.
 function kalDetaljRestidRad(s) {
   const rIn = kalResaTill(s), rUt = kalResaFran(s);
   if (!rIn && !rUt) return '';
-  const del = (r, txt) => r ? txt + ': ' + escapeHtml(kalResaMin(r)) + (r.konflikt ? ' <span class="bok-warn-text">⚠ ryms inte</span>' : '') : txt + ': –';
-  const marginal = [rIn, rUt].some(kalResaMedMarginal) ? ' <span class="bok-muted" title="Beräknade minuter inkluderar marginalen (minst/procent enligt inställningarna); schablon anges rakt av">(inkl. marginal)</span>' : '';   // K5
-  return '<div class="rad">🚗 Restid ' + del(rIn, rIn && !rIn.fran ? 'från bas' : 'från föregående') + ' · ' + del(rUt, rUt && !rUt.till ? 'till bas' : 'till nästa') + marginal + '</div>';
+  const del = (r, txt) => r ? txt + ': ' + escapeHtml(kalResaMin(r)) + (kalResaDelad(r) ? ' <span class="bok-muted" title="Restiden delas runt platslösa möten">(' + escapeHtml(kalResaTider(r, true)) + ')</span>' : '') + (r.konflikt ? ' <span class="bok-warn-text">⚠ ryms inte</span>' : '') : txt + ': –';
+  return '<div class="rad">🚗 Restid ' + del(rIn, rIn && !rIn.fran ? 'från bas' : 'från föregående') + ' · ' + del(rUt, rUt && !rUt.till ? 'till bas' : 'till nästa') + '</div>';
 }
-function kalKollRestid(s) {   // Kalenderkoll-kolumnen Restid: in/ut i minuter (beräknade inkl. marginal, K5 – kalResaTitel säger det i title)
+function kalKollRestid(s) {   // Kalenderkoll-kolumnen Restid: in/ut i råa minuter (version 10 – kalResaTitel i title visar tider/delar)
   const rIn = kalResaTill(s), rUt = kalResaFran(s);
   if (!rIn && !rUt) return '<span class="bok-muted">–</span>';
   const del = r => r ? '<span class="' + (r.konflikt ? 'is-konflikt' : '') + '" title="' + escapeHtml(kalResaTitel(r)) + '">' + (r.konflikt ? '⚠ ' : '') + escapeHtml(kalResaMin(r, true)) + '</span>' : '–';
-  return '<span class="bok-koll-restid"' + ([rIn, rUt].some(kalResaMedMarginal) ? ' title="Restid inkl. marginal"' : '') + '>in ' + del(rIn) + ' · ut ' + del(rUt) + '</span>';
+  return '<span class="bok-koll-restid">in ' + del(rIn) + ' · ut ' + del(rUt) + '</span>';
 }
 function ritaBokKalKoll(el, seg, fran, till, rubrik) {
   let html = (rubrik ? `<div class="section-title" style="margin-top:14px">${escapeHtml(rubrik)}</div>` : '') +

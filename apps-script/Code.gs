@@ -17,9 +17,12 @@
  *                      inkorg i CacheService + Drive-filmemo + ICS-värmare refreshIcsCache + Teams-fix (location bara vid restid)
  *                      + rebook släpper reservationen (version 7, SCRIPT_VERSION 7),
  *                      manuell restidsklassning (online/fysiskt) och rättad adress per kalenderhändelse via KALENDER_IGNORERA
- *                      (normalizeConfig sanerar, previewExport speglar overrideOnline/overrideAdress + serieId, geocode svarar omrade – version 9, SCRIPT_VERSION 9).
- *   Calendar.gs      – readBusy(fran, till), parseIcs, mergeBusy, applyIgnore (ignorera/räkna + restid-override), buildBusyList(from, to).
- *   Availability.gs  – computeAvailability(req), dayPlan, placeTravel, geocodeAddress(adress, { placeId }), hamtaAdressforslag(q, token),
+ *                      (normalizeConfig sanerar, previewExport speglar overrideOnline/overrideAdress + serieId, geocode svarar omrade – version 9, SCRIPT_VERSION 9),
+ *                      ren restid (Googles körtid utan påslag), marginal efter varje möte (marginalFysisktMin/marginalOnlineMin – effektiv
+ *                      buffert i Calendar.gs finalizeBusy) och restid delad runt platslösa möten (availability restid.inDelar/utDelar +
+ *                      pausMin, calendar-preview resor[].delar – version 10, SCRIPT_VERSION 10, CJ:s beslut 2026-09-17).
+ *   Calendar.gs      – readBusy(fran, till), parseIcs, mergeBusy, applyIgnore (ignorera/räkna + restid-override), finalizeBusy (effektiv buffert), buildBusyList(from, to).
+ *   Availability.gs  – computeAvailability(req), dayPlan, placeTravelDelar/placeTravel, geocodeAddress(adress, { placeId }), hamtaAdressforslag(q, token),
  *                      travelMinutes, travelSecondsForPairs_, previewResor, geokodaAnkare, backfillOmrade_, swedishHolidays.
  *
  * Regler som gäller hela filen (spec 4.1, 4.3, 9):
@@ -34,7 +37,7 @@
 // Konstanter
 // ============================================================
 
-const SCRIPT_VERSION = 9;                       // 9 = manuell restidsklassning + rättad adress per händelse (KALENDER_IGNORERA-postens valfria online/adress/lat/lng/omrade och lage 'restid', Calendar.gs applyIgnore; calendar-preview overrideOnline/overrideAdress/serieId, geocode.omrade – valfria fält: MIN_SCRIPT_VERSION förblir 4); 8 = online-möten ("Microsoft Teams-möte" m.fl. i platsfältet är aldrig restidsankare, Calendar.gs kalLooksLikePlace – MIN_SCRIPT_VERSION förblir 4); MIN_SCRIPT_VERSION i index.html/bokning.js jämförs mot denna (4.12); 3 = M5 (purge, dailyMaintenance, nya ping-fält); 4 = steg 2a (egen-rebook/egen-cancel/egen-update, hello.egna med kanAndras); 5 = steg 2b (adressforslag via Places, placeId i geokodning – valfritt: MIN_SCRIPT_VERSION förblir 4); 6 = steg 2c (block.omrade i availability, omrade + resor i calendar-preview – valfria fält: MIN_SCRIPT_VERSION förblir 4); 7 = optimering (inkorg i CacheService, en cache-filskrivning per körning, ICS-värmare) + restid tydlig (paus-block, 0 min samma adress, Teams-fix, mejltext) + rebook släpper reservation (valfria fält: MIN_SCRIPT_VERSION förblir 4)
+const SCRIPT_VERSION = 10;                      // 10 = ren restid (råa Distance Matrix-minuter, inget påslag), marginal efter varje möte (installningar.marginalFysisktMin/marginalOnlineMin → effektiv buffert cooldownMin i Calendar.gs finalizeBusy; ersätter marginalMinstMin/marginalProcent) och restid delad runt platslösa möten (availability slot.restid.inDelar/utDelar + data.pausMin, calendar-preview resor[].delar – valfria fält, inBlock/utBlock = yttre spann: MIN_SCRIPT_VERSION förblir 4; CJ:s beslut 2026-09-17); 9 = manuell restidsklassning + rättad adress per händelse (KALENDER_IGNORERA-postens valfria online/adress/lat/lng/omrade och lage 'restid', Calendar.gs applyIgnore; calendar-preview overrideOnline/overrideAdress/serieId, geocode.omrade – valfria fält: MIN_SCRIPT_VERSION förblir 4); 8 = online-möten ("Microsoft Teams-möte" m.fl. i platsfältet är aldrig restidsankare, Calendar.gs kalLooksLikePlace – MIN_SCRIPT_VERSION förblir 4); MIN_SCRIPT_VERSION i index.html/bokning.js jämförs mot denna (4.12); 3 = M5 (purge, dailyMaintenance, nya ping-fält); 4 = steg 2a (egen-rebook/egen-cancel/egen-update, hello.egna med kanAndras); 5 = steg 2b (adressforslag via Places, placeId i geokodning – valfritt: MIN_SCRIPT_VERSION förblir 4); 6 = steg 2c (block.omrade i availability, omrade + resor i calendar-preview – valfria fält: MIN_SCRIPT_VERSION förblir 4); 7 = optimering (inkorg i CacheService, en cache-filskrivning per körning, ICS-värmare) + restid tydlig (paus-block, 0 min samma adress, Teams-fix, mejltext) + rebook släpper reservation (valfria fält: MIN_SCRIPT_VERSION förblir 4)
 const TZ = 'Europe/Stockholm';
 const APP_URL = 'https://speeedfreeak.github.io/telexia-pipeline/';   // länk i notismejlet (4.9)
 const MAX_BODY_BYTES = 16384;                   // body kontrolleras före JSON.parse (4.3)
@@ -171,7 +174,10 @@ const DEFAULT_BOKNINGSINSTALLNINGAR = {
   basadress: '', basLat: null, basLng: null, restidTillForsta: true, restidEfterSista: true,
   framforhallningFysiskDagar: 2, framforhallningTeamsDagar: 1, horisontVeckor: 6,
   startintervallMin: 30, maxFysiskaPerDag: 3, maxEnkelResaMin: 90,
-  schablonRestidMin: 45, marginalMinstMin: 15, marginalProcent: 25,
+  schablonRestidMin: 45,
+  // Version 10: marginal EFTER varje möte (effektiv buffert = max(mötestypens cooldown, marginalen); restiden är Googles råa körtid).
+  // De gamla marginalMinstMin/marginalProcent (påslag på restiden) är borta och ignoreras om de finns kvar i en äldre config-fil.
+  marginalFysisktMin: 15, marginalOnlineMin: 5,
   rodaDagar: true, rodaDagarExtra: [], rodaDagarUndantag: [],
   paus: { aktiv: false, tom: '', meddelande: '' },
   // Tom tills Anslut-guiden (M3, calendars-list) fyller listan – inga kalender-id:n/e-postadresser i källkoden (publikt repo).
@@ -1480,7 +1486,7 @@ function notifyCj(config, bokare, typ, bokning) {
 function restidRadForMejl(typ, bokning) {
   const rs = bokning.restid && bokning.restid.status;
   if (typ.restid !== true) return 'ingen (möte utan restid)';
-  if (rs === 'ok') return 'ok (' + bokning.restid.foreMin + ' min före, ' + bokning.restid.efterMin + ' min efter, inkl. marginal)';   // K5: minuterna är restid + marginal (5.8)
+  if (rs === 'ok') return 'ok (' + bokning.restid.foreMin + ' min före, ' + bokning.restid.efterMin + ' min efter)';   // version 10: råa restidsminuter (marginalen ligger efter mötet)
   if (rs === 'schablon') return 'schablon – Maps gav inget svar';
   return 'OBS: restid okänd – kontrollera adressen';
 }
@@ -2089,7 +2095,8 @@ function notifyBokareAvvisad(config, bokning, orsak) {
 //      fönstret måste ligga inom [idag−7, horisont+7] (E_VALIDATION, falt.from/to).
 // Ut:  { from, to, idag, horisontTom, genererad,
 //        handelser:[{ id, ignoreraId, serieId, matchIds, kalla:'bokningar'|'privat'|'ics'|'reservation', datum, start, slut, heldag,
-//                     titel, plats, omrade, overrideOnline, overrideAdress, hasPlace, restid, cooldownMin, preliminar, raknad, ignorerad,
+//                     titel, plats, omrade, overrideOnline, overrideAdress, hasPlace, restid, cooldownMin (version 10: EFFEKTIV buffert
+//                     efter händelsen = max(cooldown, marginalFysisktMin/marginalOnlineMin) – appen ritar den som "Marginal N min"), preliminar, raknad, ignorerad,
 //                     bokningId, bokareId, motestypId, sammanslagenMed:[], varning, varningar:[] }],
 //        icsStatus:{ ok, hamtadTs, antal, medPlats, preliminara }, obesvarade, varningar:[] }
 // Exakt det scriptet ser efter sammanslagning (buildBusyList med ALLA källor: Google 'tider'/'fullt', Outlook-ICS, inkorgens
@@ -2107,12 +2114,16 @@ function notifyBokareAvvisad(config, bokning, orsak) {
 // misslyckad Calendar.Events.remove – posten får varning "Avbokad/Avvisad i inkorgen men händelsen finns kvar …").
 // Steg 2c (A56/A57): ankare med bara platstext geokodas (geokodaAnkare – samma cachekedja som availability, räknas mot MAPS_DAILY_CAP)
 // så att varje händelse med geokodad plats får omrade (områdesetikett 'Stad · Stadsdel') och restiden mellan dagens ankare kan
-// beräknas: resor:[{ datum, franId|'bas', tillId|'bas', start, slut, minuter, status:'ok'|'schablon'|'okand', konflikt }] via
+// beräknas: resor:[{ datum, franId|'bas', tillId|'bas', start, slut, minuter, status:'ok'|'schablon'|'okand', konflikt, delar:[{ start, slut }] }] via
 // previewResor + travelSecondsForPairs_ (Distance Matrix med samma cache som availability; högst AVAIL_PREVIEW_MAX_PAR nya par per
 // anrop – resten 'okand' + varningen PREVIEW_RESTID_VARNING; upprepade anrop är gratis tack vare cachen). Geokodningen har eget tak:
 // högst AVAIL_PREVIEW_MAX_GEO nya Geocoding-anrop per anrop (fönstret är upp till 56 dagar; varje ocachad text är ett synkront
 // UrlFetch-anrop) – resten förblir ogeokodade (schablon, inget omrade) + varningen PREVIEW_GEO_VARNING; ZERO_RESULTS-texter
 // sparas i cache-filen (AVAIL_GEO_OKAND_FIL_DAGAR) så att otolkbara kalendertexter inte kostar varje timme.
+// Version 10 (CJ:s beslut 2026-09-17): minuter i resor är Googles RÅA körtid (inget påslag); resan fyller de fria hålen närmast mötet
+// och delas runt platslösa händelser – delar (kronologiska bitar, valfritt fält) är det appen ritar, start/slut är det yttre spannet
+// (äldre appar ritar som förut); konflikt = hela restiden fick inte plats (delar = ett block närmast mötet). handelser[].cooldownMin är
+// den effektiva bufferten (cooldown eller marginal, Calendar.gs finalizeBusy) – samma värde som hindren/paus-blocken bygger på.
 function handleCalendarPreview(req, ctx) {
   authAdmin(req, ctx);
   const config = loadConfig(ctx), inst = config.installningar;

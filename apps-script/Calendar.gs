@@ -4,7 +4,8 @@
  * Uppdelning:
  *   1. RENA FUNKTIONER (inga Apps Script-tjänster – kan enhetstestas i Node):
  *      parseIcs, expandRrule, icsInstances, normalizeGoogleEvent, normalizeIcsItem,
- *      reservationToBusy, inboxBookingToBusy, mergeBusy, applyIgnore (ignorera/räkna + restid-override, version 9), finalizeBusy, busyForDay.
+ *      reservationToBusy, inboxBookingToBusy, mergeBusy, applyIgnore (ignorera/räkna + restid-override, version 9), finalizeBusy
+ *      (härledda fält + effektiv buffert cooldownMin = max(cooldown, marginal) – version 10), busyForDay.
  *   2. WRAPPERS runt Apps Script-tjänster (Calendar advanced service v3, UrlFetchApp, CacheService,
  *      Utilities, Session) – små och utbytbara.
  *   3. SAMMANSÄTTNING: readIcs, readBusy, buildBusyList, getIcsStatus.
@@ -16,7 +17,10 @@
  * BusyItem (spec 5.2) – en post per DAG-SEGMENT (händelse över midnatt delas per dag, 5.13):
  *   { id, kalla:'privat'|'bokningar'|'ics'|'reservation', datum:'YYYY-MM-DD',
  *     start, slut (ISO med offset), startMin, slutMin (minuter sedan midnatt, 0–1440),
- *     heldag, hasPlace, plats:{ text, lat, lng, geokodad, omrade? }, isTravelMeeting, cooldownMin,
+ *     heldag, hasPlace, plats:{ text, lat, lng, geokodad, omrade? }, isTravelMeeting,
+ *     cooldownMin (EFFEKTIV buffert efter händelsen, version 10: max(mötestypens/reservationens cooldown, marginalFysisktMin för
+ *       restidsankare resp. marginalOnlineMin för platslösa) – sätts i finalizeBusy för alla poster, 0 för heldag; hindret i
+ *       dayPlan är [start, slut + cooldownMin], blockFor ger paus-block, previewResor/previewExport använder samma värde),
  *     ignore, preliminar, raknad, ignorerad, egen, egenReservation,
  *     bokningId, bokareId, motestypId, kundnamn (bara egna), summary (bara internt/Kalenderkoll),
  *     sammanslagenMed:[], matchIds:[] (event-id, recurringEventId, ICS UID – för ignorera-listan),
@@ -743,7 +747,10 @@ function kalTillampaOverride(item, o) {
   item.override = { online: o.online, adress: o.adress };
 }
 
-/** Sätter härledda fält (isTravelMeeting = hasPlace && !ignore, heldag aldrig ankare) och rensar kundnamn på andras poster.
+/** Sätter härledda fält (isTravelMeeting = hasPlace && !ignore, heldag aldrig ankare), den effektiva bufferten cooldownMin
+ *  (version 10, K3: heldag ? 0 : max(cooldownMin, isTravelMeeting ? opts.marginal.fysisktMin : opts.marginal.onlineMin) – för ALLA
+ *  poster, även ignorerade (de är ändå inte hinder); opts.marginal = kalMarginal_(config), utelämnad → defaults 15/5)
+ *  och rensar kundnamn på andras poster.
  *  opts.restidFor (Teams-fix, version 7): en sammanslagen post med motestypId vars typ saknar restid får hasPlace:false – fångar
  *  Outlooks ICS-kopia av en äldre Teams-bokning (LOCATION satt före version 7): den vinner sammanslagningen på hasPlace och bär
  *  förlorarens bokningId/motestypId, så regeln i normalizeGoogleEvent/inboxBookingToBusy räcker inte ensam.
@@ -751,11 +758,14 @@ function kalTillampaOverride(item, o) {
  *  CJ:s klassning vinner över mötestypens flagga. */
 function finalizeBusy(list, opts) {
   opts = opts || {};
+  const marginal = opts.marginal || kalMarginal_(null);
   return (list || []).map(x => {
     const item = Object.assign({}, x);
     const manuell = !!item.override && (item.override.online === false || !!item.override.adress);
     if (!manuell && item.motestypId && typeof opts.restidFor === 'function' && opts.restidFor(item.motestypId) === false) item.hasPlace = false;
     item.isTravelMeeting = !!item.hasPlace && !item.ignore && !item.heldag;
+    // Effektiv buffert efter händelsen (version 10): mötestypens cooldown eller marginalen, det största; heldag har ingen.
+    item.cooldownMin = item.heldag ? 0 : Math.max(item.cooldownMin | 0, item.isTravelMeeting ? marginal.fysisktMin : marginal.onlineMin);
     if (item.kalla === 'bokningar' || item.kalla === 'reservation') {
       item.egen = item.egen || (!!opts.bokareId && item.bokareId === opts.bokareId);
     }
@@ -892,6 +902,13 @@ function kalInbox_(opts) {
 // 3. SAMMANSÄTTNING
 // =====================================================================================
 
+/** Marginal efter varje möte (version 10, installningar.marginalFysisktMin/marginalOnlineMin, defaults 15/5) → { fysisktMin, onlineMin }.
+ *  finalizeBusy höjer cooldownMin till minst detta (fysiskt = restidsankare, online = platslös händelse). */
+function kalMarginal_(config) {
+  const inst = config && config.installningar ? config.installningar : {};
+  const num = (v, d) => (typeof v === 'number' && isFinite(v)) ? v : d;
+  return { fysisktMin: num(inst.marginalFysisktMin, 15), onlineMin: num(inst.marginalOnlineMin, 5) };
+}
 /** cooldownMin per mötestyp (även inaktiva – bokade möten med borttagen typ ska behålla sin cooldown). */
 function kalCooldownFn_(config) {
   const map = {};
@@ -1160,7 +1177,7 @@ function readBusy(fran, till, opts) {
 /**
  * buildBusyList(from, to, opts) → sammanslagen, ignorera-filtrerad lista av BusyItem-segment (spec 5.2):
  *   readBusy + bekräftade bokningar ur inkorgen (ny/importerad, framtida) + aktiva reservationer
- *   → mergeBusy → applyIgnore (ignorera/räkna + restid-override, 3.5) → finalizeBusy.
+ *   → mergeBusy → applyIgnore (ignorera/räkna + restid-override, 3.5) → finalizeBusy (härledda fält + effektiv buffert, version 10).
  * opts: { config, inbox, farsk, reservationId (anropande bokarens egen), bokareId (för egen/kundnamn),
  *         undantaBokningId (ombokning: alla poster med samma bokningId tas bort helt, samt ICS-poster vars UID är bokningens
  *         Google-iCalUID – Outlooks accepterade kopia; se kalUndantaBokning_) }
@@ -1210,7 +1227,7 @@ function buildBusyList(from, to, opts) {
 
   let out = mergeBusy(items);
   out = applyIgnore(out, config.ignorerade || []);
-  out = finalizeBusy(out, { bokareId: opts.bokareId, restidFor });
+  out = finalizeBusy(out, { bokareId: opts.bokareId, restidFor, marginal: kalMarginal_(config) });
   out.varningar = varningar;
   return out;
 }

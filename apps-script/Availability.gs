@@ -3,7 +3,12 @@
 //
 // Uppbyggnad (uppifrån och ned):
 //   1. Rena funktioner utan Google-tjänster: mapCfg, swedishHolidays, isRedDay, firstBookableDay, dayStatus,
-//      travelWithMargin, placeTravel, availBusyForDay, buildTravelTable, dayPlan, computeAvailabilityCore.
+//      travelMinutesRaw (alias travelWithMargin), placeTravelDelar/placeTravel, luckBuffertMin, availBusyForDay, buildTravelTable,
+//      dayPlan, computeAvailabilityCore.
+//   Version 10 (CJ:s beslut 2026-09-17, ersätter spec 5.6 och 5.8): restiden är Googles råa körtid (ceil(sek/60), inget påslag);
+//   marginalen läggs i stället EFTER varje möte (installningar.marginalFysisktMin/marginalOnlineMin, effektiv buffert = max(cooldown,
+//   marginal) – befintliga händelser får den i Calendar.gs finalizeBusy, den nya luckan via luckBuffertMin); resan delas runt
+//   platslösa händelser (placeTravelDelar) i stället för att kräva ett sammanhängande hål.
 //      Alla tar busy-lista, cfg och travel-/geokodningsfunktioner som parametrar (injektion) och körs i Node
 //      (module.exports längst ned) – testfallen i spec 5.14 finns i runAvailabilityTests().
 //   2. Wrappers mot Google-tjänster: CacheService, Script Properties (via Code.gs), Drive-cachefilen, Geocoding API,
@@ -26,9 +31,8 @@
 
 // ---------- Konstanter för algoritmen ----------
 const AVAIL_MAX_DAGAR_PER_FRAGA = 14;          // to − from ≤ 14 dagar (spec 4.4)
-const AVAIL_AVRUNDNING_MIN = 5;                // marginalavrundning, fast (spec 5.1)
 const AVAIL_FAGELVAG_MAX_KM = 150;             // fågelväg > 150 km → "för långt" utan Maps-anrop (spec 5.8)
-const AVAIL_FAGELVAG_KMH = 70;                 // uppskattad medelhastighet för "för långt"-par (ger alltid > maxEnkelRestid)
+const AVAIL_FAGELVAG_KMH = 70;                 // uppskattad medelhastighet för "för långt"-par, råa minuter (version 10: 150 km/70 km/h = 129 min utan påslag → > maxEnkelRestid bara så länge maxEnkelResaMin < 129; högre gräns släpper igenom "för långt"-luckor)
 const AVAIL_MATRIX_BATCH = 25;                 // max destinationer per Distance Matrix-anrop (spec 5.8)
 const AVAIL_MATRIX_MAX_PER_FRAGA = 50;         // skydd: fler nya par än så i en förfrågan → schablon för resten
 const AVAIL_PREVIEW_MAX_PAR = 60;              // steg 2c: högst 60 nya (ocachade) ankarpar per calendar-preview-anrop – resten 'okand' till nästa anrop
@@ -63,7 +67,6 @@ function availThrow(error) { const e = new Error(error.message || error.code); e
 // ---------- Minut-hjälp ----------
 function hhmmToMin(t) { return (+String(t).slice(0, 2)) * 60 + (+String(t).slice(3, 5)); }
 function minToHhmm(m) { m = Math.max(0, Math.min(1440, Math.round(m))); return String(Math.floor(m / 60)).padStart(2, '0') + ':' + String(m % 60).padStart(2, '0'); }
-function ceilTo(n, m) { return Math.ceil(n / m) * m; }
 function overlappar(a, b) { return Math.min(a[1], b[1]) - Math.max(a[0], b[0]) > 0; }   // kant mot kant tillåtet
 function giltigtDatum(s) { return typeof s === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(s) && addDays(s, 0) === s; }
 function giltigtKlockslag(s) { return typeof s === 'string' && /^([01]\d|2[0-3]):[0-5]\d$/.test(s); }
@@ -90,7 +93,9 @@ function mapCfg(inst) {
     framforhallning: { fysiskArbetsdagar: Math.max(0, num(inst.framforhallningFysiskDagar, 2)), teamsArbetsdagar: Math.max(0, num(inst.framforhallningTeamsDagar, 1)) },
     rasterMin: Math.max(5, num(inst.startintervallMin, 30)),
     maxEnkelRestidMin: num(inst.maxEnkelResaMin, 90),
-    restid: { schablonMin: num(inst.schablonRestidMin, 45), marginalMin: num(inst.marginalMinstMin, 15), marginalProcent: num(inst.marginalProcent, 25), avrundningMin: AVAIL_AVRUNDNING_MIN },
+    restid: { schablonMin: num(inst.schablonRestidMin, 45) },   // version 10: inget påslag (gamla marginalMinstMin/marginalProcent ignoreras)
+    // Marginal efter varje möte (version 10): effektiv buffert = max(mötestypens cooldownMin, fysiskt ? fysisktMin : onlineMin).
+    marginal: { fysisktMin: num(inst.marginalFysisktMin, 15), onlineMin: num(inst.marginalOnlineMin, 5) },
     rodaDagar: { auto: inst.rodaDagar !== false, extra: Array.isArray(inst.rodaDagarExtra) ? inst.rodaDagarExtra.filter(giltigtDatum) : [], undantag: Array.isArray(inst.rodaDagarUndantag) ? inst.rodaDagarUndantag.filter(giltigtDatum) : [] },
     horisontVeckor: Math.max(1, num(inst.horisontVeckor, 6)),
     maxFysiskaPerDag: Math.max(0, num(inst.maxFysiskaPerDag, 3)),
@@ -160,17 +165,28 @@ function dayStatus(D, cfg, forstaDag, sistaDag, busyDay) {
   return { status: 'oppen', reason: null };
 }
 
-// ---------- 1d. Restidsmarginal (spec 5.8) ----------
-// 32 min → max(15, 8) = 15 → 47 → 50. 80 min → max(15, 20) → 100.
-function travelWithMargin(sek, restidCfg) {
-  const bas = Math.ceil(sek / 60);
-  const marg = Math.max(restidCfg.marginalMin, Math.ceil(bas * restidCfg.marginalProcent / 100));
-  return ceilTo(bas + marg, restidCfg.avrundningMin || AVAIL_AVRUNDNING_MIN);
+// ---------- 1d. Restid i råa minuter (version 10, ersätter spec 5.8:s marginal) ----------
+// Googles körtid utan påslag: ceil(sek/60). 1200 s → 20, 1920 s → 32, 0 → 0. "Det finns luft i Googles restid" – marginalen
+// ligger i stället efter varje möte (luckBuffertMin / Calendar.gs finalizeBusy).
+function travelMinutesRaw(sek) { return Math.ceil(sek / 60); }
+// Alias så att äldre anrop/skript inte bryts (ett andra argument ignoreras – inget påslag längre).
+function travelWithMargin(sek) { return travelMinutesRaw(sek); }
+// Den nya luckans buffert efter mötet (version 10): mötestypens cooldown, dock minst marginalen för fysiskt/online-möte.
+function luckBuffertMin(cfg, typ) {
+  const marg = cfg.marginal || { fysisktMin: 15, onlineMin: 5 };
+  return Math.max(typ.cooldownMin | 0, typ.restid ? marg.fysisktMin : marg.onlineMin);
 }
 
-// ---------- 1e. placeTravel (spec 5.6, A10) ----------
-// Resan är ett sammanhängande block närmast mötet som hoppar bakåt (in) / framåt (ut) över platslösa händelser.
-// obstacles = [[start, slut], …] i minuter. Returnerar [start, slut] eller null när resan inte får plats.
+// ---------- 1e. placeTravelDelar / placeTravel (version 10, ersätter spec 5.6, A10) ----------
+// Resan fyller de lediga hålen närmast mötet och delas upp runt platslösa händelser (Teams m.fl.) i stället för att kräva ett
+// sammanhängande hål. obstacles = [[start, slut], …] i minuter (inkl. buffert). Exempel: Teams 09–10, Teams 11–12, fysiskt möte
+// 14:00 med 130 min restid från bas → 12:00–14:00 + 10:50–11:00 (inte 06:50–09:00).
+// placeTravelDelar(gapStart, gapEnd, obstacles, minutes, side) → { delar:[[s, e], …] kronologiskt, rackte:boolean }.
+//   'in': de fria intervallen gås igenom BAKIFRÅN (närmast gapEnd först) och min(kvar, längd) tas från SLUTET av varje;
+//   'ut': FRAMIFRÅN från gapStart, från STARTEN av varje. rackte = hela restiden fick plats. Inga minimilängder per del.
+//   minutes 0 → { delar:[], rackte:true }.
+// placeTravel(…) behålls som wrapper: yttre spannet [första delens start, sista delens slut] när resan ryms, annars null;
+// minutes 0 → [gapEnd, gapEnd] (klienterna ritar bara block med slut > start).
 function subtraheraIntervall(obstacles, gap) {
   const sorted = obstacles.map(o => [Math.max(o[0], gap[0]), Math.min(o[1], gap[1])]).filter(o => o[1] > o[0]).sort((a, b) => a[0] - b[0]);
   const fria = []; let pos = gap[0];
@@ -178,15 +194,27 @@ function subtraheraIntervall(obstacles, gap) {
   if (pos < gap[1]) fria.push([pos, gap[1]]);
   return fria;
 }
-function placeTravel(gapStart, gapEnd, obstacles, minutes, side) {
-  if (minutes === 0) return [gapEnd, gapEnd];
-  if (gapEnd <= gapStart) return null;
+function placeTravelDelar(gapStart, gapEnd, obstacles, minutes, side) {
+  if (!(minutes > 0)) return { delar: [], rackte: true };
+  if (gapEnd <= gapStart) return { delar: [], rackte: false };
   const fria = subtraheraIntervall(obstacles || [], [gapStart, gapEnd]);
   const kandidater = side === 'in' ? fria.slice().reverse() : fria;
+  const delar = [];
+  let kvar = minutes;
   for (const f of kandidater) {
-    if (f[1] - f[0] >= minutes) return side === 'in' ? [f[1] - minutes, f[1]] : [f[0], f[0] + minutes];
+    if (kvar <= 0) break;
+    const tag = Math.min(kvar, f[1] - f[0]);
+    if (tag <= 0) continue;
+    delar.push(side === 'in' ? [f[1] - tag, f[1]] : [f[0], f[0] + tag]);
+    kvar -= tag;
   }
-  return null;
+  if (side === 'in') delar.reverse();   // kronologiskt
+  return { delar, rackte: kvar <= 0 };
+}
+function placeTravel(gapStart, gapEnd, obstacles, minutes, side) {
+  if (!(minutes > 0)) return [gapEnd, gapEnd];
+  const r = placeTravelDelar(gapStart, gapEnd, obstacles, minutes, side);
+  return r.rackte && r.delar.length ? [r.delar[0][0], r.delar[r.delar.length - 1][1]] : null;
 }
 
 // ---------- 1f. Busy-poster per dag (spec 5.13: händelse över midnatt delas per dag) ----------
@@ -242,8 +270,9 @@ function unikaPlatser(busy, cfg) {
 }
 // Bygger T(plats) → { min, kalla:'maps'|'forLangt'|'schablon' }. travelSekFn(X, platser) returnerar
 // { <cachenyckel>: sek | { sek, forLangt:true } | null } och anropas bara när X är geokodad och platser finns.
-// 0 sekunder (samma koordinater – travelSecondsForPairs_ ger 0 utan anrop) → 0 min UTAN marginal (version 7, K3): ingen resa
-// sker, så dayPlan får inBlock/utBlock tomma och restidMin.fore/efter = 0 (placeTravel returnerar [gapEnd, gapEnd] för 0).
+// Minuter = råa (travelMinutesRaw, version 10 – inget påslag, även för "för långt"). 0 sekunder (samma koordinater –
+// travelSecondsForPairs_ ger 0 utan anrop) → 0 min (version 7, K3): ingen resa sker, så dayPlan får inBlock/utBlock tomma och
+// restidMin.fore/efter = 0 (placeTravelDelar ger delar [] för 0).
 function buildTravelTable(X, platser, cfg, travelSekFn) {
   const schablon = { min: cfg.restid.schablonMin, kalla: 'schablon' };
   const tabell = {};
@@ -252,8 +281,8 @@ function buildTravelTable(X, platser, cfg, travelSekFn) {
     platser.forEach(p => {
       const v = svar[cachenyckel(X, p)];
       if (v === 0) tabell[platsnyckel(p)] = { min: 0, kalla: 'maps' };
-      else if (typeof v === 'number' && isFinite(v) && v >= 0) tabell[platsnyckel(p)] = { min: travelWithMargin(v, cfg.restid), kalla: 'maps' };
-      else if (v && typeof v === 'object' && typeof v.sek === 'number') tabell[platsnyckel(p)] = { min: travelWithMargin(v.sek, cfg.restid), kalla: v.forLangt ? 'forLangt' : 'maps' };
+      else if (typeof v === 'number' && isFinite(v) && v >= 0) tabell[platsnyckel(p)] = { min: travelMinutesRaw(v), kalla: 'maps' };
+      else if (v && typeof v === 'object' && typeof v.sek === 'number') tabell[platsnyckel(p)] = { min: travelMinutesRaw(v.sek), kalla: v.forLangt ? 'forLangt' : 'maps' };
     });
   }
   return function T(plats) {
@@ -266,9 +295,13 @@ function buildTravelTable(X, platser, cfg, travelSekFn) {
 // busyDay = availBusyForDay(...) (poster med _s/_e). T = funktion plats → { min, kalla } (null för typer utan restid).
 // Lediga slots med restid får restidMin { fore, efter, kalla:'ok'|'schablon' } (råa minuter för inkorgsposten, spec 5.5);
 // fältet tas bort före export till bokaren (spec 5.12: råa restidsminuter exporteras inte).
+// Version 10: C = den nya luckans effektiva buffert (luckBuffertMin: max(cooldown, marginal fysiskt/online)); befintliga händelsers
+// buffert kommer redan som b.cooldownMin (effektiv, Calendar.gs finalizeBusy). Resan placeras med placeTravelDelar: inBlock/utBlock
+// är det yttre spannet (kan spänna över platslösa händelser – äldre klienter ritar som förut) och restid.inDelar/utDelar de
+// faktiska delarna [['HH:MM','HH:MM'], …] (utelämnas när tomma). Ryms inte hela restiden → status 'restid' som förut.
 function dayPlan(D, cfg, typ, X, busyDay, T) {
   const at = cfg.arbetstider[weekdayOf(D)];
-  const L = typ.langdMin, C = typ.cooldownMin || 0;
+  const L = typ.langdMin, C = luckBuffertMin(cfg, typ);
   const aktiva = busyDay.filter(b => !b.ignore && !b.heldag);
   const hinder = aktiva.map(b => [b._s, b._e + (b.cooldownMin || 0)]);
   const fysiska = aktiva.filter(b => b.isTravelMeeting && !b.egenReservation);
@@ -301,17 +334,18 @@ function dayPlan(D, cfg, typ, X, busyDay, T) {
       const tUt = next ? T(next.plats) : (nextArBas ? T(bas) : { min: 0, kalla: 'ingen' });
       if (tIn.min > cfg.maxEnkelRestidMin || tUt.min > cfg.maxEnkelRestidMin) { slot.status = 'dold'; slot.reason = 'maxRestid'; }
       else {
-        const inBlock = placeTravel(prev ? prev._e + (prev.cooldownMin || 0) : atStart, S, platslos, tIn.min, 'in');
-        const utBlock = placeTravel(S + L + C, next ? next._s : atSlut, platslos, tUt.min, 'ut');
-        if (!inBlock) { slot.status = 'restid'; slot.reason = 'restidIn'; }
-        else if (!utBlock) { slot.status = 'restid'; slot.reason = 'restidUt'; }
+        const inRes = placeTravelDelar(prev ? prev._e + (prev.cooldownMin || 0) : atStart, S, platslos, tIn.min, 'in');
+        const utRes = placeTravelDelar(S + L + C, next ? next._s : atSlut, platslos, tUt.min, 'ut');
+        if (!inRes.rackte) { slot.status = 'restid'; slot.reason = 'restidIn'; }
+        else if (!utRes.rackte) { slot.status = 'restid'; slot.reason = 'restidUt'; }
         else {
           slot.restidOkand = (tIn.kalla === 'schablon' || tUt.kalla === 'schablon');
-          // Block med längd 0 (inget ankare/ingen bas åt det hållet, eller restid 0) utelämnas – klienterna ritar bara block
+          // Tomma delar (inget ankare/ingen bas åt det hållet, eller restid 0) utelämnas – klienterna ritar bara block
           // med slut > start, och inkorgspostens foreMin/efterMin kommer ur restidMin.
           slot.restid = {};
-          if (inBlock[1] > inBlock[0]) slot.restid.inBlock = [minToHhmm(inBlock[0]), minToHhmm(inBlock[1])];
-          if (utBlock[1] > utBlock[0]) slot.restid.utBlock = [minToHhmm(utBlock[0]), minToHhmm(utBlock[1])];
+          const hhmm = d => [minToHhmm(d[0]), minToHhmm(d[1])];
+          if (inRes.delar.length) { slot.restid.inBlock = [minToHhmm(inRes.delar[0][0]), minToHhmm(inRes.delar[inRes.delar.length - 1][1])]; slot.restid.inDelar = inRes.delar.map(hhmm); }
+          if (utRes.delar.length) { slot.restid.utBlock = [minToHhmm(utRes.delar[0][0]), minToHhmm(utRes.delar[utRes.delar.length - 1][1])]; slot.restid.utDelar = utRes.delar.map(hhmm); }
           slot.restidMin = { fore: tIn.min, efter: tUt.min, kalla: slot.restidOkand ? 'schablon' : 'ok' };
         }
       }
@@ -330,7 +364,8 @@ function dayPlan(D, cfg, typ, X, busyDay, T) {
 function arbetstidFor(at) { return at ? { start: at.start, slut: at.slut, lunch: at.lunch ? [at.lunch.start, at.lunch.slut] : null } : undefined; }
 // Block för rendering (spec 5.12, K1 version 7): 'upptaget' = mötets egen tid [_s, _e]; har källan cooldownMin > 0 följer ett
 // eget block { typ:'paus', start:<mötets slut>, slut:<slut + cooldown> } direkt efter (samma egen/kundnamn/bokningId som
-// upptaget-blocket om egen – aldrig omrade på paus), så att klienterna kan rita pausen ljusare än mötet. Förut var möte + cooldown
+// upptaget-blocket om egen – aldrig omrade på paus), så att klienterna kan rita pausen ljusare än mötet. Version 10: cooldownMin är
+// den effektiva bufferten (cooldown eller marginal, Calendar.gs finalizeBusy) – alla tidsatta möten får därmed ett paus-block. Förut var möte + cooldown
 // ett sammanslaget upptaget-block; äldre klienter som bara ritar upptaget/lunch ignorerar den okända typen och ser mötet kortare
 // (pausen är ändå hinder i dayPlan). Aldrig titel, adress eller källa. omrade (steg 2c) = områdesetikett när platsen är geokodad
 // (även egna bokningar och reservationer) – men ALDRIG för kalla 'privat' (kalender i läge "bara tider": den exporterar tider, inte
@@ -482,6 +517,7 @@ function computeAvailabilityCore(req, deps) {
       sistaDag,
       restidOkand,
       geo,
+      pausMin: luckBuffertMin(cfg, typ),   // version 10: vald luckas marginal efter mötet (bokningssidan ritar S+L → S+L+pausMin)
       dagar
     }
   };
@@ -542,18 +578,22 @@ function omradeFranComponents_(comps) {
 // busy = BusyItem-segment i Calendar.gs-form (datum/startMin/slutMin, gärna efter geokodaAnkare), cfg = mapCfg(inst),
 // parFn(par:[{ a, b }]) → { svar:{ cachenyckel: sek | { sek, forLangt } | null }, overCap } (travelSecondsForPairs_ eller stubb).
 // Kedja per dag: på varandra följande ankare (isTravelMeeting, ej ignorerade, ej heldag) i starttidsordning; platslösa händelser
-// (Teams m.fl.) hoppas över utan att bryta kedjan men är hinder för resans placering (placeTravel, 5.6). Plus bas→första när
+// (Teams m.fl.) hoppas över utan att bryta kedjan men är hinder för resans placering (placeTravelDelar, version 10 – resan delas runt dem). Plus bas→första när
 // cfg.restidTillForsta och sista→bas när cfg.restidEfterSista – som i dayPlan: är basen inte geokodad blir bas-benet schablon
 // (samma tid som bokarna blockeras av). Ett segment som börjar 00:00 eller slutar 24:00 (händelse över midnatt, splitToDays) får
 // inget bas-ben vid dygnsgränsen – händelsen fortsätter från/in i grannsdagen, ingen resa hem/hit sker där.
-// Resa: { datum, franId|'bas', tillId|'bas', start:'HH:MM', slut:'HH:MM', minuter, status:'ok'|'schablon'|'okand', konflikt }.
-//   minuter: Distance Matrix + marginal (5.8) → 'ok'; "för långt" (fågelväg > 150 km) → uppskattning (fågelväg/70 km/h + marginal,
-//   samma som availability) → 'ok'; ogeokodad ändpunkt → schablonminuter → 'schablon'; par som inte fick beräknas (taket
+// Resa: { datum, franId|'bas', tillId|'bas', start:'HH:MM', slut:'HH:MM', minuter, status:'ok'|'schablon'|'okand', konflikt,
+//         delar:[{ start:'HH:MM', slut:'HH:MM' }, …] (version 10) }.
+//   minuter: Distance Matrix råa minuter (version 10, travelMinutesRaw – inget påslag) → 'ok'; "för långt" (fågelväg > 150 km) →
+//   uppskattning (fågelväg/70 km/h i råa minuter, samma som availability) → 'ok'; ogeokodad ändpunkt → schablonminuter → 'schablon'; par som inte fick beräknas (taket
 //   AVAIL_PREVIEW_MAX_PAR, dagstak, API-fel) → schablonminuter + 'okand'. Samma koordinater i båda ändar (0 s) → benet UTELÄMNAS
 //   ur resor (version 7, K3 – ingen resa, ingen marginal; klienterna ska ändå tåla minuter 0 om det kommer).
-//   Placering: inresa slutar vid mötets start (hoppar bakåt över platslösa hinder); utresa efter sista mötet börjar vid mötets slut
-//   + cooldown. Ryms resan inte mellan föregående mötes slut + cooldown och nästa mötes start (för tajt) → konflikt:true och resan
-//   ritas ändå närmast mötet (överlappar föregående möte/cooldown).
+//   Placering (version 10, placeTravelDelar): inresa fyller de fria hålen närmast mötets start och delas runt platslösa hinder
+//   (inkl. deras effektiva buffert cooldownMin); utresa efter sista mötet börjar vid mötets slut + effektiv buffert och delas framåt.
+//   delar:[{ start, slut }] kronologiskt (de faktiska bitarna); start/slut = yttre spannet. Ryms inte hela restiden mellan föregående
+//   mötes slut + buffert och nästa mötes start (för tajt) → konflikt:true och delar = ett block närmast mötet (in: [slut−minuter, slut]
+//   klippt till 0; ut: [start, start+minuter] klippt till 24:00) som överlappar föregående möte/buffert. cooldownMin på segmenten är
+//   den effektiva bufferten (Calendar.gs finalizeBusy).
 // → { resor:[…], overCap }. Ren funktion (inga Google-tjänster).
 function previewResor(busy, cfg, parFn) {
   const perDag = {};
@@ -589,23 +629,26 @@ function previewResor(busy, cfg, parFn) {
     if (platsGeokodad(a) && platsGeokodad(b)) {
       const v = svar[cachenyckel(a, b)];
       if (v === 0) return null;   // samma koordinater → 0 min, ingen resa: benet UTELÄMNAS (version 7, K3)
-      if (typeof v === 'number' && isFinite(v) && v >= 0) { minuter = travelWithMargin(v, cfg.restid); status = 'ok'; }
-      else if (v && typeof v === 'object' && typeof v.sek === 'number') { minuter = travelWithMargin(v.sek, cfg.restid); status = 'ok'; }   // "för långt" = uppskattning, inte schablon
+      if (typeof v === 'number' && isFinite(v) && v >= 0) { minuter = travelMinutesRaw(v); status = 'ok'; }
+      else if (v && typeof v === 'object' && typeof v.sek === 'number') { minuter = travelMinutesRaw(v.sek); status = 'ok'; }   // "för långt" = uppskattning, inte schablon
       else status = 'okand';
     }
-    let start, slut, konflikt = false, block = null;
+    let delar, konflikt = false;
     if (l.till !== 'bas') {
-      slut = l.till.startMin; start = slut - minuter;
-      const gapStart = l.fran === 'bas' ? 0 : l.fran.slutMin + (l.fran.cooldownMin || 0);
-      block = placeTravel(gapStart, slut, l.platslos, minuter, 'in');
+      const slut = l.till.startMin, gapStart = l.fran === 'bas' ? 0 : l.fran.slutMin + (l.fran.cooldownMin || 0);
+      const r = placeTravelDelar(gapStart, slut, l.platslos, minuter, 'in');
+      if (r.rackte) delar = r.delar.length ? r.delar : [[slut, slut]];
+      else { konflikt = true; delar = [[Math.max(0, slut - minuter), slut]]; }
     } else {
-      start = l.fran.slutMin + (l.fran.cooldownMin || 0); slut = start + minuter;
-      block = placeTravel(start, 1440, l.platslos, minuter, 'ut');
+      const start = l.fran.slutMin + (l.fran.cooldownMin || 0);
+      const r = placeTravelDelar(start, 1440, l.platslos, minuter, 'ut');
+      if (r.rackte) delar = r.delar.length ? r.delar : [[start, start]];
+      else { konflikt = true; delar = [[start, Math.min(1440, start + minuter)]]; }
     }
-    if (block) { start = block[0]; slut = block[1]; } else konflikt = true;
     return {
       datum: l.datum, franId: l.fran === 'bas' ? 'bas' : String(l.fran.id || ''), tillId: l.till === 'bas' ? 'bas' : String(l.till.id || ''),
-      start: minToHhmm(Math.max(0, start)), slut: minToHhmm(Math.min(1440, slut)), minuter, status, konflikt
+      start: minToHhmm(delar[0][0]), slut: minToHhmm(delar[delar.length - 1][1]), minuter, status, konflikt,
+      delar: delar.filter(d => d[1] > d[0]).map(d => ({ start: minToHhmm(d[0]), slut: minToHhmm(d[1]) }))
     };
   }).filter(Boolean);
   return { resor, overCap };
@@ -1090,7 +1133,7 @@ function distanceBatch(origin, destinations) {
     return el.duration.value;
   });
 }
-// Enskilt par med marginal: travelMinutes(a, b, restidCfg) → { min, kalla:'maps'|'forLangt'|'schablon' }.
+// Enskilt par i råa minuter (version 10): travelMinutes(a, b, restidCfg) → { min, kalla:'maps'|'forLangt'|'schablon' }.
 // a/b = { lat, lng, geokodad }; restidCfg = mapCfg(inst).restid (utelämnas → defaults ur DEFAULT_BOKNINGSINSTALLNINGAR-värdena).
 function travelMinutes(a, b, restidCfg) {
   const rc = restidCfg || mapCfg({}).restid;
@@ -1133,24 +1176,31 @@ function runAvailabilityTests() {
   const ok = (villkor, text) => { antal++; if (!villkor) fel.push(text); };
 
   // Förutsättningar (5.14): arbetstid 08–17, lunch 12–13, raster 30, "Timpunkts Möte" 60+30 restid, bas geokodad, max 3 fysiska, max 90 min, schablon 45.
+  // Version 10: restid = råa minuter (inget påslag), marginal efter möte 15 (fysiskt) / 5 (online); befintliga händelser bär den
+  // effektiva bufferten i cooldownMin (Calendar.gs finalizeBusy – här efterliknad i bi()), den nya luckan får max(cooldown, marginal).
   const BAS = { lat: 59.3293, lng: 18.0686 }, X = { lat: 59.3000, lng: 18.0000 }, A = { lat: 59.4000, lng: 18.1000 }, B = { lat: 59.2000, lng: 17.9000 };
   const inst = () => ({ arbetstider: { '1': { start: '08:00', slut: '17:00' }, '2': { start: '08:00', slut: '17:00' }, '3': { start: '08:00', slut: '17:00' }, '4': { start: '08:00', slut: '17:00' }, '5': { start: '08:00', slut: '17:00' }, '6': null, '0': null },
     lunch: { start: '12:00', slut: '13:00' }, basadress: 'Bas', basLat: BAS.lat, basLng: BAS.lng, restidTillForsta: true, restidEfterSista: true,
     framforhallningFysiskDagar: 2, framforhallningTeamsDagar: 1, horisontVeckor: 6, startintervallMin: 30, maxFysiskaPerDag: 3, maxEnkelResaMin: 90,
-    schablonRestidMin: 45, marginalMinstMin: 15, marginalProcent: 25, rodaDagar: true, rodaDagarExtra: [], rodaDagarUndantag: [], paus: { aktiv: false, tom: '', meddelande: '' } });
+    schablonRestidMin: 45, marginalFysisktMin: 15, marginalOnlineMin: 5, rodaDagar: true, rodaDagarExtra: [], rodaDagarUndantag: [], paus: { aktiv: false, tom: '', meddelande: '' } });
   const MOTE = { id: 'mt_mote', titel: 'Timpunkts Möte', langdMin: 60, cooldownMin: 30, restid: true, pipelineId: 'p1', global: false, aktiv: true };
   const TEAMS = { id: 'mt_teams', titel: 'Timpunkt Teams', langdMin: 60, cooldownMin: 0, restid: false, pipelineId: 'p1', global: false, aktiv: true };
   const ANNA = { id: 'bokare_anna', pipelineId: 'p1', tillatnaMotestypIds: [], aktiv: true, arCj: false };
   const BO = { id: 'bokare_bo', pipelineId: 'p1', tillatnaMotestypIds: [], aktiv: true, arCj: false };
   const NOW = new Date('2026-09-14T16:00:00+02:00');   // måndag
-  // Busy-hjälpare (ISO-form; Calendar.gs-formen med datum/startMin/slutMin testas separat)
-  const bi = (datum, s, e, o) => Object.assign({ id: 'b_' + datum + s, kalla: 'privat', start: toIsoWithOffset(datum, s), slut: toIsoWithOffset(datum, e),
-    hasPlace: false, plats: null, isTravelMeeting: false, cooldownMin: 0, heldag: false, ignore: false, preliminar: false }, o || {});
+  // Busy-hjälpare (ISO-form; Calendar.gs-formen med datum/startMin/slutMin testas separat). Effektiv buffert som finalizeBusy (K3):
+  // cooldownMin = heldag ? 0 : max(cooldownMin, fysiskt ? 15 : 5).
+  const bi = (datum, s, e, o) => {
+    const b = Object.assign({ id: 'b_' + datum + s, kalla: 'privat', start: toIsoWithOffset(datum, s), slut: toIsoWithOffset(datum, e),
+      hasPlace: false, plats: null, isTravelMeeting: false, cooldownMin: 0, heldag: false, ignore: false, preliminar: false }, o || {});
+    b.cooldownMin = b.heldag ? 0 : Math.max(b.cooldownMin | 0, b.isTravelMeeting ? 15 : 5);
+    return b;
+  };
   const med = (plats, o) => Object.assign({ hasPlace: true, plats: { text: 'x', lat: plats.lat, lng: plats.lng, geokodad: true }, isTravelMeeting: true }, o || {});
-  // Restidsstub: sekunder valda så att marginalen ger testfallens minuter (40, 30, 50, 95)
+  // Restidsstub: råa sekunder → testfallens minuter (40, 30, 50, 95) utan påslag (version 10)
   const sekTabell = {};
   const sattSek = (a, b, sek) => { sekTabell[cachenyckel(a, b)] = sek; };
-  sattSek(X, A, 1500); sattSek(X, B, 900); sattSek(X, BAS, 2100);
+  sattSek(X, A, 2400); sattSek(X, B, 1800); sattSek(X, BAS, 3000);
   let travelAnrop = 0;
   const travelSek = (x, platser) => { travelAnrop++; const ut = {}; platser.forEach(p => { ut[cachenyckel(x, p)] = sekTabell[cachenyckel(x, p)] !== undefined ? sekTabell[cachenyckel(x, p)] : null; }); return ut; };
   const geoOk = () => ({ status: 'ok', lat: X.lat, lng: X.lng, formaterad: 'X' });
@@ -1159,15 +1209,31 @@ function runAvailabilityTests() {
   const slot = (r, tid, dag) => (r.data.dagar[dag || 0].slots.find(s => s.tid === tid) || {});
   const upptagetBlock = (r, i) => r.data.dagar[i || 0].block.find(b => b.typ === 'upptaget') || {};
   const pausBlock = (r, i) => r.data.dagar[i || 0].block.find(b => b.typ === 'paus') || {};
+  const pausBlocken = (r, i) => r.data.dagar[i || 0].block.filter(b => b.typ === 'paus').map(b => b.start + '-' + b.slut).join(',');
+  const delarStr = d => (d || []).map(x => x[0] + '-' + x[1]).join(',');
 
-  // Marginal (5.8)
-  ok(travelWithMargin(32 * 60, mapCfg(inst()).restid) === 50, 'marginal 32 → 50');
-  ok(travelWithMargin(80 * 60, mapCfg(inst()).restid) === 100, 'marginal 80 → 100');
-  ok(travelWithMargin(1500, mapCfg(inst()).restid) === 40 && travelWithMargin(900, mapCfg(inst()).restid) === 30 && travelWithMargin(2100, mapCfg(inst()).restid) === 50, 'stubbens sekunder → 40/30/50');
+  // Råa restidsminuter (version 10, K2/K7): inget påslag, ingen avrundning; aliaset travelWithMargin ger samma
+  ok(travelMinutesRaw(1200) === 20 && travelMinutesRaw(1920) === 32 && travelMinutesRaw(0) === 0, 'travelMinutesRaw 1200 s → 20, 1920 s → 32, 0 → 0');
+  ok(travelWithMargin(1200, mapCfg(inst()).restid) === 20 && travelWithMargin(1920) === 32 && travelWithMargin(0) === 0, 'travelWithMargin = alias för råa minuter');
+  ok(travelMinutesRaw(2400) === 40 && travelMinutesRaw(1800) === 30 && travelMinutesRaw(3000) === 50, 'stubbens sekunder → 40/30/50');
+  // mapCfg (K2): restid bara schablon, marginal fysiskt/online med defaults 15/5
+  const cfgK2 = mapCfg(inst());
+  ok(cfgK2.restid.schablonMin === 45 && !('marginalMin' in cfgK2.restid) && !('marginalProcent' in cfgK2.restid) && cfgK2.marginal.fysisktMin === 15 && cfgK2.marginal.onlineMin === 5, 'mapCfg: restid { schablonMin }, marginal 15/5');
+  ok(mapCfg({}).marginal.fysisktMin === 15 && mapCfg({}).marginal.onlineMin === 5 && mapCfg({ marginalFysisktMin: 20, marginalOnlineMin: 0 }).marginal.fysisktMin === 20 && mapCfg({ marginalFysisktMin: 20, marginalOnlineMin: 0 }).marginal.onlineMin === 0, 'mapCfg: marginal defaults 15/5, egna värden (även 0)');
+  ok(luckBuffertMin(cfgK2, MOTE) === 30 && luckBuffertMin(cfgK2, TEAMS) === 5 && luckBuffertMin(mapCfg({ marginalFysisktMin: 45 }), MOTE) === 45, 'luckBuffertMin = max(cooldown, marginal): MOTE 30, TEAMS 5, marginal 45 → 45');
 
-  // placeTravel-exemplet (5.6): A slutar 09:00 (+30), Teams 11:00–11:45, S=12:00, 40 min → 10:20–11:00
+  // placeTravelDelar-exemplet (K1/K7): A slutar 09:00 (+30), Teams 11:00–11:45, S=12:00, 40 min → delar 10:35–11:00 + 11:45–12:00
+  const ptd = placeTravelDelar(9 * 60 + 30, 12 * 60, [[11 * 60, 11 * 60 + 45]], 40, 'in');
+  ok(ptd.rackte === true && ptd.delar.length === 2 && ptd.delar[0][0] === 10 * 60 + 35 && ptd.delar[0][1] === 11 * 60 && ptd.delar[1][0] === 11 * 60 + 45 && ptd.delar[1][1] === 12 * 60, 'placeTravelDelar in: delar [[10:35,11:00],[11:45,12:00]] kronologiskt');
   const pt = placeTravel(9 * 60 + 30, 12 * 60, [[11 * 60, 11 * 60 + 45]], 40, 'in');
-  ok(pt && pt[0] === 10 * 60 + 20 && pt[1] === 11 * 60, 'placeTravel hoppar över Teams');
+  ok(pt && pt[0] === 10 * 60 + 35 && pt[1] === 12 * 60, 'placeTravel = yttre spannet 10:35–12:00');
+  const ptu = placeTravelDelar(600, 1440, [[630, 660]], 50, 'ut');
+  ok(ptu.rackte === true && ptu.delar.length === 2 && ptu.delar[0][0] === 600 && ptu.delar[0][1] === 630 && ptu.delar[1][0] === 660 && ptu.delar[1][1] === 680, 'placeTravelDelar ut: delas framåt [[10:00,10:30],[11:00,11:20]]');
+  const pt0 = placeTravelDelar(600, 700, [[630, 660]], 0, 'in');
+  ok(pt0.rackte === true && pt0.delar.length === 0 && placeTravel(600, 700, [], 0, 'in')[0] === 700 && placeTravel(600, 700, [], 0, 'in')[1] === 700, 'placeTravelDelar 0 min → delar [], rackte; placeTravel 0 → [gapEnd, gapEnd]');
+  const ptk = placeTravelDelar(555, 570, [], 40, 'in');
+  ok(ptk.rackte === false && ptk.delar.length === 1 && ptk.delar[0][0] === 555 && ptk.delar[0][1] === 570 && placeTravel(555, 570, [], 40, 'in') === null, 'placeTravelDelar otillräckligt → rackte false (det som fick plats), placeTravel null');
+  ok(placeTravelDelar(600, 600, [], 10, 'in').rackte === false && placeTravelDelar(600, 600, [], 0, 'ut').rackte === true, 'placeTravelDelar tomt gap: false utom vid 0 min');
 
   // 1. Teams mellan två fysiska (tis 22/9)
   let busy = [bi('2026-09-22', '08:00', '09:00', med(A)), bi('2026-09-22', '11:00', '11:45'), bi('2026-09-22', '15:00', '16:00', med(B))];
@@ -1177,8 +1243,15 @@ function runAvailabilityTests() {
   ok(slot(r, '13:00').status === 'ledig' && slot(r, '13:00').restid.inBlock[0] === '12:20' && slot(r, '13:00').restid.utBlock[1] === '15:00', 'test1 13:00 ledig 12:20–13:00 / 14:30–15:00');
   ok(slot(r, '13:00').restidMin.fore === 40 && slot(r, '13:00').restidMin.efter === 30 && slot(r, '13:00').restidMin.kalla === 'ok', 'test1 restidMin råa minuter');
   ok(slot(r, '10:00').status === 'upptaget', 'test1 10:00 upptaget (cooldown mot Teams)');
-  ok(slot(r, '09:30').status === 'restid' && slot(r, '09:30').reason === 'restidIn', 'test1 09:30 restidIn');
-  ok(r.data.dagar[0].fysiska === 2 && r.data.dagar[0].block.length === 4, 'test1 fysiska=2, 3 block + lunch');
+  ok(slot(r, '09:30').status === 'restid' && slot(r, '09:30').reason === 'restidIn', 'test1 09:30 restidIn (A + marginal 15 → 09:15, 15 min < 40)');
+  ok(slot(r, '13:00').restid.inDelar.length === 1 && delarStr(slot(r, '13:00').restid.inDelar) === '12:20-13:00' && delarStr(slot(r, '13:00').restid.utDelar) === '14:30-15:00', 'test1 13:00 inDelar/utDelar = en del vardera');
+  ok(r.data.dagar[0].fysiska === 2 && r.data.dagar[0].block.length === 7, 'test1 fysiska=2, 3 upptaget + 3 paus (marginal) + lunch');
+  // K3 (version 10): paus-block ur den effektiva bufferten – 15 efter fysiska (A, B), 5 efter platslös Teams
+  ok(pausBlocken(r) === '09:00-09:15,11:45-11:50,16:00-16:15', 'test1 paus-block: marginal 15 efter fysiska, 5 efter Teams');
+  ok(r.data.pausMin === 30, 'test1 data.pausMin = max(cooldown 30, marginal 15) = 30');
+  // Ny Teams-lucka får buffert 5 (max(cooldown 0, onlineMin 5)): 10:00–11:00 + 5 krockar med Teams 11:00; 09:30 går (10:35 ≤ 11:00)
+  r = kor({ motestypId: 'mt_teams' }, busy);
+  ok(slot(r, '10:00').status === 'upptaget' && slot(r, '09:30').status === 'ledig' && r.data.pausMin === 5, 'test1 Teams-lucka: buffert 5 → 10:00 upptaget, 09:30 ledig, pausMin 5');
   ok(r.data.dagar[0].block.every(b => !('plats' in b) && !('kalla' in b) && !('titel' in b)), 'test1 block läcker inget');
 
   // 1b. Ankare med bara platstext (privat kalender/ICS) geokodas via deps.geocode → Maps-restid, inte schablon
@@ -1186,7 +1259,7 @@ function runAvailabilityTests() {
   const geoTextOk = adress => { geoAnrop.push(adress); if (adress === 'X') return geoOk(); if (adress === 'Storgatan 9') return { status: 'ok', lat: A.lat, lng: A.lng, formaterad: 'A' }; return { status: 'okand' }; };
   const textAnkare = bi('2026-09-22', '08:00', '09:00', { hasPlace: true, isTravelMeeting: true, plats: { text: 'Storgatan 9', lat: null, lng: null, geokodad: false } });
   r = kor({}, [textAnkare, Object.assign({}, textAnkare, { id: 'b2', start: toIsoWithOffset('2026-09-22', '15:00'), slut: toIsoWithOffset('2026-09-22', '16:00') })], { geocode: geoTextOk });
-  ok(r.ok && geoAnrop.filter(a => a === 'Storgatan 9').length === 1 && slot(r, '10:00').status === 'ledig' && slot(r, '10:00').restidOkand === false && slot(r, '10:00').restid.inBlock[0] === '09:20', 'test1b textankare geokodas en gång → Maps-restid A→X 40 (09:20–10:00)');
+  ok(r.ok && geoAnrop.filter(a => a === 'Storgatan 9').length === 1 && slot(r, '10:00').status === 'ledig' && slot(r, '10:00').restidOkand === false && slot(r, '10:00').restid.inBlock[0] === '09:20', 'test1b textankare geokodas en gång → Maps-restid A→X 40 (09:20–10:00, efter marginal 15)');
   ok(textAnkare.plats.lat === null, 'test1b indata muteras inte');
   r = kor({}, [textAnkare], { geocode: a => (a === 'X' ? geoOk() : { status: 'okand' }) });
   ok(r.ok && slot(r, '10:00').status === 'ledig' && slot(r, '10:00').restidOkand === true && slot(r, '10:00').restidMin.kalla === 'schablon', 'test1b misslyckad ankargeokodning → ankare med schablon');
@@ -1195,7 +1268,7 @@ function runAvailabilityTests() {
   travelAnrop = 0;
   r = kor({}, [bi('2026-09-22', '08:00', '09:00', med(A))], { geocode: () => ({ status: 'okand' }) });
   ok(r.ok && r.data.geo.status === 'okand' && r.data.restidOkand === true && travelAnrop === 0, 'test2 okand utan Matrix-anrop');
-  ok(slot(r, '10:00').status === 'ledig' && slot(r, '10:00').restidOkand === true && slot(r, '10:00').restid.inBlock[0] === '09:15' && slot(r, '10:00').restidMin.kalla === 'schablon', 'test2 schablon 45 (09:15–10:00)');
+  ok(slot(r, '10:00').status === 'ledig' && slot(r, '10:00').restidOkand === true && slot(r, '10:00').restid.inBlock[0] === '09:15' && slot(r, '10:00').restidMin.kalla === 'schablon', 'test2 schablon 45 (09:15–10:00, exakt efter marginal 15)');
 
   // 3. Dagsgräns: tre ankare → dold/maxFysiska; Teams → ledig mellan hindren
   busy = [bi('2026-09-23', '08:00', '09:00', med(A)), bi('2026-09-23', '10:00', '11:00', med(B)), bi('2026-09-23', '15:00', '16:00', med(A))];
@@ -1208,17 +1281,17 @@ function runAvailabilityTests() {
   r = kor({}, []);
   ok(slot(r, '11:00').status === 'ledig' && slot(r, '11:30').reason === 'lunch' && slot(r, '13:00').status === 'ledig', 'test4 lunchgräns');
 
-  // 5. Max enkel restid: bas→X 95
-  sattSek(X, BAS, 4560);
+  // 5. Max enkel restid: bas→X 95 (råa 5700 s)
+  sattSek(X, BAS, 5700);
   r = kor({}, []);
   ok(r.data.dagar[0].slots.every(s => (s.status === 'dold' && s.reason === 'maxRestid') || s.reason === 'lunch'), 'test5 alla dold/maxRestid');
-  sattSek(X, A, 2100);
+  sattSek(X, A, 3000);
   r = kor({}, [bi('2026-09-22', '08:00', '09:00', med(A))]);
   ok(slot(r, '10:30').status === 'dold' && slot(r, '10:30').reason === 'maxRestid', 'test5 10:30 dold (utresa mot bas 95)');
   const inst5 = inst(); inst5.restidEfterSista = false;
   r = kor({}, [bi('2026-09-22', '08:00', '09:00', med(A))], { inst: inst5 });
   ok(slot(r, '10:30').status === 'ledig' && slot(r, '10:30').restidMin.efter === 0, 'test5 restidEfterSista=false → ledig');
-  sattSek(X, BAS, 2100); sattSek(X, A, 1500);
+  sattSek(X, BAS, 3000); sattSek(X, A, 2400);
 
   // 6. Första mötet mot bas (bas→X 50)
   r = kor({}, []);
@@ -1262,7 +1335,7 @@ function runAvailabilityTests() {
   r = kor({}, [tand]);
   ok(slot(r, '14:00').status === 'ledig' && r.data.dagar[0].block.length === 1 && r.data.dagar[0].fysiska === 0, 'test10 ignorerad: inget block, inget ankare');
   r = kor({}, [bi('2026-09-22', '14:00', '15:00', med(A))]);
-  ok(slot(r, '14:00').status === 'upptaget' && r.data.dagar[0].block.length === 2, 'test10 utan ignore: block + upptaget');
+  ok(slot(r, '14:00').status === 'upptaget' && r.data.dagar[0].block.length === 3 && pausBlock(r).start === '15:00' && pausBlock(r).slut === '15:15', 'test10 utan ignore: upptaget + paus (marginal 15) + lunch');
 
   // 11. Framförhållning: mån 14/9 → fysiskt ons 16/9, Teams tis 15/9; tis röd → tor 17/9 resp. ons 16/9
   ok(firstBookableDay(mapCfg(inst()), MOTE, '2026-09-14') === '2026-09-16' && firstBookableDay(mapCfg(inst()), TEAMS, '2026-09-14') === '2026-09-15', 'test11 framförhållning');
@@ -1307,8 +1380,8 @@ function runAvailabilityTests() {
   ok(upptagetBlock(r, 0).start === '16:00' && upptagetBlock(r, 0).slut === '24:00' && upptagetBlock(r, 1).start === '00:00' && upptagetBlock(r, 1).slut === '08:30' && slot(r, '08:00', 1).status === 'upptaget', 'kantfall midnatt');
   r = kor({}, [{ id: 'h', kalla: 'privat', start: '2026-09-22', slut: '2026-09-23', heldag: true, hasPlace: false, isTravelMeeting: false, ignore: false }]);
   ok(r.data.dagar[0].status === 'stangd' && r.data.dagar[0].reason === 'heldag', 'kantfall heldag');
-  r = kor({}, [{ id: 's', kalla: 'privat', datum: '2026-09-22', startMin: 540, slutMin: 600, start: toIsoWithOffset('2026-09-22', '09:00'), slut: toIsoWithOffset('2026-09-22', '10:00'), hasPlace: true, plats: { lat: A.lat, lng: A.lng, geokodad: true }, isTravelMeeting: true, cooldownMin: 0, heldag: false, ignore: false }]);
-  ok(slot(r, '09:00').status === 'upptaget' && r.data.dagar[0].fysiska === 1 && slot(r, '11:00').status === 'ledig' && slot(r, '11:00').restid.inBlock[0] === '10:20', 'kantfall Calendar.gs-segment (startMin/slutMin)');
+  r = kor({}, [{ id: 's', kalla: 'privat', datum: '2026-09-22', startMin: 540, slutMin: 600, start: toIsoWithOffset('2026-09-22', '09:00'), slut: toIsoWithOffset('2026-09-22', '10:00'), hasPlace: true, plats: { lat: A.lat, lng: A.lng, geokodad: true }, isTravelMeeting: true, cooldownMin: 15, heldag: false, ignore: false }]);
+  ok(slot(r, '09:00').status === 'upptaget' && r.data.dagar[0].fysiska === 1 && slot(r, '11:00').status === 'ledig' && slot(r, '11:00').restid.inBlock[0] === '10:20', 'kantfall Calendar.gs-segment (startMin/slutMin, effektiv buffert 15)');
   // Validering: intervall > 14 dagar, okänd typ
   ok(!kor({ from: '2026-09-22', to: '2026-10-10' }, []).ok, 'validering > 14 dagar');
   ok(kor({ motestypId: 'finns_ej' }, []).error.code === 'E_VALIDATION', 'validering okänd typ');
@@ -1326,9 +1399,50 @@ function runAvailabilityTests() {
   ok(slot(r, '09:00').status === 'upptaget' && slot(r, '09:30').status === 'ledig' && slot(r, '09:30').restidMin.fore === 0 && slot(r, '09:30').restidMin.kalla === 'ok' && !('inBlock' in slot(r, '09:30').restid) && slot(r, '09:30').restid.utBlock[0] === '11:00', 'K3 samma koordinater → 09:30 ledig utan inresa (0 min), utresa mot bas 11:00');
   ok(buildTravelTable(X, [X], mapCfg(inst()), () => ({ [cachenyckel(X, X)]: 0 }))(X).min === 0, 'K3 buildTravelTable 0 s → 0 min utan marginal');
   // K3 i previewResor: två ankare på samma koordinater → benet mellan dem utelämnas; bas-benen (50 min) finns kvar.
-  const segX = (id, s, e) => ({ id, kalla: 'privat', datum: '2026-09-22', startMin: s, slutMin: e, plats: { text: 'x', lat: X.lat, lng: X.lng, geokodad: true }, hasPlace: true, isTravelMeeting: true, cooldownMin: 0, heldag: false, ignore: false });
-  const pr = previewResor([segX('p1', 540, 600), segX('p2', 660, 720)], mapCfg(inst()), par => { const ut = {}; par.forEach(p => { ut[cachenyckel(p.a, p.b)] = sekTabell[cachenyckel(p.a, p.b)] !== undefined ? sekTabell[cachenyckel(p.a, p.b)] : null; }); return { svar: ut, overCap: 0 }; });
+  // Segment i Calendar.gs-form med effektiv buffert (finalizeBusy: 15 fysiskt, 5 platslöst)
+  const seg = (id, s, e, plats, o) => Object.assign({ id, kalla: 'privat', datum: '2026-09-22', startMin: s, slutMin: e, plats: plats ? { text: 'x', lat: plats.lat, lng: plats.lng, geokodad: true } : null,
+    hasPlace: !!plats, isTravelMeeting: !!plats, cooldownMin: plats ? 15 : 5, heldag: false, ignore: false }, o || {});
+  const segX = (id, s, e) => seg(id, s, e, X);
+  const parStub = par => { const ut = {}; par.forEach(p => { ut[cachenyckel(p.a, p.b)] = sekTabell[cachenyckel(p.a, p.b)] !== undefined ? sekTabell[cachenyckel(p.a, p.b)] : null; }); return { svar: ut, overCap: 0 }; };
+  const pr = previewResor([segX('p1', 540, 600), segX('p2', 660, 720)], mapCfg(inst()), parStub);
   ok(pr.resor.length === 2 && pr.resor[0].franId === 'bas' && pr.resor[0].tillId === 'p1' && pr.resor[0].minuter === 50 && pr.resor[1].franId === 'p2' && pr.resor[1].tillId === 'bas' && !pr.resor.some(x => x.franId === 'p1'), 'K3 previewResor utelämnar 0-benet p1→p2, bas-benen kvar');
+  ok(pr.resor[0].start === '08:10' && pr.resor[0].slut === '09:00' && pr.resor[0].delar.length === 1 && pr.resor[0].delar[0].start === '08:10' && pr.resor[1].start === '12:15' && pr.resor[1].slut === '13:05' && pr.resor[1].konflikt === false, 'K3 previewResor: råa 50 min, utresa efter buffert 15 (12:15–13:05), delar = en del');
+
+  // Version 10 (K1/K2/K7) – CJ:s exempel i previewResor: Teams 09–10 och 11–12 (platslösa, buffert 5 → hinder till 10:05/12:05),
+  // fysiskt möte 14:00–15:00 på P med 130 min från bas → inresa delad [10:45–11:00] + [12:05–14:00] (inte 06:50–09:00), konflikt false.
+  const P = { lat: 60.1000, lng: 18.5000 };
+  sattSek(P, BAS, 7800);
+  const prCj = previewResor([seg('t1', 540, 600, null), seg('t2', 660, 720, null), seg('m1', 840, 900, P)], mapCfg(inst()), parStub);
+  const inCj = prCj.resor.find(x => x.franId === 'bas' && x.tillId === 'm1') || {};
+  ok(inCj.minuter === 130 && inCj.konflikt === false && inCj.start === '10:45' && inCj.slut === '14:00', 'v10 previewResor CJ-exemplet: 130 råa min, yttre spann 10:45–14:00, ingen konflikt');
+  ok(Array.isArray(inCj.delar) && inCj.delar.length === 2 && inCj.delar[0].start === '10:45' && inCj.delar[0].slut === '11:00' && inCj.delar[1].start === '12:05' && inCj.delar[1].slut === '14:00', 'v10 previewResor CJ-exemplet: delar [[10:45,11:00],[12:05,14:00]]');
+  const utCj = prCj.resor.find(x => x.franId === 'm1' && x.tillId === 'bas') || {};
+  ok(utCj.minuter === 130 && utCj.start === '15:15' && utCj.slut === '17:25' && utCj.delar.length === 1 && utCj.konflikt === false, 'v10 previewResor: utresa börjar efter buffert 15 (15:15–17:25)');
+  // Otillräckligt: A 08–09 (+15) → B 09:30 med 40 min (2400 s) → konflikt + ett block närmast mötet 08:50–09:30
+  sattSek(A, B, 2400);
+  const prK = previewResor([seg('a1', 480, 540, A), seg('b1', 570, 630, B)], mapCfg(inst()), parStub);
+  const abK = prK.resor.find(x => x.franId === 'a1' && x.tillId === 'b1') || {};
+  ok(abK.minuter === 40 && abK.konflikt === true && abK.start === '08:50' && abK.slut === '09:30' && abK.delar.length === 1 && abK.delar[0].start === '08:50' && abK.delar[0].slut === '09:30', 'v10 previewResor otillräckligt → konflikt, block närmast mötet 08:50–09:30');
+  // 'ut'-ben delat framåt: B 15–16 (+15 → 16:15), Teams 16:30–17:00 (+5 → 17:05), B→bas 50 min (1800 s → 30? nej: 3000 s = 50) → [16:15–16:30] + [17:05–17:40]
+  sattSek(B, BAS, 3000);
+  const prU = previewResor([seg('b2', 900, 960, B), seg('t3', 990, 1020, null)], mapCfg(inst()), parStub);
+  const utU = prU.resor.find(x => x.franId === 'b2' && x.tillId === 'bas') || {};
+  ok(utU.minuter === 50 && utU.konflikt === false && utU.start === '16:15' && utU.slut === '17:40' && utU.delar.length === 2 && utU.delar[0].start === '16:15' && utU.delar[0].slut === '16:30' && utU.delar[1].start === '17:05' && utU.delar[1].slut === '17:40', "v10 previewResor 'ut'-ben delat framåt runt Teams: [16:15–16:30] + [17:05–17:40]");
+  ok(prU.resor.every(x => !('raMin' in x) && !('marginalMin' in x)), 'v10 previewResor: inga raMin/marginalMin-fält');
+
+  // Version 10 i dayPlan: inresa delad runt platslös Teams 10:00–10:30 (+5 → 10:35) för luckan 11:00 med 50 min från bas →
+  // inDelar [[09:35,10:00],[10:35,11:00]], inBlock = yttre spannet 09:35–11:00; utresa 12:30–13:20 (efter buffert 30) som en del.
+  r = kor({}, [bi('2026-09-22', '10:00', '10:30')]);
+  ok(slot(r, '11:00').status === 'ledig' && delarStr(slot(r, '11:00').restid.inDelar) === '09:35-10:00,10:35-11:00' && slot(r, '11:00').restid.inBlock[0] === '09:35' && slot(r, '11:00').restid.inBlock[1] === '11:00' && slot(r, '11:00').restidMin.fore === 50, 'v10 dayPlan 11:00: inDelar två delar, inBlock = yttre spann 09:35–11:00');
+  ok(delarStr(slot(r, '11:00').restid.utDelar) === '12:30-13:20' && slot(r, '11:00').restid.utBlock[0] === '12:30' && slot(r, '11:00').restid.utBlock[1] === '13:20', 'v10 dayPlan 11:00: utDelar en del 12:30–13:20');
+  ok(slot(r, '10:30').status === 'upptaget' && slot(r, '09:00').status === 'upptaget' && slot(r, '08:30').reason === 'restidIn', 'v10 dayPlan: 10:30 upptaget (Teams-buffert 5), 09:00 upptaget (cooldown 30 in i Teams), 08:30 restidIn');
+  ok(pausBlocken(r) === '10:30-10:35', 'v10 dayPlan: paus-block 5 min efter platslös Teams');
+  // data.pausMin följer marginalinställningen: marginalFysisktMin 45 > cooldown 30 → 45
+  const inst10 = inst(); inst10.marginalFysisktMin = 45;
+  r = kor({}, [], { inst: inst10 });
+  ok(r.data.pausMin === 45 && slot(r, '09:00').restid.utBlock[0] === '10:45', 'v10 data.pausMin = max(cooldown 30, marginal 45) = 45; utresa börjar 10:45');
+  const expV10 = stripInternAvailability(kor({}, [bi('2026-09-22', '10:00', '10:30')]).data);
+  ok(expV10.pausMin === 30 && expV10.dagar[0].slots.some(s => s.restid && s.restid.inDelar) && expV10.dagar[0].slots.every(s => !('restidMin' in s)), 'v10 export: pausMin + inDelar med, restidMin borta');
 
   const rapport = fel.length ? `${fel.length} av ${antal} test misslyckades:\n- ${fel.join('\n- ')}` : `Alla ${antal} test OK`;
   if (typeof Logger !== 'undefined') Logger.log(rapport); else console.log(rapport);
@@ -1364,7 +1478,8 @@ if (typeof module !== 'undefined' && module.exports) {
     };
     g.fromIso = function (iso) { return tzParts(new Date(iso)); };
   }
-  module.exports = { mapCfg, swedishHolidays, easterSunday, isRedDay, isWorkingDay, firstBookableDay, dayStatus, travelWithMargin, placeTravel,
+  module.exports = { mapCfg, swedishHolidays, easterSunday, isRedDay, isWorkingDay, firstBookableDay, dayStatus, travelWithMargin, travelMinutesRaw,
+    luckBuffertMin, placeTravel, placeTravelDelar,
     availBusyForDay, platsnyckel, cachenyckel, buildTravelTable, dayPlan, computeAvailabilityCore, stripInternAvailability,
     normalizeAdressKey, runAvailabilityTests, geokodaAnkare, previewResor, platsOmrade, omradeFranComponents_ };
 }
