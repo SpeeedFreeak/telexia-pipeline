@@ -20,8 +20,10 @@
  *                      (normalizeConfig sanerar, previewExport speglar overrideOnline/overrideAdress + serieId, geocode svarar omrade – version 9, SCRIPT_VERSION 9),
  *                      ren restid (Googles körtid utan påslag), marginal efter varje möte (marginalFysisktMin/marginalOnlineMin – effektiv
  *                      buffert i Calendar.gs finalizeBusy) och restid delad runt platslösa möten (availability restid.inDelar/utDelar +
- *                      pausMin, calendar-preview resor[].delar – version 10, SCRIPT_VERSION 10, CJ:s beslut 2026-09-17).
- *   Calendar.gs      – readBusy(fran, till), parseIcs, mergeBusy, applyIgnore (ignorera/räkna + restid-override), finalizeBusy (effektiv buffert), buildBusyList(from, to).
+ *                      pausMin, calendar-preview resor[].delar – version 10, SCRIPT_VERSION 10, CJ:s beslut 2026-09-17),
+ *                      blocksynk till en egen Google-kalender "Pipeline – restid" (restid + marginal som händelser, syncBlock_ i
+ *                      refreshIcsCache + admin-endpoint block-sync, ping.blockSynk – A61, version 11, SCRIPT_VERSION 11, CJ:s beslut 2026-09-17).
+ *   Calendar.gs      – readBusy(fran, till) (hoppar över blockkalendern, version 11), parseIcs, mergeBusy, applyIgnore (ignorera/räkna + restid-override), finalizeBusy (effektiv buffert), buildBusyList(from, to).
  *   Availability.gs  – computeAvailability(req), dayPlan, placeTravelDelar/placeTravel, geocodeAddress(adress, { placeId }), hamtaAdressforslag(q, token),
  *                      travelMinutes, travelSecondsForPairs_, previewResor, geokodaAnkare, backfillOmrade_, swedishHolidays.
  *
@@ -37,7 +39,7 @@
 // Konstanter
 // ============================================================
 
-const SCRIPT_VERSION = 10;                      // 10 = ren restid (råa Distance Matrix-minuter, inget påslag), marginal efter varje möte (installningar.marginalFysisktMin/marginalOnlineMin → effektiv buffert cooldownMin i Calendar.gs finalizeBusy; ersätter marginalMinstMin/marginalProcent) och restid delad runt platslösa möten (availability slot.restid.inDelar/utDelar + data.pausMin, calendar-preview resor[].delar – valfria fält, inBlock/utBlock = yttre spann: MIN_SCRIPT_VERSION förblir 4; CJ:s beslut 2026-09-17); 9 = manuell restidsklassning + rättad adress per händelse (KALENDER_IGNORERA-postens valfria online/adress/lat/lng/omrade och lage 'restid', Calendar.gs applyIgnore; calendar-preview overrideOnline/overrideAdress/serieId, geocode.omrade – valfria fält: MIN_SCRIPT_VERSION förblir 4); 8 = online-möten ("Microsoft Teams-möte" m.fl. i platsfältet är aldrig restidsankare, Calendar.gs kalLooksLikePlace – MIN_SCRIPT_VERSION förblir 4); MIN_SCRIPT_VERSION i index.html/bokning.js jämförs mot denna (4.12); 3 = M5 (purge, dailyMaintenance, nya ping-fält); 4 = steg 2a (egen-rebook/egen-cancel/egen-update, hello.egna med kanAndras); 5 = steg 2b (adressforslag via Places, placeId i geokodning – valfritt: MIN_SCRIPT_VERSION förblir 4); 6 = steg 2c (block.omrade i availability, omrade + resor i calendar-preview – valfria fält: MIN_SCRIPT_VERSION förblir 4); 7 = optimering (inkorg i CacheService, en cache-filskrivning per körning, ICS-värmare) + restid tydlig (paus-block, 0 min samma adress, Teams-fix, mejltext) + rebook släpper reservation (valfria fält: MIN_SCRIPT_VERSION förblir 4)
+const SCRIPT_VERSION = 11;                      // 11 = blocksynk till Google Kalender (installningar.blockSynkAktiv, Script Properties BLOCK_KALENDER_ID/BLOCK_SYNK_SENAST, egen kalender "Pipeline – restid" som aldrig läses, admin-endpoint block-sync, ping.blockSynk, calendars-list blockKalender – valfria fält: MIN_SCRIPT_VERSION förblir 4; A61, CJ:s beslut 2026-09-17); 10 = ren restid (råa Distance Matrix-minuter, inget påslag), marginal efter varje möte (installningar.marginalFysisktMin/marginalOnlineMin → effektiv buffert cooldownMin i Calendar.gs finalizeBusy; ersätter marginalMinstMin/marginalProcent) och restid delad runt platslösa möten (availability slot.restid.inDelar/utDelar + data.pausMin, calendar-preview resor[].delar – valfria fält, inBlock/utBlock = yttre spann: MIN_SCRIPT_VERSION förblir 4; CJ:s beslut 2026-09-17); 9 = manuell restidsklassning + rättad adress per händelse (KALENDER_IGNORERA-postens valfria online/adress/lat/lng/omrade och lage 'restid', Calendar.gs applyIgnore; calendar-preview overrideOnline/overrideAdress/serieId, geocode.omrade – valfria fält: MIN_SCRIPT_VERSION förblir 4); 8 = online-möten ("Microsoft Teams-möte" m.fl. i platsfältet är aldrig restidsankare, Calendar.gs kalLooksLikePlace – MIN_SCRIPT_VERSION förblir 4); MIN_SCRIPT_VERSION i index.html/bokning.js jämförs mot denna (4.12); 3 = M5 (purge, dailyMaintenance, nya ping-fält); 4 = steg 2a (egen-rebook/egen-cancel/egen-update, hello.egna med kanAndras); 5 = steg 2b (adressforslag via Places, placeId i geokodning – valfritt: MIN_SCRIPT_VERSION förblir 4); 6 = steg 2c (block.omrade i availability, omrade + resor i calendar-preview – valfria fält: MIN_SCRIPT_VERSION förblir 4); 7 = optimering (inkorg i CacheService, en cache-filskrivning per körning, ICS-värmare) + restid tydlig (paus-block, 0 min samma adress, Teams-fix, mejltext) + rebook släpper reservation (valfria fält: MIN_SCRIPT_VERSION förblir 4)
 const TZ = 'Europe/Stockholm';
 const APP_URL = 'https://speeedfreeak.github.io/telexia-pipeline/';   // länk i notismejlet (4.9)
 const MAX_BODY_BYTES = 16384;                   // body kontrolleras före JSON.parse (4.3)
@@ -122,7 +124,9 @@ const PROP = {
   CACHE_FILE_ID: 'CACHE_FILE_ID',
   INBOX_REV: 'INBOX_REV',           // version 7: rev för den inkorg som senast lades i CacheService (skrivs bara under låset)
   MAPS_API_KEY: 'MAPS_API_KEY',
-  MAPS_DAILY_CAP: 'MAPS_DAILY_CAP'
+  MAPS_DAILY_CAP: 'MAPS_DAILY_CAP',
+  BLOCK_KALENDER_ID: 'BLOCK_KALENDER_ID',     // version 11 (A61): id för kalendern "Pipeline – restid" som scriptet skapar – läses aldrig av readBusy
+  BLOCK_SYNK_SENAST: 'BLOCK_SYNK_SENAST'      // version 11: JSON { ts, in, bort, andrade, kvar, antal, fel } från senaste syncBlock_ (ping.blockSynk.senast)
 };
 const MAPS_DAILY_CAP_DEFAULT = 1000;
 
@@ -186,7 +190,10 @@ const DEFAULT_BOKNINGSINSTALLNINGAR = {
   telexiaEpost: '', notisEpost: '', kontaktuppgifterIKalender: false,
   integritetstext: 'Uppgifterna lagras av Redneck Engineering för att genomföra det bokade mötet och raderas ur bokningssystemet 30 dagar efter mötet. Frågor: {notisEpost}',
   kontaktTextBokare: 'Blev något fel? Mejla CJ på {notisEpost} och ange bokningsnumret {bokningId}.',
-  gallringDagar: 30
+  gallringDagar: 30,
+  // Version 11 (A61): restid- och marginalblock som händelser i den egna kalendern "Pipeline – restid" (kalender-id:t ägs av scriptet,
+  // Script Property BLOCK_KALENDER_ID). Appen skriver fältet, scriptet läser det – aldrig tvärtom.
+  blockSynkAktiv: false
 };
 
 function isPlainObject(v) { return !!v && typeof v === 'object' && !Array.isArray(v); }
@@ -968,9 +975,11 @@ function parseStartField(v, inst, typ) {
   return { datum: p.datum, tid: p.tid, iso: toIsoWithOffset(p.datum, p.tid), ms: d.getTime() };
 }
 
-// Egen kalenderskrivning kräver kalendern med lage 'fullt' (4.7).
+// Egen kalenderskrivning kräver kalendern med lage 'fullt' (4.7). Blockkalendern "Pipeline – restid" (version 11, K6) utesluts
+// oavsett läge: readBusy läser den aldrig, så bokningar skrivna dit vore osynliga som hinder (dubbelbokning).
 function bokningarKalenderId(inst) {
-  const k = (Array.isArray(inst.kalendrar) ? inst.kalendrar : []).find(x => isPlainObject(x) && x.lage === 'fullt' && typeof x.id === 'string' && x.id);
+  const blockId = blockKalenderId_();
+  const k = (Array.isArray(inst.kalendrar) ? inst.kalendrar : []).find(x => isPlainObject(x) && x.lage === 'fullt' && typeof x.id === 'string' && x.id && x.id !== blockId);
   if (!k) fel('E_CALENDAR', 'Ingen kalender för bokningar är vald i Inställningar');
   return k.id;
 }
@@ -1067,7 +1076,9 @@ function handlePing(req, ctx) {
     // dailyMaintenance (V1: triggern kör fortfarande) och antal avstämningsvarningar "saknas i inkorgen" (4.11).
     bokningarIdag: parseInt(getProp('book_count_' + ymdCompact(todayStr())), 10) || 0,
     underhallSenast: getProp(MAINT_PROP_SENAST),
-    avstamningSaknas: avstamningSaknas().antal
+    avstamningSaknas: avstamningSaknas().antal,
+    // Version 11 (A61): blocksynkens status { aktiv, kalenderId, senast:{ ts, in, bort, andrade, kvar, antal, fel } | null } – Inställningar › Kalendrar + Drift.
+    blockSynk: blockSynkForPing_(config)
   };
 }
 // Kontroll av de tre brevlådefilerna (4.2, cachad 10 min per id). Returnerar '' när allt är i ordning, annars '<roll>: <statisk orsak>'.
@@ -1877,7 +1888,8 @@ function handleConfigPush(req, ctx) {
 function configVarningar(cfg) {
   const v = [], inst = cfg.installningar;
   const kal = Array.isArray(inst.kalendrar) ? inst.kalendrar.filter(isPlainObject) : [];
-  const fullt = kal.filter(k => k.lage === 'fullt').length;
+  const blockId = blockKalenderId_();   // version 11 (K6): blockkalendern läses aldrig och kan inte vara bokningskalender (bokningarKalenderId)
+  const fullt = kal.filter(k => k.lage === 'fullt' && String(k.id) !== blockId).length;
   if (fullt !== 1) v.push('Exakt en kalender ska ha läget Bokningar (fullt) – nu ' + fullt);
   if (inst.outlookIcsUrl && !/^https:\/\/\S+$/i.test(String(inst.outlookIcsUrl))) v.push('Fältet Outlook-ICS är inte en https-adress');
   const utanPipeline = cfg.bokare.filter(b => !b.pipelineId).length;
@@ -1888,6 +1900,8 @@ function configVarningar(cfg) {
   if (typUtan) v.push('Mötestyper utan pipeline som inte är globala: ' + typUtan);
   const okandaPl = cfg.bokare.filter(b => b.pipelineId && !cfg.pipelines.some(p => p.id === b.pipelineId)).length;
   if (okandaPl) v.push('Bokare med okänd pipeline: ' + okandaPl);
+  // version 11 (K6): readBusy hoppar över blockkalendern oavsett läge – varna om ett läge ändå satts (appen döljer läge-valet)
+  if (blockId && kal.some(k => String(k.id) === blockId && (k.lage === 'tider' || k.lage === 'fullt'))) v.push('Kalendern "' + BLOCK_KALENDER_NAMN + '" skapas av modulen och läses aldrig – läget ignoreras');
   if (kal.some(k => k.lage === 'tider' || k.lage === 'fullt')) {
     try {
       const kanda = listCalendars().map(k => k.id);
@@ -1899,7 +1913,8 @@ function configVarningar(cfg) {
 }
 
 // ---------- calendars-list (4.4) ----------
-// In:  { adminKey }   Ut: { kalendrar:[{ id, summary, namn, primary, primar, accessRole }] } – primär först, sedan namn.
+// In:  { adminKey }   Ut: { kalendrar:[{ id, summary, namn, primary, primar, accessRole, blockKalender }] } – primär först, sedan namn.
+// blockKalender (version 11, K6) = true för kalendern "Pipeline – restid" (Script Property BLOCK_KALENDER_ID) – appen visar den utan läge-val.
 function handleCalendarsList(req, ctx) {
   authAdmin(req, ctx);
   let lista = [];
@@ -1908,6 +1923,7 @@ function handleCalendarsList(req, ctx) {
 }
 function listCalendars() {
   const out = [];
+  const blockId = blockKalenderId_();
   let pageToken = null, guard = 0;
   do {
     const params = { maxResults: 250 };
@@ -1916,7 +1932,8 @@ function listCalendars() {
     (res && res.items ? res.items : []).forEach(k => {
       if (!k || !k.id || k.deleted === true) return;
       const namn = str(k.summaryOverride) || str(k.summary) || str(k.id);
-      out.push({ id: String(k.id), summary: namn, namn: namn, primary: k.primary === true, primar: k.primary === true, accessRole: str(k.accessRole) });
+      out.push({ id: String(k.id), summary: namn, namn: namn, primary: k.primary === true, primar: k.primary === true, accessRole: str(k.accessRole),
+                 blockKalender: !!blockId && String(k.id) === blockId });
     });
     pageToken = res && res.nextPageToken ? res.nextPageToken : null;
   } while (pageToken && guard++ < 20);
@@ -2723,6 +2740,298 @@ function purgeAnonymiseraHandelse(calId, eventId) {
   catch (e) { return calendarEventGone(e) ? { typ: 'anonymisera', gjort: false, fel: false } : { typ: 'anonymisera', gjort: false, fel: true }; }
 }
 
+// ============================================================
+// Blocksynk (A61, version 11) – restid och marginal som händelser i en egen Google-kalender "Pipeline – restid"
+// ============================================================
+// CJ:s beslut 2026-09-17: "Samtliga block ska synkas med Google-kalendern." Modulens beräknade restidsben (previewResor →
+// resor[].delar, version 10) och marginalen efter varje möte (BusyItem.cooldownMin = effektiv buffert, Calendar.gs finalizeBusy)
+// skrivs som händelser i en EGEN kalender som scriptet skapar första gången (Calendar.Calendars.insert – scopet auth/calendar
+// räcker, inget nytt scope). Kalendern läses ALDRIG av modulen (K6: readBusy hoppar över kalendern vars id === BLOCK_KALENDER_ID
+// oavsett läge, normalizeGoogleEvent hoppar över händelser med private.pipelineBlock === '1') – annars blev blocken hinder/ankare
+// = dubbelräkning. Inga gäster (inget till Outlook), ingen beskrivning, inga kontaktuppgifter; titlarna (kundnamn/händelsetitel)
+// stannar i CJ:s eget konto.
+// Tillstånd (K1): inställningen blockSynkAktiv i config.installningar (appen skriver, scriptet läser); Script Properties
+// BLOCK_KALENDER_ID (kalenderns id, ägs av scriptet) och BLOCK_SYNK_SENAST ({ ts, in, bort, andrade, kvar, antal, fel } – ping.blockSynk.senast).
+// Avstämning (K4): syncBlock_ läser befintliga pipelineBlock-händelser i fönstret, diffar mot de beräknade blocken och gör
+// insert/patch/remove med ett skrivtak per körning (trigger 40, endpoint 80) + tidsbudget – första fyllningen sker i portioner så
+// att Apps Scripts 6-minutersgräns aldrig nås; kvar = ej utförda skrivningar (nästa körning tar dem). Passerade block (före idag)
+// rörs aldrig. Körs av refreshIcsCache var 10:e minut (K5, efter ICS-läsningen) och av admin-endpointen block-sync ("Synka nu").
+// Ofullständig källa (inkorgen oläsbar, eller Outlook-flödet oläsbart utan reservkopia) → körningen hoppas över (hoppad) i stället
+// för att planen på partiell data raderar/patchar riktiga block. Två körningar samtidigt ("Synka nu" under triggern) stoppas av
+// CacheService-flaggan blocksynk:pagar (upptagen) – inget LockService-lås, det skulle blockera reserve/book i upp till 4 minuter.
+// Block (K3): { typ:'restid'|'marginal', datum, start:'HH:MM', slut:'HH:MM' ('24:00' = dygnets slut), titel, ref, nyckel } där
+// nyckel = typ|datum|start|slut|ref (ref = franId>tillId resp. busy.id) – deterministisk, ≤ BLOCK_NYCKEL_MAX tecken, lagras i
+// extendedProperties.private { pipelineBlock:'1', nyckel, typ } så att en oförändrad plan ger noll skrivningar.
+
+const BLOCK_KALENDER_NAMN = 'Pipeline – restid';
+const BLOCK_SYNK_MAX_SKRIV_TRIGGER = 40;            // skrivtak (insert/patch/remove) per triggerkörning
+const BLOCK_SYNK_MAX_SKRIV_ENDPOINT = 80;           // skrivtak per block-sync-anrop ("Synka nu")
+const BLOCK_SYNK_MAX_MS_TRIGGER = 240000;           // tidsbudget för skrivningarna i triggern (6-minutersgränsen; ICS-läsningen ligger före)
+const BLOCK_SYNK_MAX_MS_ENDPOINT = 30000;           // dito i endpointen (appens fetch avbryter efter 45 s) – resten räknas som kvar
+const BLOCK_SYNK_MAX_FEL_I_FOLJD = 5;               // fem Calendar-fel i följd → körningen avbryts (resten räknas som kvar)
+const BLOCK_SYNK_LAS_EFTER_DAGAR = 7;               // befintliga händelser läses t.o.m. horisont+7 så att block bortom en krympt horisont städas
+const BLOCK_TITEL_MAX = 60;                         // händelsens titel inne i blocktexten klipps
+const BLOCK_NYCKEL_MAX = 250;
+const BLOCK_FARG = { restid: '11', marginal: '8' }; // Google colorId: 11 = tomat, 8 = grafit
+const BLOCK_STADAD_CACHE_KEY = 'blocksynk:stadad';  // avstängd synk och fönstret redan tömt → hoppa över Events.list i 6 h
+const BLOCK_PAGAR_CACHE_KEY = 'blocksynk:pagar';    // körning pågår (TTL = tidsbudget + 60 s) → en samtidig körning svarar upptagen utan att skriva
+
+function blockKalenderId_() { return getProp(PROP.BLOCK_KALENDER_ID); }
+function blockSynkAktiv_(config) { return !!(config && config.installningar && config.installningar.blockSynkAktiv === true); }
+function blockSynkSenast_() {
+  try { const o = JSON.parse(getProp(PROP.BLOCK_SYNK_SENAST) || 'null'); return isPlainObject(o) && typeof o.ts === 'string' ? o : null; }
+  catch (e) { return null; }
+}
+// ping.blockSynk (K5): { aktiv, kalenderId, senast: BLOCK_SYNK_SENAST-objektet eller null }. config = null (okonfigurerat) → aktiv false.
+function blockSynkForPing_(config) {
+  return { aktiv: blockSynkAktiv_(config), kalenderId: blockKalenderId_(), senast: blockSynkSenast_() };
+}
+// Kalendern (K2): finns propertyn kontrolleras att kalendern finns (Calendars.get); 404 → skapa ny och skriv om propertyn (annat fel =
+// tillfälligt → befintligt id behålls). Saknas propertyn skapas kalendern bara när skapa = true (synken på); vid städning efter
+// avstängning (skapa = false) och borttagen kalender rensas propertyn i stället. → id eller '' (inget att göra / skapandet misslyckades).
+function blockKalenderSakerstall_(skapa) {
+  const id = blockKalenderId_();
+  if (id) {
+    try { Calendar.Calendars.get(id); return id; }
+    catch (e) { if (!calendarEventGone(e)) return id; }
+    if (!skapa) { try { deleteProp(PROP.BLOCK_KALENDER_ID); } catch (e) { /* best effort */ } return ''; }
+  }
+  if (!skapa) return '';
+  try {
+    const k = Calendar.Calendars.insert({ summary: BLOCK_KALENDER_NAMN, timeZone: TZ });
+    if (!k || !k.id) return '';
+    setProp(PROP.BLOCK_KALENDER_ID, String(k.id));
+    return String(k.id);
+  } catch (e) { return ''; }
+}
+// Titel för ett busy-segment inne i blocktexten: kundnamn (annars 'Bokning') för modulens bokningar (finalizeBusy rensar kundnamn på
+// poster utan ägande bokare, därför slås det upp i inkorgen igen), händelsens summary för privat/ICS; < > strippade, ≤ BLOCK_TITEL_MAX.
+function syncBlockTitel_(x, kundnamn) {
+  let t = '';
+  if (x.kalla === 'bokningar') t = (x.bokningId && kundnamn[x.bokningId]) || x.kundnamn || 'Bokning';
+  else t = x.summary || '';
+  t = cleanText(String(t)).replace(/[<>]/g, ' ').replace(/\s+/g, ' ').trim();
+  return (t || 'Möte').slice(0, BLOCK_TITEL_MAX);
+}
+function syncBlockNyckel_(b) {
+  const huvud = b.typ + '|' + b.datum + '|' + b.start + '|' + b.slut + '|';
+  return huvud + String(b.ref || '').slice(0, Math.max(0, BLOCK_NYCKEL_MAX - huvud.length));
+}
+// Blocken för fönstret [idag, horisontTom] (samma horisont som bokningen – INTE calendar-previews +7). Reservationer är inte med
+// (opts.reservationer: [] – de lever 5 min och skulle flappa). Samma kedja som handleCalendarPreview: buildBusyList → geokodaAnkare
+// (högst AVAIL_PREVIEW_MAX_GEO nya Geocoding-anrop per körning) → previewResor (Distance Matrix via travelSecondsForPairs_, högst
+// AVAIL_PREVIEW_MAX_PAR nya par – resten 'okand' den här körningen och rätt nästa; cache-träffar kostar inget).
+// (a) ett restid-block per resa och del: titel '🚗 Restid från bas → X' / 'X → bas' / 'X → Y' + ' (N min[, schablon|, okänd])', '⚠ ' före vid konflikt.
+// (b) ett marginal-block per räknad, tidsatt post med cooldownMin > 0 som slutar före 24:00: '⏱ Marginal efter X (N min)'.
+// → { block:[{ typ, datum, start, slut, titel, ref, nyckel }], from, to, varningar } – dubbletter på nyckel och tomma intervall utelämnas;
+// varningar = buildBusyList.varningar (syncBlock_ hoppar över skrivningarna när källan är ofullständig).
+function syncBlockBerakna_(config, inbox) {
+  const inst = config.installningar;
+  const from = todayStr(), to = horisontTomDatum(inst);
+  const busyAlla = buildBusyList(from, to, { config: config, inbox: inbox, farsk: false, reservationer: [] });
+  const varningar = Array.isArray(busyAlla.varningar) ? busyAlla.varningar.slice() : [];
+  const busyRa = busyAlla.filter(x => x && x.kalla !== 'reservation');
+  let geoNya = 0;
+  const busy = geokodaAnkare(busyRa, adress => {
+    const g = geocodeAddress(adress, { utanApi: geoNya >= AVAIL_PREVIEW_MAX_GEO });
+    if (g && g.nyttAnrop === true) geoNya++;
+    return g;
+  });
+  const resor = previewResor(busy, mapCfg(inst), par => travelSecondsForPairs_(par, AVAIL_PREVIEW_MAX_PAR)).resor;
+  const kundnamn = {};
+  ((inbox && inbox.bokningar) || []).forEach(b => { if (b && b.bokningId && b.kund && b.kund.namn) kundnamn[String(b.bokningId)] = String(b.kund.namn); });
+  const titel = {};
+  busy.forEach(x => { if (x && x.id && titel[x.id] === undefined) titel[x.id] = syncBlockTitel_(x, kundnamn); });
+  const namn = id => titel[id] || 'Möte';
+  const block = [], sedda = {};
+  const lagg = b => {
+    if (!DATUM_RE.test(b.datum) || !(b.slut > b.start)) return;   // 'HH:MM'-strängar jämförs korrekt ('24:00' > '23:30')
+    b.nyckel = syncBlockNyckel_(b);
+    if (sedda[b.nyckel]) return;
+    sedda[b.nyckel] = true;
+    block.push(b);
+  };
+  resor.forEach(r => {
+    const rubrik = (r.konflikt ? '⚠ ' : '') + '🚗 Restid ' +
+      (r.franId === 'bas' ? 'från bas → ' + namn(r.tillId) : r.tillId === 'bas' ? namn(r.franId) + ' → bas' : namn(r.franId) + ' → ' + namn(r.tillId)) +
+      ' (' + r.minuter + ' min' + (r.status === 'schablon' ? ', schablon' : r.status === 'okand' ? ', okänd' : '') + ')';
+    const delar = Array.isArray(r.delar) && r.delar.length ? r.delar : [{ start: r.start, slut: r.slut }];
+    delar.forEach(d => lagg({ typ: 'restid', datum: r.datum, start: String(d.start), slut: String(d.slut), titel: rubrik, ref: r.franId + '>' + r.tillId }));
+  });
+  busy.forEach(x => {
+    if (!x || x.ignore || x.heldag || !(x.cooldownMin > 0) || !(x.slutMin < 1440)) return;
+    lagg({ typ: 'marginal', datum: x.datum, start: minToHhmm(x.slutMin), slut: minToHhmm(Math.min(1440, x.slutMin + x.cooldownMin)),
+           titel: '⏱ Marginal efter ' + namn(x.id) + ' (' + x.cooldownMin + ' min)', ref: String(x.id || '') });
+  });
+  return { block, from, to, varningar };
+}
+// Händelseresurs för ett block (K4): start/slut som dateTime med TZ ('24:00' → nästa dags 00:00 via kalIsoAt), färg per typ, inga
+// påminnelser, upptagen (opaque), INGA attendees, INGEN description.
+function syncBlockResurs_(b) {
+  return {
+    summary: b.titel,
+    start: { dateTime: kalIsoAt(b.datum, tidToMin(b.start)), timeZone: TZ },
+    end: { dateTime: kalIsoAt(b.datum, tidToMin(b.slut)), timeZone: TZ },
+    colorId: BLOCK_FARG[b.typ] || BLOCK_FARG.marginal,
+    reminders: { useDefault: false },
+    transparency: 'opaque',
+    extendedProperties: { private: { pipelineBlock: '1', nyckel: b.nyckel, typ: b.typ } }
+  };
+}
+// Befintliga blockhändelser i kalendern för [timeMin, timeMax): Events.list med privateExtendedProperty pipelineBlock=1, bara de fält
+// som behövs, pageToken-loop. → [{ id, summary, nyckel, datum }] (datum ur start.dateTime, reserv ur nyckeln). Kastar vid API-fel.
+function syncBlockLasBefintliga_(calId, timeMin, timeMax) {
+  const out = [];
+  let pageToken = null, guard = 0;
+  do {
+    const params = { timeMin, timeMax, singleEvents: true, maxResults: 2500, showDeleted: false, privateExtendedProperty: 'pipelineBlock=1',
+      fields: 'nextPageToken,items(id,status,summary,start,end,extendedProperties/private)' };
+    if (pageToken) params.pageToken = pageToken;
+    const res = Calendar.Events.list(calId, params);
+    (res && res.items ? res.items : []).forEach(ev => {
+      if (!ev || !ev.id || ev.status === 'cancelled') return;
+      const priv = (ev.extendedProperties && ev.extendedProperties.private) || {};
+      const nyckel = str(priv.nyckel);
+      const startIso = ev.start && ev.start.dateTime ? String(ev.start.dateTime) : '';
+      const slutIso = ev.end && ev.end.dateTime ? String(ev.end.dateTime) : '';
+      const datum = (startIso ? fromIso(startIso).datum : '') || nyckel.split('|')[1] || '';
+      // start/slut i minuter från blockets dygn (slut på nästa dygn = 1440) – ett block som CJ råkat dra i Google Kalender ska rättas tillbaka
+      const startMin = startIso ? tidToMin(fromIso(startIso).tid) : NaN;
+      const slutP = slutIso ? fromIso(slutIso) : null;
+      const slutMin = slutP ? (slutP.datum > datum ? 1440 : tidToMin(slutP.tid)) : NaN;
+      out.push({ id: String(ev.id), summary: str(ev.summary), nyckel, datum, startMin, slutMin });
+    });
+    pageToken = res && res.nextPageToken ? res.nextPageToken : null;
+  } while (pageToken && guard++ < 20);
+  return out;
+}
+// Avstämningen (K4). opts: { maxSkriv (default 40), maxMs (default 240 s), config (redan laddad) }.
+// → { ok, aktiv, in, bort, andrade, kvar, antal, kalenderId, fel, hoppad, upptagen }. ok = körningen gick att genomföra utan
+// Calendar-fel (kvar > 0 är inte ett fel – nästa körning fortsätter). Synken av: finns ett kalender-id tas alla pipelineBlock-händelser
+// i fönstret bort (samma tak), annars görs inget.
+// Ofullständig källa → hoppad ('inkorg' | 'outlook', ok:false, kvar = antal, inga skrivningar): inkorgen oläsbar (kundnamn skulle bli
+// 'Bokning' → titelflapp) eller Outlook-flödet oläsbart UTAN reservkopia i cache-filen (alla Outlook-block skulle raderas och läggas in
+// igen när flödet är tillbaka). Med reservkopia (readIcs.kalla 'reserv' med hamtadTs) synkas planen som bokningen själv använder.
+// Samtidig körning (CacheService-flaggan BLOCK_PAGAR_CACHE_KEY) → upptagen:true, inga skrivningar, ingen BLOCK_SYNK_SENAST.
+// Ordning: bort → in → andrade (ett flyttat möte får sitt gamla block bort innan det nya läggs in). Varje Calendar-anrop i try/catch:
+// fel räknas och avbryter inte körningen; BLOCK_SYNK_MAX_FEL_I_FOLJD fel i följd avbryter (resten = kvar). 404/410 vid remove = redan
+// borta (räknas som utförd); vid patch = händelsen är borta (nästa körning lägger in den); vid insert = kalendern försvann mitt i
+// körningen → fel + avbrott (nästa körning skapar en ny via blockKalenderSakerstall_). BLOCK_SYNK_SENAST skrivs och en loggrad
+// { trigger:'syncBlock', ok, ms, in, bort, andrade, kvar, antal, fel, hoppad } loggas när kalendern rörts – aldrig titlar.
+function syncBlock_(opts) {
+  opts = opts || {};
+  const t0 = Date.now();
+  const maxSkriv = Number(opts.maxSkriv) > 0 ? Number(opts.maxSkriv) : BLOCK_SYNK_MAX_SKRIV_TRIGGER;
+  const maxMs = Number(opts.maxMs) > 0 ? Number(opts.maxMs) : BLOCK_SYNK_MAX_MS_TRIGGER;
+  const r = { ok: true, aktiv: false, in: 0, bort: 0, andrade: 0, kvar: 0, antal: 0, kalenderId: '', fel: 0, hoppad: '', upptagen: false };
+  let rord = false;   // kalendern har rörts (eller skulle ha rörts) → BLOCK_SYNK_SENAST + loggrad
+  let cache = null, pagar = false;
+  try {
+    const config = opts.config || loadConfig();
+    const aktiv = blockSynkAktiv_(config);
+    r.aktiv = aktiv;
+    if (!aktiv && !blockKalenderId_()) return r;                                            // av och aldrig skapad → inget att göra
+    cache = CacheService.getScriptCache();
+    if (!aktiv) { try { if (cache.get(BLOCK_STADAD_CACHE_KEY)) return r; } catch (e) { /* cache är best effort */ } }
+    else { try { cache.remove(BLOCK_STADAD_CACHE_KEY); } catch (e) { /* best effort */ } }
+    // Pågår-flagga: "Synka nu" samtidigt med triggern skulle annars göra samma diff och lägga in samma block två gånger.
+    try {
+      if (cache.get(BLOCK_PAGAR_CACHE_KEY)) { r.upptagen = true; return r; }
+      cache.put(BLOCK_PAGAR_CACHE_KEY, '1', Math.ceil(maxMs / 1000) + 60);
+      pagar = true;
+    } catch (e) { /* best effort – utan cache körs ändå */ }
+    rord = true;
+    const calId = blockKalenderSakerstall_(aktiv);
+    if (!calId) { if (aktiv) { r.ok = false; r.fel++; } else rord = false; return r; }   // av + kalendern borta → propertyn rensad, inget att städa
+    r.kalenderId = calId;
+    const inst = config.installningar, idag = todayStr(), horisontTom = horisontTomDatum(inst);
+    let onskade = [];
+    if (aktiv) {
+      let inbox = null;
+      try { inbox = readInbox(); } catch (e) { inbox = null; }
+      if (!inbox) { r.hoppad = 'inkorg'; r.ok = false; const prev = blockSynkSenast_(); r.antal = prev ? (prev.antal | 0) : 0; r.kvar = r.antal; return r; }   // utan kundnamn blev titlarna 'Bokning' – vänta; statusen behåller senaste antal (allt "väntar")
+      const ber = syncBlockBerakna_(config, inbox);
+      onskade = ber.block;
+      if (ber.varningar.some(v => /^Inkorgen kunde inte läsas/.test(v))) r.hoppad = 'inkorg';
+      else if (ber.varningar.some(v => /^Outlook-flödet kunde inte läsas/.test(v))) {
+        let ics = null;
+        try { ics = readIcs(config, { farsk: false }); } catch (e) { ics = null; }     // memo per körning (KAL_ICS_MEMO) eller ICS-cache/reserv – ingen hämtning under lås
+        if (!ics || !ics.hamtadTs) r.hoppad = 'outlook';                                 // ingen reservkopia → planen saknar Outlook-mötena
+      }
+      if (r.hoppad) { r.ok = false; r.antal = onskade.length; r.kvar = r.antal; return r; }
+    }
+    r.antal = onskade.length;
+    const timeMin = toIsoWithOffset(addDays(idag, -1), '00:00');
+    const timeMax = toIsoWithOffset(addDays(horisontTom, BLOCK_SYNK_LAS_EFTER_DAGAR + 1), '00:00');
+    let befintliga = null;
+    try { befintliga = syncBlockLasBefintliga_(calId, timeMin, timeMax); }
+    catch (e) { r.ok = false; r.fel++; r.kvar = r.antal; return r; }
+    // Diff: nyckel → befintlig händelse; trasiga (utan nyckel) och dubbletter tas bort; passerade block (före idag) rörs aldrig.
+    const perNyckel = {}, bortLista = [], inLista = [], patchLista = [];
+    befintliga.forEach(ev => {
+      if (ev.datum && ev.datum < idag) return;
+      if (!ev.nyckel || perNyckel[ev.nyckel]) { bortLista.push(ev); return; }
+      perNyckel[ev.nyckel] = ev;
+    });
+    const onskadNyckel = {};
+    onskade.forEach(b => {
+      onskadNyckel[b.nyckel] = true;
+      const ev = perNyckel[b.nyckel];
+      if (!ev) inLista.push(b);
+      else if (ev.summary !== b.titel || ev.startMin !== tidToMin(b.start) || ev.slutMin !== tidToMin(b.slut)) patchLista.push({ ev, b });   // titel eller (manuellt flyttad) tid avviker
+    });
+    Object.keys(perNyckel).forEach(n => { if (!onskadNyckel[n]) bortLista.push(perNyckel[n]); });
+    const jobb = [];
+    bortLista.forEach(ev => jobb.push({ typ: 'bort', ev }));
+    inLista.forEach(b => jobb.push({ typ: 'in', b }));
+    patchLista.forEach(p => jobb.push({ typ: 'andrade', ev: p.ev, b: p.b }));
+    let forsok = 0, utforda = 0, felIFoljd = 0;
+    for (let i = 0; i < jobb.length; i++) {
+      if (forsok >= maxSkriv || Date.now() - t0 > maxMs || felIFoljd >= BLOCK_SYNK_MAX_FEL_I_FOLJD) break;
+      const j = jobb[i];
+      forsok++;
+      try {
+        if (j.typ === 'bort') Calendar.Events.remove(calId, j.ev.id);
+        else if (j.typ === 'in') Calendar.Events.insert(syncBlockResurs_(j.b), calId);
+        else { const res = syncBlockResurs_(j.b); Calendar.Events.patch({ summary: res.summary, start: res.start, end: res.end }, calId, j.ev.id); }
+        r[j.typ]++; utforda++; felIFoljd = 0;
+      } catch (e) {
+        if (calendarEventGone(e)) {
+          if (j.typ === 'bort') { r.bort++; utforda++; felIFoljd = 0; continue; }         // redan borta = utförd
+          if (j.typ === 'andrade') { felIFoljd = 0; continue; }                            // händelsen borta – nästa körning lägger in den
+          r.fel++; break;                                                                  // insert 404 = kalendern borta → avbryt, inga fler anrop
+        }
+        r.fel++; felIFoljd++;
+      }
+    }
+    r.kvar = jobb.length - utforda;
+    if (r.fel) r.ok = false;
+    if (!aktiv && !jobb.length) { try { cache.put(BLOCK_STADAD_CACHE_KEY, '1', TTL_D_S); } catch (e) { /* best effort */ } }
+    return r;
+  } catch (e) {
+    r.ok = false; r.fel++;
+    return r;
+  } finally {
+    if (pagar) { try { cache.remove(BLOCK_PAGAR_CACHE_KEY); } catch (e) { /* TTL:n tar den annars */ } }
+    if (rord) {
+      try { setProp(PROP.BLOCK_SYNK_SENAST, JSON.stringify({ ts: nowIso(), in: r.in, bort: r.bort, andrade: r.andrade, kvar: r.kvar, antal: r.antal, fel: r.fel, hoppad: r.hoppad })); } catch (e) { /* best effort */ }
+      console.log(JSON.stringify({ trigger: 'syncBlock', ok: r.ok, ms: Date.now() - t0, in: r.in, bort: r.bort, andrade: r.andrade, kvar: r.kvar, antal: r.antal, fel: r.fel, hoppad: r.hoppad }));
+    }
+  }
+}
+// ---------- block-sync (K5, version 11) ----------
+// In:  { adminKey }   Ut: { ok, aktiv, in, bort, andrade, kvar, antal, kalenderId, fel, hoppad, upptagen, kalenderNamn:'Pipeline – restid' }
+// "Synka nu" i appen: samma avstämning som triggern med högre skrivtak (BLOCK_SYNK_MAX_SKRIV_ENDPOINT) och kortare tidsbudget
+// (appens fetch avbryter efter 45 s). Inget LockService-lås (inkorgen läses via cache, skrivningarna sker i modulens egen kalender);
+// pågår triggerns körning svarar syncBlock_ upptagen:true utan att skriva.
+function handleBlockSync(req, ctx) {
+  authAdmin(req, ctx);
+  const config = loadConfig(ctx);
+  const r = syncBlock_({ maxSkriv: BLOCK_SYNK_MAX_SKRIV_ENDPOINT, maxMs: BLOCK_SYNK_MAX_MS_ENDPOINT, config: config });
+  r.kalenderNamn = BLOCK_KALENDER_NAMN;
+  return r;
+}
+
 // Routingtabell (4.4). Nycklarna är action-värdena exakt som klienterna skickar dem.
 const HANDLERS = {
   'ping': handlePing,
@@ -2745,14 +3054,15 @@ const HANDLERS = {
   'reject': handleReject,
   'cancel': handleCancel,
   'rebook': handleRebook,
-  'purge': handlePurge
+  'purge': handlePurge,
+  'block-sync': handleBlockSync
 };
 
 // ============================================================
 // Triggers och underhåll (4.11) – install() körs en gång manuellt av CJ vid deploy (auktoriserar även scopes) och
 // därefter idempotent av setup (Anslut-guiden). dailyMaintenance (M5): gallring av inkorg och cache-fil, räknare i Script
-// Properties, avstämning kalender ↔ inkorg. refreshIcsCache (version 7): ICS-värmare var 10:e minut. Båda loggar EN rad
-// { trigger, ok, ms, … } utan personuppgifter.
+// Properties, avstämning kalender ↔ inkorg. refreshIcsCache (version 7): ICS-värmare var 10:e minut, som sedan version 11 även
+// kör blocksynken (syncBlock_, A61) efter ICS-läsningen. Alla loggar EN rad { trigger, ok, ms, … } utan personuppgifter.
 // ============================================================
 
 const ICS_VARMARE_MIN = 10;                        // trigger var 10:e minut (everyMinutes tillåter 1, 5, 10, 15, 30)
@@ -2773,22 +3083,18 @@ function install() {
 // och trigger-runtime ≈ några sekunder per körning (gränsen är 90 min/dygn). Utan outlookIcsUrl gör körningen inget.
 // Hoppar över när ics:meta.hamtadTs är yngre än ICS_VARMARE_FARSK_MS och busy-indexet finns (ett anrop hann hämta nyss).
 // Fel fäller aldrig (try/catch) – readIcs sätter själv felmeta/reserv. Loggrad { trigger:'refreshIcsCache', ok, ms, kalla } utan personuppgifter.
+// Version 11 (A61, K5): EFTER ICS-läsningen körs blocksynken syncBlock_({ maxSkriv: 40 }) i egen try/catch – bara när blockSynkAktiv
+// eller när ett kalender-id finns (städning efter avstängning). Den har sin egen loggrad; ICS-radens ok/kalla påverkas aldrig av den.
 function refreshIcsCache() {
   const t0 = Date.now();
-  let ok = true, kalla = 'hoppad';
+  let ok = true, kalla = 'hoppad', config = null;
   try {
     if (typeof kalResetMemo_ === 'function') kalResetMemo_();
     if (typeof availResetMemo_ === 'function') availResetMemo_();
     brevladaResetMemo_();
-    const config = loadConfig();
-    if (!str(config.installningar.outlookIcsUrl)) { kalla = 'ingen'; return; }
-    const cache = CacheService.getScriptCache();
-    let meta = null;
-    try { const m = cache.get(KAL_ICS_META_KEY); meta = m ? JSON.parse(m) : null; } catch (e) { meta = null; }   // nycklarna ägs av Calendar.gs
-    const hamtadMs = meta && typeof meta.hamtadTs === 'string' && meta.hamtadTs ? new Date(meta.hamtadTs).getTime() : NaN;
-    if (!isNaN(hamtadMs) && Date.now() - hamtadMs < ICS_VARMARE_FARSK_MS && cache.get(KAL_ICS_CACHE_KEY)) return;
-    const res = readIcs(config, { farsk: true });
-    ok = !!(res && res.ok); kalla = res ? str(res.kalla) : '';
+    config = loadConfig();
+    const res = refreshIcsLas_(config);
+    ok = res.ok; kalla = res.kalla;
   } catch (e) {
     if (errorCode(e) === 'E_SETUP') kalla = 'ingen';   // okonfigurerat script → tyst hoppad
     else { ok = false; kalla = 'fel'; }
@@ -2796,6 +3102,25 @@ function refreshIcsCache() {
     if (typeof availFlushGeokod_ === 'function') availFlushGeokod_();   // pending-poster (om några) tappas aldrig
     console.log(JSON.stringify({ trigger: 'refreshIcsCache', ok: ok, ms: Date.now() - t0, kalla: kalla }));
   }
+  if (!config) return;
+  try {
+    if (blockSynkAktiv_(config) || blockKalenderId_()) syncBlock_({ maxSkriv: BLOCK_SYNK_MAX_SKRIV_TRIGGER, maxMs: BLOCK_SYNK_MAX_MS_TRIGGER, config: config });
+  } catch (e) {
+    console.log(JSON.stringify({ trigger: 'syncBlock', ok: false, ms: 0, fel: 1, klass: felKlass(e) }));
+  } finally {
+    if (typeof availFlushGeokod_ === 'function') availFlushGeokod_();   // geokodaAnkare i blocksynken kan ha lagt pending-poster
+  }
+}
+// ICS-delen av värmaren → { ok, kalla:'ingen'|'hoppad'|<readIcs.kalla>|'' }.
+function refreshIcsLas_(config) {
+  if (!str(config.installningar.outlookIcsUrl)) return { ok: true, kalla: 'ingen' };
+  const cache = CacheService.getScriptCache();
+  let meta = null;
+  try { const m = cache.get(KAL_ICS_META_KEY); meta = m ? JSON.parse(m) : null; } catch (e) { meta = null; }   // nycklarna ägs av Calendar.gs
+  const hamtadMs = meta && typeof meta.hamtadTs === 'string' && meta.hamtadTs ? new Date(meta.hamtadTs).getTime() : NaN;
+  if (!isNaN(hamtadMs) && Date.now() - hamtadMs < ICS_VARMARE_FARSK_MS && cache.get(KAL_ICS_CACHE_KEY)) return { ok: true, kalla: 'hoppad' };
+  const res = readIcs(config, { farsk: true });
+  return { ok: !!(res && res.ok), kalla: res ? str(res.kalla) : '' };
 }
 
 function dailyMaintenance() {

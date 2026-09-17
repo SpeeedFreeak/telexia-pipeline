@@ -3,7 +3,8 @@
  *
  * Uppdelning:
  *   1. RENA FUNKTIONER (inga Apps Script-tjänster – kan enhetstestas i Node):
- *      parseIcs, expandRrule, icsInstances, normalizeGoogleEvent, normalizeIcsItem,
+ *      parseIcs, expandRrule, icsInstances, normalizeGoogleEvent (hoppar över modulens egna blockhändelser private.pipelineBlock === '1',
+ *      version 11), normalizeIcsItem,
  *      reservationToBusy, inboxBookingToBusy, mergeBusy, applyIgnore (ignorera/räkna + restid-override, version 9), finalizeBusy
  *      (härledda fält + effektiv buffert cooldownMin = max(cooldown, marginal) – version 10), busyForDay.
  *   2. WRAPPERS runt Apps Script-tjänster (Calendar advanced service v3, UrlFetchApp, CacheService,
@@ -34,6 +35,11 @@
  *   och speglas i calendar-preview som overrideOnline/overrideAdress (Code.gs previewExport).
  *
  * Inget av det som läses här loggas: ICS-url, titlar och platser stannar i minnet/CacheService.
+ *
+ * Blocksynk (version 11, A61, K6): kalendern "Pipeline – restid" (Script Property BLOCK_KALENDER_ID, Code.gs blockKalenderId_) innehåller
+ * modulens EGNA restid-/marginalblock och läses aldrig – readBusy hoppar över den oavsett läge och normalizeGoogleEvent släpper
+ * igenom inga händelser med extendedProperties.private.pipelineBlock === '1' (skulle någon ändå ha lagt dem i en läst kalender).
+ * Annars blev blocken hinder/ankare = dubbelräkning.
  */
 
 // ---------- Konstanter ----------
@@ -184,6 +190,7 @@ function normalizeGoogleEvent(ev, kalla, opts) {
   if (att.some(a => a && a.self && a.responseStatus === 'declined')) return [];
   const start = ev.start || {}, end = ev.end || {};
   const priv = (ev.extendedProperties && ev.extendedProperties.private) || {};
+  if (priv.pipelineBlock === '1') return [];                                 // modulens eget restid-/marginalblock (version 11) – aldrig ett hinder
   const bokningId = kalla === 'bokningar' ? String(priv.bokningId || '') : '';
   const motestypId = kalla === 'bokningar' ? String(priv.motestypId || '') : '';
   const eventId = String(ev.id || '');
@@ -544,9 +551,13 @@ function icsInstances(parsed, fromDatum, toDatum, opts) {
   return { handelser, varningar };
 }
 
+/** Modulens egna blocktitlar (Code.gs syncBlockBerakna_, version 11): '🚗 Restid …' / '⏱ Marginal efter …', ev. med '⚠ ' först.
+ *  K6 för ICS-vägen: speglar Outlook någon gång kalendern "Pipeline – restid" får blocken aldrig komma tillbaka som hinder. */
+const KAL_BLOCK_TITEL_RE = /^(?:⚠ )?(?:🚗 Restid |⏱ Marginal efter )/;
 /** Reducerad ICS-post → BusyItem-segment. opts: { raknaPreliminara:bool } */
 function normalizeIcsItem(h, opts) {
   opts = opts || {};
+  if (KAL_BLOCK_TITEL_RE.test(String(h.summary || ''))) return [];        // modulens eget restid-/marginalblock speglat via Outlook (K6)
   const preliminar = !!h.preliminar;
   const base = {
     id: 'ics:' + h.uid + (h.heldag ? ':' + h.start : ':' + String(h.start).slice(0, 16)),
@@ -887,6 +898,10 @@ function sparaIcsReserv_(reserv, meta) {
 }
 
 /** Konfig och inkorg ägs av Code.gs (loadConfig / readInbox). */
+// Blockkalenderns id (version 11, Code.gs blockKalenderId_ → Script Property BLOCK_KALENDER_ID); '' när funktionen saknas (Node-test) eller inget id finns.
+function kalBlockKalenderId_() {
+  try { return typeof blockKalenderId_ === 'function' ? String(blockKalenderId_() || '') : ''; } catch (err) { return ''; }
+}
 function kalConfig_(opts) {
   if (opts && opts.config) return opts.config;
   if (typeof loadConfig !== 'function') throw kalFel_('E_SETUP', 'Konfigurationen är inte tillgänglig');
@@ -1145,8 +1160,10 @@ function readBusy(fran, till, opts) {
   const timeMin = rfc3339_(new Date(toIsoWithOffset(fran, '00:00')));
   const timeMax = rfc3339_(new Date(toIsoWithOffset(addDays(till, 1), '00:00')));
   const items = [];
+  const blockId = kalBlockKalenderId_();
   (inst.kalendrar || []).forEach(k => {
     if (!k || !k.id) return;
+    if (blockId && String(k.id) === blockId) return;   // version 11 (K6): modulens egen blockkalender läses aldrig, oavsett läge
     const lage = k.lage || 'ingen';
     if (lage !== 'tider' && lage !== 'fullt') return;
     const kalla = lage === 'fullt' ? 'bokningar' : 'privat';

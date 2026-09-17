@@ -344,6 +344,8 @@
   .bok-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 10px; }
   .bok-grid .field { margin-bottom: 0; }
   .bok-muted { color: #6b7280; font-size: 11px; }
+  .bok-muted.ok { color: #34d399; }
+  .bok-muted.warn { color: #fbbf24; }
   .bok-note { font-size: 11px; color: #6b7280; margin-top: 10px; }
   .check-row { display: flex; align-items: center; gap: 6px; font-size: 13px; color: #e5e7eb; margin: 4px 0; cursor: pointer; }
   .check-row input[type="checkbox"] { width: auto; margin: 0; }
@@ -1046,7 +1048,8 @@ const MIN_SCRIPT_VERSION = 4;     // 4 = steg 2a: bokarens självservice (egen-r
 const PURGE_SCRIPT_VERSION = 3;   // scriptversion med purge på riktigt (M5); äldre script → radering av processer/kunder med bokningar avbryts (Drift-panelen varnar)
 const SJALVSERVICE_SCRIPT_VERSION = 4;   // scriptversion med bokarens självservice (steg 2a); äldre script → bokningssidan saknar Omboka/Ändra/Avboka (Drift-panelen varnar)
 const ADRESSFORSLAG_SCRIPT_VERSION = 5;   // scriptversion med adressförslag (steg 2b, 'adressforslag'); äldre script → fritext utan fel (Drift-panelen visar "Adressförslag: av")
-const BOK_TIMEOUT_MS = { hello: 15000, availability: 15000, geocode: 15000, ping: 15000, adressforslag: 10000 };   // övriga (skrivande) 45 000
+const BLOCKSYNK_SCRIPT_VERSION = 11;   // scriptversion med blocksynk till Google Kalender (A61, 'block-sync' + ping.blockSynk); äldre script → inställningen har ingen verkan (Drift-panelen varnar)
+const BOK_TIMEOUT_MS = { hello: 15000, availability: 15000, geocode: 15000, ping: 15000, adressforslag: 10000, 'block-sync': 180000 };   // övriga (skrivande) 45 000; block-sync (K4/K5): upp till 80 kalenderskrivningar + restidsberäkning i samma körning (Apps Script-tak 6 min)
 function bokScriptUrl() {
   const u = (typeof BOKNINGSINSTALLNINGAR === 'object' && BOKNINGSINSTALLNINGAR) ? BOKNINGSINSTALLNINGAR.scriptUrl : '';
   return /^https:\/\/script\.google\.com\/macros\/s\/[A-Za-z0-9_-]+\/exec$/.test(String(u || '')) ? u : BOK_SCRIPT_URL;
@@ -1407,6 +1410,9 @@ const DEFAULT_BOKNINGSINSTALLNINGAR = {
   kalendrar: [],
   outlookIcsUrl: '', raknaPreliminaraOutlook: false,
   telexiaEpost: '', notisEpost: '', kontaktuppgifterIKalender: false,
+  // Version 11 (A61, CJ 2026-09-17): restids- och marginalblock synkas till en egen Google-kalender "Pipeline – restid" som scriptet skapar
+  // och äger (kalender-id:t ligger i Script Property BLOCK_KALENDER_ID, aldrig i config). Modulen läser aldrig den kalendern (K6).
+  blockSynkAktiv: false,
   integritetstext: 'Uppgifterna lagras av Redneck Engineering för att genomföra det bokade mötet och raderas ur bokningssystemet 30 dagar efter mötet. Frågor: {notisEpost}',
   kontaktTextBokare: 'Blev något fel? Mejla CJ på {notisEpost} och ange bokningsnumret {bokningId}.',
   gallringDagar: 30
@@ -1592,6 +1598,7 @@ function migrateBokning() {
     BOKNINGSINSTALLNINGAR.bokningSidaUrl = DEFAULT_BOKNINGSINSTALLNINGAR.bokningSidaUrl;
   }
   if (!Array.isArray(BOKNINGSINSTALLNINGAR.kalendrar)) BOKNINGSINSTALLNINGAR.kalendrar = [];
+  if (typeof BOKNINGSINSTALLNINGAR.blockSynkAktiv !== 'boolean') BOKNINGSINSTALLNINGAR.blockSynkAktiv = false;   // version 11 (A61): blocksynk är av tills CJ slår på den
   // Version 10: marginal efter möte (fysiskt/online) ersätter restidspåslaget – gamla fält bort ur lokal kopia (config-push skickar dem inte heller)
   delete BOKNINGSINSTALLNINGAR.marginalMinstMin; delete BOKNINGSINSTALLNINGAR.marginalProcent;
   ['marginalFysisktMin', 'marginalOnlineMin'].forEach(k => { const v = Math.round(Number(BOKNINGSINSTALLNINGAR[k])); BOKNINGSINSTALLNINGAR[k] = (isFinite(v) && v >= 0 && v <= 120) ? v : DEFAULT_BOKNINGSINSTALLNINGAR[k]; });   // samma intervall som Inställningar › Regler (0–120) så formuläret alltid går att spara
@@ -3872,6 +3879,7 @@ async function pushBokningConfigKor() {
     BOKNINGSINSTALLNINGAR.senastSyncRev = Number(svar.data && svar.data.configRev) || rev;
     saveBokningsinstallningar(BOKNINGSINSTALLNINGAR, false);
     bokKal.scriptHorisont = { tom: '', dag: '' }; bokKalInvalidera();   // scriptet har nu appens horisont/inställningar – fönstret räknas ur det lokala värdet igen och kalendersnapshoten hämtas om
+    if (bokDrift.ping && bokDrift.ping.blockSynk) { bokDrift.ping.blockSynk.aktiv = BOKNINGSINSTALLNINGAR.blockSynkAktiv === true; ritaBokDrift(); }   // version 11: Drift-hinten "scriptet har inte fått inställningen" ska inte ligga kvar i 5 min efter en lyckad push
     const varningar = (svar.data && Array.isArray(svar.data.varningar)) ? svar.data.varningar.filter(v => typeof v === 'string') : [];
     setBokStatus(varningar.length ? 'Konfiguration synkad med varningar: ' + varningar.join(' · ') : '', varningar.length ? 'warn' : 'info');
     return true;
@@ -3980,6 +3988,7 @@ function mergeKalendrar(befintliga, nya) {
   let harFullt = befintliga.some(k => k.lage === 'fullt' && nya.some(n => n.id === k.id));
   return nya.map(k => {
     const id = bstr(k.id, 200), namn = bstr(k.namn, 120);
+    if (k.blockKalender === true) return { id, namn, lage: 'ingen', blockKalender: true };   // version 11 (K6): modulens egen "Pipeline – restid" – aldrig läst, inget läge-val
     const gammal = befintliga.find(x => x.id === id);
     let lage = gammal && ['ingen', 'tider', 'fullt'].includes(gammal.lage) ? gammal.lage : (k.primar === true ? 'tider' : 'ingen');
     if (!harFullt && !gammal && /bokning/i.test(namn)) { lage = 'fullt'; harFullt = true; }
@@ -4024,8 +4033,33 @@ function normPing(d) {
     underhallSenast: typeof d.underhallSenast === 'string' ? bstr(d.underhallSenast, 40) : null,   // null = fältet saknas (äldre script), '' = aldrig kört
     avstamningSaknas: bnum(d.avstamningSaknas),
     icsStatus: ics ? { ok: ics.ok === true, hamtadTs: bstr(ics.hamtadTs, 40), antal: Math.max(0, Number(ics.antal) || 0), medPlats: Math.max(0, Number(ics.medPlats) || 0), preliminara: Math.max(0, Number(ics.preliminara) || 0), fel: bstr(ics.fel, 200),
-      hamtningMs: Math.max(0, Number(ics.hamtningMs) || 0), cachad: ics.cachad === true, langsam: ics.langsam === true } : null
+      hamtningMs: Math.max(0, Number(ics.hamtningMs) || 0), cachad: ics.cachad === true, langsam: ics.langsam === true } : null,
+    blockSynk: normBlockSynk(d.blockSynk)   // version 11 (A61, K5): null = fältet saknas (äldre script)
   };
+}
+// ping.blockSynk (K5): { aktiv, kalenderId, senast: { ts, in, bort, andrade, kvar, antal, fel } | null }. Alla räknare klipps till heltal ≥ 0;
+// kalender-id:t visas aldrig (bara "finns"), inga titlar i svaret.
+function normBlockSynk(b) {
+  if (!isPlainObject(b)) return null;
+  return { aktiv: b.aktiv === true, kalenderId: bstr(b.kalenderId, 200), senast: normBlockSynkSenast(b.senast) };
+}
+function normBlockSynkSenast(x) {   // BLOCK_SYNK_SENAST-objektet ur ping eller svaret på 'block-sync' → { ts, in, bort, andrade, kvar, antal, fel } | null
+  if (!isPlainObject(x)) return null;
+  const n = k => Math.max(0, Math.round(Number(x[k]) || 0));
+  return { ts: bstr(x.ts, 40), in: n('in'), bort: n('bort'), andrade: n('andrade'), kvar: n('kvar'), antal: n('antal'), fel: n('fel') };
+}
+// Statusradens text under Inställningar › Kalendrar (K7): "Av" när inställningen är avstängd, annars ur senaste synk.
+// v = scriptversion ur kuvertet (0 = okänd); aktiv inställning mot ett för gammalt script ger en tydlig hint i stället för "Inte synkad ännu".
+function blockSynkStatusText(inst, p, v) {
+  if (!inst || inst.blockSynkAktiv !== true) return 'Av';
+  if (v > 0 && v < BLOCKSYNK_SCRIPT_VERSION) return 'Inte synkad – kräver scriptversion ' + BLOCKSYNK_SCRIPT_VERSION + ' (Hantera distributioner › Ny version)';
+  const b = p && p.blockSynk, sen = b && b.senast;
+  if (!sen || !sen.ts) return 'Inte synkad ännu';
+  const kt = kortTidLabel(sen.ts), idagL = kortDatumLabel(todayStr()) + ' ';
+  let t = 'Senast synkad ' + (kt.startsWith(idagL) ? kt.slice(idagL.length) : kt) + ' · ' + sen.antal + ' block';   // bara HH:MM i dag (K7), annars '16/9 14:03'
+  if (sen.kvar > 0) t += ' · ' + sen.kvar + ' väntar';
+  if (sen.fel > 0) t += ' · ' + sen.fel + ' fel';
+  return t;
 }
 const UNDERHALL_MAX_ALDER_MS = 30 * 3600000;   // sanity check V1 (10.4): dailyMaintenance kör kl 03–04 varje dygn → senaste lyckade körning ska vara < 30 h gammal
 function bokDriftSparaPing(r) {
@@ -4105,6 +4139,14 @@ function bokDriftRader() {   // gemensamma rader för Drift-panelen; statusraden
       const alder = Date.now() - Date.parse(p.underhallSenast);
       rader.push({ text: 'Underhåll (gallring/avstämning): senast ' + kortTidLabel(p.underhallSenast) + (alder > UNDERHALL_MAX_ALDER_MS ? ' – mer än 30 h sedan, triggern verkar inte köra (kör install() i scriptet)' : ''), kind: alder > UNDERHALL_MAX_ALDER_MS ? 'warn' : 'ok', omrade: 'underhall' });
     }
+    // Blocksynk (version 11, A61): restid/marginal → egen Google-kalender "Pipeline – restid", avstäms var 10:e minut (K5).
+    if (s.blockSynkAktiv) {
+      const b = p.blockSynk, sen = b && b.senast;
+      rader.push({ text: 'Blocksynk (restid/marginal → Google Kalender): ' + blockSynkStatusText(s, p, v) + (b && !b.aktiv && v >= BLOCKSYNK_SCRIPT_VERSION ? ' – scriptet har inte fått inställningen ännu (synka konfigurationen)' : ''),
+        kind: (v > 0 && v < BLOCKSYNK_SCRIPT_VERSION) || (sen && sen.fel > 0) ? 'warn' : (sen && sen.ts ? 'ok' : 'info'), omrade: 'blocksynk' });
+    }
+    else if (p.blockSynk && p.blockSynk.kalenderId) rader.push({ text: 'Blocksynk: av – kalendern "Pipeline – restid" finns kvar; scriptet tömmer den vid nästa körning (var 10:e minut)', kind: 'info', omrade: 'blocksynk' });
+    else rader.push({ text: 'Blocksynk (restid/marginal → Google Kalender): av', kind: 'info', omrade: 'blocksynk' });
   }
   // Avstämning (4.11): den egna kontrollen (calendar-preview, bokSenasteKalKoll) i första hand; annars scriptets nattliga körning
   // (ping.avstamningSaknas) – t.ex. när kontrollen gjordes före nattens körning eller när händelserna ligger utanför hämtat intervall.
@@ -4118,6 +4160,7 @@ function bokDriftRader() {   // gemensamma rader för Drift-panelen; statusraden
   return rader;
 }
 function ritaBokDrift() {
+  uppdateraBlockSynkUI();   // statusraden under Kalendrar och "Synka nu" (Inställningar + Kalender-underfliken) visar samma ping-svar – även när Drift-panelen inte är ritad
   const el = document.getElementById('bsDrift');
   if (!el) return;
   const rader = bokDriftRader();
@@ -4127,6 +4170,61 @@ function ritaBokDrift() {
   else if (!bokSenasteKalKoll) rader.push({ text: 'Avstämning kalender ↔ inkorg: inte kontrollerad ännu – klicka "Kontrollera avstämning" eller öppna Kalender', kind: 'info' });
   if (bokDrift.pingTs) rader.push({ text: 'Status hämtad ' + kortTidLabel(bokDrift.pingTs), kind: 'info' });
   el.innerHTML = rader.map(r => `<div class="bok-status-row ${escapeHtml(r.kind)}">${escapeHtml(r.text)}</div>`).join('');
+}
+// ---------- Blocksynk till Google Kalender (version 11, A61, K7) ----------
+// Statusrad + "Synka nu" under Inställningar › Kalendrar (och samma knapp i Kalender-underflikens verktygsrad). Knappen är avstängd
+// när inställningen inte är sparad som aktiv eller modulen inte är ansluten – synken kräver att scriptet fått blockSynkAktiv via config-push.
+let blockSynkPagar = false;
+const BLOCKSYNK_EFTERPING_MS = 60000;   // tvingad ping en minut efter att 'block-sync' gett upp (E_ABORT) så statusrad/Drift inte visar fel bild till nästa ping
+function uppdateraBlockSynkUI() {
+  const s = BOKNINGSINSTALLNINGAR, p = bokDrift.ping, v = bokDrift.pingVersion;
+  const status = document.getElementById('bsBlockSynkStatus');
+  if (status) {
+    const t = blockSynkStatusText(s, p, v);
+    status.textContent = blockSynkPagar ? 'Synkar…' : t;
+    status.className = 'bok-muted' + (t === 'Av' || t === 'Inte synkad ännu' || blockSynkPagar ? '' : (/kräver scriptversion| fel$/.test(t) ? ' warn' : ' ok'));
+  }
+  const av = !s.blockSynkAktiv || !bokAnsluten() || blockSynkPagar;
+  ['bsBlockSynkBtn', 'bkBlockSynk'].forEach(id => { const b = document.getElementById(id); if (b) b.disabled = av; });
+}
+async function synkaBlockNu() {
+  if (blockSynkPagar) return;
+  if (!bokAnsluten()) { setBokStatus('Bokningsmodulen är inte ansluten', 'warn'); return; }
+  if (!BOKNINGSINSTALLNINGAR.blockSynkAktiv) { setBokStatus('Blocksynken är av – kryssa i "Synka restid och marginal till Google Kalender" under Inställningar › Kalendrar och spara', 'warn'); return; }
+  blockSynkPagar = true; uppdateraBlockSynkUI();
+  let r;
+  try {
+    if (konfigEjSynkad()) {   // scriptet läser blockSynkAktiv ur config-filen – osynkad konfiguration skulle ge en tom körning
+      setBokStatus('Synkar konfigurationen till brevlådan först…', 'info');
+      if (!(await pushBokningConfigNu())) { setBokStatus('Konfigurationen kunde inte synkas – "Synka nu" avbröts', 'err'); return; }
+    }
+    setBokStatus('Synkar restid och marginal till Google Kalender…', 'info');
+    r = await bokAdminApi('block-sync', {});
+  } finally { blockSynkPagar = false; uppdateraBlockSynkUI(); }
+  if (!r.ok) {
+    const kod = r.error && r.error.code;
+    if (kod === 'E_ABORT') {   // scriptet fullföljer körningen (skrivtak 80) även när appen gett upp – resultatet hamnar i BLOCK_SYNK_SENAST och hämtas via ping
+      setBokStatus('Synka nu: scriptet svarade inte inom ' + Math.round(BOK_TIMEOUT_MS['block-sync'] / 60000) + ' min – synken pågår troligen fortfarande i scriptet; status hämtas om en stund', 'warn');
+      sleepMs(BLOCKSYNK_EFTERPING_MS).then(() => hamtaBokDrift(true)).catch(() => {});
+      return;
+    }
+    setBokStatus('Synka nu misslyckades: ' + bokFelText(r) + (kod === 'E_VALIDATION' && /okänd åtgärd/i.test(bokFelText(r)) ? ' – kräver scriptversion ' + BLOCKSYNK_SCRIPT_VERSION + ' (Hantera distributioner › Ny version)' : ''), 'err');
+    return;
+  }
+  const d = normBlockSynkSenast(Object.assign({ ts: new Date().toISOString() }, isPlainObject(r.data) ? r.data : {}));
+  const sv = isPlainObject(r.data) ? r.data : {};
+  // Skriv in resultatet i ping-kopian så statusraden/Drift visar det direkt utan ny ping (samma form som BLOCK_SYNK_SENAST, K1). aktiv ur svaret:
+  // scriptet kan ha kört med blockSynkAktiv=false i sin config (inställningen ännu inte synkad) – då är det en städning, inte en synk.
+  if (bokDrift.ping) bokDrift.ping.blockSynk = { aktiv: sv.aktiv !== false, kalenderId: bstr(sv.kalenderId, 200), senast: d };
+  else hamtaBokDrift(true).catch(() => {});
+  if (sv.upptagen === true) { setBokStatus('Synk pågår redan i scriptet (triggern) – status hämtas vid nästa ping', 'info'); ritaBokDrift(); return; }
+  if (sv.ok === false && !sv.kalenderId) { setBokStatus('Blocksynk misslyckades i scriptet: kalendern "Pipeline – restid" kunde inte skapas eller läsas (' + d.fel + ' fel) – se Drift och kontrollera scriptets behörigheter', 'err'); ritaBokDrift(); return; }
+  if (sv.hoppad) { setBokStatus('Blocksynk hoppade över körningen – ' + (sv.hoppad === 'inkorg' ? 'inkorgen' : 'Outlook-flödet') + ' kunde inte läsas just nu; nästa körning (var 10:e minut) försöker igen', 'warn'); ritaBokDrift(); return; }
+  if (sv.aktiv === false) { setBokStatus('Blocksynken är av i scriptets konfiguration – ' + d.bort + ' block städade bort' + (d.kvar > 0 ? ', ' + d.kvar + ' väntar' : '') + (BOKNINGSINSTALLNINGAR.blockSynkAktiv ? ' (inställningen är på lokalt – synka konfigurationen och kör Synka nu igen)' : ''), 'info'); ritaBokDrift(); return; }
+  const namn = bstr(r.data && r.data.kalenderNamn, 60) || 'Pipeline – restid';
+  setBokStatus('Blocksynk klar (' + namn + '): ' + d.in + ' nya, ' + d.bort + ' borttagna, ' + d.andrade + ' ändrade · ' + d.antal + ' block' +
+    (d.kvar > 0 ? ' · ' + d.kvar + ' väntar på nästa körning (var 10:e minut eller Synka nu igen)' : '') + (d.fel > 0 ? ' · ' + d.fel + ' fel' : ''), d.fel > 0 || d.kvar > 0 ? 'warn' : 'ok');
+  ritaBokDrift();
 }
 
 // ---------- Import från brevlådan (spec 8.1–8.3) ----------
@@ -5066,6 +5164,9 @@ function renderBokInstallningar(body) {
       <div class="bok-inline"><span id="bsIcsMask" class="bok-key-box" style="flex:1 1 200px"></span><button type="button" class="btn ghost" id="bsIcsVisaBtn">Visa</button><button type="button" class="btn ghost" id="bsIcsAndraBtn">Ändra</button></div>
       <div id="bsIcsEdit" style="display:none;margin-top:6px"><input type="text" id="bsIcsUrl" placeholder="https://outlook.office365.com/owa/calendar/…/calendar.ics" autocomplete="off" spellcheck="false"><div class="hint" style="margin-top:4px">Tom = ingen Outlook-läsning. Behandlas som hemlighet.</div></div></div>
     <label class="check-row"><input type="checkbox" id="bsRaknaPrel"> Räkna preliminära/obesvarade Outlook-möten som upptaget</label>
+    <label class="check-row" style="margin-top:8px"><input type="checkbox" id="bsBlockSynk"> Synka restid och marginal till Google Kalender</label>
+    <div class="hint">Skapar kalendern "Pipeline – restid" i ditt Google-konto (inga gäster, läses aldrig av modulen); uppdateras var 10:e minut. Spara inställningarna innan du synkar.</div>
+    <div class="bok-inline" style="margin-top:6px"><span id="bsBlockSynkStatus" class="bok-muted"></span><button type="button" class="btn ghost" id="bsBlockSynkBtn" disabled>Synka nu</button></div>
   </div>
 
   <div class="bok-panel">
@@ -5112,6 +5213,8 @@ function renderBokInstallningar(body) {
   body.querySelector('#bsTestaAdressBtn').addEventListener('click', testaBasadress);
   kopplaBasadressForslag(body);
   body.querySelector('#bsHamtaKalendrarBtn').addEventListener('click', hamtaKalendrar);
+  body.querySelector('#bsBlockSynkBtn').addEventListener('click', () => { synkaBlockNu().catch(e => setBokStatus('Synka nu misslyckades: ' + (e && e.message || e), 'err')); });
+  uppdateraBlockSynkUI();
   body.querySelector('#bsIcsVisaBtn').addEventListener('click', e => {
     const el = document.getElementById('bsIcsMask');
     if (e.target.textContent === 'Visa') { el.textContent = bsIcsWork || '(ingen)'; e.target.textContent = 'Dölj'; } else { el.textContent = maskUrl(bsIcsWork); e.target.textContent = 'Visa'; }
@@ -5161,6 +5264,7 @@ function bsFyll(s) {
   document.getElementById('bsPausMeddelande').value = (s.paus && s.paus.meddelande) || '';
   document.getElementById('bsIcsMask').textContent = maskUrl(bsIcsWork);
   document.getElementById('bsRaknaPrel').checked = !!s.raknaPreliminaraOutlook;
+  document.getElementById('bsBlockSynk').checked = s.blockSynkAktiv === true;   // version 11 (A61, K7)
   document.getElementById('bsTelexiaEpost').value = s.telexiaEpost || '';
   document.getElementById('bsNotisEpost').value = s.notisEpost || '';
   document.getElementById('bsKontaktIKalender').checked = !!s.kontaktuppgifterIKalender;
@@ -5173,7 +5277,10 @@ function renderBsKalendrar(list) {
   const el = document.getElementById('bsKalendrar');
   if (!el) return;
   if (!list.length) { el.innerHTML = '<div class="bok-muted">Inga kalendrar hämtade ännu – kör "Anslut" eller "Hämta kalendrar".</div>'; return; }
-  el.innerHTML = list.map((k, i) => `<div class="bok-kal-row"><span>${escapeHtml(k.namn || k.id)}</span>
+  // Modulens egen blockkalender (version 11, K6: calendars-list markerar den med blockKalender:true) visas utan läge-val – den läses aldrig.
+  el.innerHTML = list.map((k, i) => k.blockKalender === true
+    ? `<div class="bok-kal-row"><span>${escapeHtml(k.namn || k.id)}</span><span class="bok-muted">skapad av modulen, läses aldrig</span></div>`
+    : `<div class="bok-kal-row"><span>${escapeHtml(k.namn || k.id)}</span>
     <select class="bsKalLage" data-i="${i}"><option value="ingen"${k.lage === 'ingen' ? ' selected' : ''}>Läs inte</option><option value="tider"${k.lage === 'tider' ? ' selected' : ''}>Bara tider</option><option value="fullt"${k.lage === 'fullt' ? ' selected' : ''}>Bokningar (fullt)</option></select></div>`).join('');
   el.querySelectorAll('.bsKalLage').forEach(sel => sel.addEventListener('change', () => { list[Number(sel.dataset.i)].lage = sel.value; }));
 }
@@ -5393,6 +5500,7 @@ function sparaBokningsinstallningarFranFormular() {
   }
   s.outlookIcsUrl = bsIcsWork;
   s.raknaPreliminaraOutlook = document.getElementById('bsRaknaPrel').checked;
+  s.blockSynkAktiv = document.getElementById('bsBlockSynk').checked;   // version 11 (A61, K1): följer med config-push via installningar; scriptet skapar/tömmer kalendern
   const epostRe = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
   s.telexiaEpost = document.getElementById('bsTelexiaEpost').value.trim().slice(0, 120);
   s.notisEpost = document.getElementById('bsNotisEpost').value.trim().slice(0, 120);
@@ -5415,6 +5523,7 @@ function sparaBokningsinstallningarFranFormular() {
   document.getElementById('bsIcsMask').textContent = maskUrl(bsIcsWork);
   document.getElementById('bsBasHint').textContent = (s.basLat !== null && s.basLng !== null && s.basadress) ? 'Geokodad ✓' : (s.basadress ? 'Inte geokodad – klicka "Testa adress" (annars schablonrestid)' : '');
   uppdateraAnslutKnappar();
+  ritaBokDrift();   // blocksynk-raden i Drift + statusrad/"Synka nu" under Kalendrar följer den sparade inställningen
 }
 
 // ============================================================
@@ -5888,6 +5997,7 @@ function renderBokKalender(body) {
       <button type="button" class="btn ghost${bokKal.panel === 'preview' ? ' active' : ''}" id="bkPreview">Förhandsgranska som bokare</button>
       <button type="button" class="btn ghost${koll ? ' active' : ''}" id="bkKollBtn" title="Kalenderkoll för hela horisonten (listan under vyn följer vald vecka/dag)">${koll ? 'Tillbaka till kalendern' : 'Kalenderkoll · horisont'}</button>
       <button type="button" class="btn ghost" id="bkUppdatera">Uppdatera</button>
+      ${BOKNINGSINSTALLNINGAR.blockSynkAktiv ? '<button type="button" class="btn ghost" id="bkBlockSynk" title="Synka restid och marginal till Google Kalender (Pipeline – restid) nu" disabled>Synka nu</button>' : ''}
     </div>
   </div>
   <div id="bkPanel" style="display:none"></div>
@@ -5904,6 +6014,7 @@ function renderBokKalender(body) {
   body.querySelector('#bkPreview').addEventListener('click', () => { bokKal.panel = bokKal.panel === 'preview' ? '' : 'preview'; ritaKalPanel(); });
   body.querySelector('#bkKollBtn').addEventListener('click', () => { bokKal.lage = koll ? 'grid' : 'koll'; bokKal.valdSid = -1; renderBokKalender(body); });
   body.querySelector('#bkUppdatera').addEventListener('click', () => laddaBokKalVy(true));
+  { const b = body.querySelector('#bkBlockSynk'); if (b) { b.addEventListener('click', () => { synkaBlockNu().catch(e => setBokStatus('Synka nu misslyckades: ' + (e && e.message || e), 'err')); }); uppdateraBlockSynkUI(); } }   // version 11 (K7)
   renderPlChips(body.querySelector('#bkPlChips'), id => !hiddenActivityPipelines.has(id), id => {
     if (hiddenActivityPipelines.has(id)) hiddenActivityPipelines.delete(id); else hiddenActivityPipelines.add(id);
     localStorage.setItem(ACTIVITY_HIDDEN_PIPELINES_KEY, JSON.stringify(Array.from(hiddenActivityPipelines)));
