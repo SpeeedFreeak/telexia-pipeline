@@ -420,6 +420,10 @@ function computeAvailabilityCore(req, deps) {
   const now = deps.now || new Date();
   const idag = tzParts(now).datum;
   const sistaDag = sistaDagFor(cfg, idag);
+  // Version 12 (K6): deps.medTider → data.tider { total, busy, geo, restid, plan } i heltal ms (bara mätvärden; Code.gs sätter total).
+  const tider = deps.medTider === true ? { total: 0, busy: 0, geo: 0, restid: 0, plan: 0 } : null;
+  const tStart = Date.now();
+  let tDel = tStart;
 
   // 1. Datum och intervall
   const from = req.from, to = req.to;
@@ -437,6 +441,7 @@ function computeAvailabilityCore(req, deps) {
     return availFel('E_CALENDAR', 'Kalendern kunde inte läsas just nu');
   }
   busy = (busy || []).filter(b => b && (b.start || typeof b.startMin === 'number'));
+  if (tider) { tider.busy = Date.now() - tDel; tDel = Date.now(); }
 
   // 3. undantaBokningId honoreras bara för CJ-bokare eller bokningens egen bokare (spec 4.4)
   let undantaTyp = null;
@@ -471,6 +476,8 @@ function computeAvailabilityCore(req, deps) {
   if (typ.restid) {
     const adress = typeof req.adress === 'string' ? req.adress.replace(/[\u0000-\u001F\u007F]/g, ' ').trim() : '';
     if (adress.length > 200) return availFel('E_VALIDATION', AVAIL_STATISKA_FEL.adress, { falt: { adress: AVAIL_STATISKA_FEL.adress } });
+    // Version 12 (K2b): bokarens adress + alla ankartexter primas i geokodmemot med EN CacheService-läsning (miss → som förut).
+    if (typeof geoPrimeMemoBatch_ === 'function' && typeof deps.geocode === 'function') geoPrimeMemoBatch_((adress ? [adress] : []).concat(ankarTexter_(busy)));
     if (adress) {
       const g = deps.geocode(adress) || { status: 'okand' };
       if (g.status === 'rate') return availFel('E_RATE', g.typ === 'adresser' ? 'För många adresser – kontakta CJ' : 'För många adressuppslag – vänta en stund', { typ: g.typ || 'geocode' });
@@ -486,7 +493,9 @@ function computeAvailabilityCore(req, deps) {
   // områdesetiketten (A56) ska visas på samma block oavsett vilken mötestyp bokaren tittar på – calendar-preview geokodar
   // samma texter till cache-filen, så anropet är i regel en cache-träff.
   if (typeof deps.geocode === 'function') busy = geokodaAnkare(busy, deps.geocode);
+  if (tider) { tider.geo = Date.now() - tDel; tDel = Date.now(); }
   if (typ.restid) T = buildTravelTable(X, X && X.geokodad ? unikaPlatser(busy, cfg) : [], cfg, deps.travelSek);
+  if (tider) { tider.restid = Date.now() - tDel; tDel = Date.now(); }
 
   // 7. Dag för dag
   const dagar = [];
@@ -507,6 +516,7 @@ function computeAvailabilityCore(req, deps) {
     }
   }
 
+  if (tider) { tider.plan = Date.now() - tDel; tider.total = Date.now() - tStart; }
   return {
     ok: true,
     data: {
@@ -518,7 +528,8 @@ function computeAvailabilityCore(req, deps) {
       restidOkand,
       geo,
       pausMin: luckBuffertMin(cfg, typ),   // version 10: vald luckas marginal efter mötet (bokningssidan ritar S+L → S+L+pausMin)
-      dagar
+      dagar,
+      ...(tider ? { tider } : {})          // version 12 (K6): valfritt, bara när deps.medTider (computeAvailability från Code.gs)
     }
   };
 }
@@ -526,6 +537,8 @@ function computeAvailabilityCore(req, deps) {
 function geokodaAnkare(busy, geocodeFn) {
   if (typeof geocodeFn !== 'function') return busy;
   const perText = {};
+  // Version 12 (K2b): alla unika platstexter primas i memot med EN CacheService-läsning innan per-post-anropen (annars ett get per text).
+  if (typeof geoPrimeMemoBatch_ === 'function') geoPrimeMemoBatch_(ankarTexter_(busy));
   return busy.map(b => {
     if (!b || !b.hasPlace || b.ignore || b.heldag || platsGeokodad(b.plats)) return b;
     const text = b.plats && typeof b.plats.text === 'string' ? b.plats.text.trim() : '';
@@ -542,6 +555,16 @@ function geokodaAnkare(busy, geocodeFn) {
     if (p.omrade) plats.omrade = p.omrade;
     return Object.assign({}, b, { plats });
   });
+}
+// Unika platstexter bland ankare som geokodaAnkare skulle geokoda (samma villkor) – för geoPrimeMemoBatch_ (version 12).
+function ankarTexter_(busy) {
+  const sett = {}, ut = [];
+  (busy || []).forEach(b => {
+    if (!b || !b.hasPlace || b.ignore || b.heldag || platsGeokodad(b.plats)) return;
+    const text = b.plats && typeof b.plats.text === 'string' ? b.plats.text.trim() : '';
+    if (text && !sett[text]) { sett[text] = true; ut.push(text); }
+  });
+  return ut;
 }
 // Områdesetikett ur en BusyItem-plats (steg 2c): bara geokodade platser, rensad och klippt; '' annars.
 function platsOmrade(plats) {
@@ -664,6 +687,16 @@ function stripInternAvailability(data) {
 function availCache() { return CacheService.getScriptCache(); }
 function cacheGetJson(key) { try { const v = availCache().get(key); return v ? JSON.parse(v) : null; } catch (e) { return null; } }
 function cachePutJson(key, obj, ttlS) { try { availCache().put(key, JSON.stringify(obj), Math.min(21600, ttlS)); } catch (e) { /* cache är best effort */ } }
+// Version 12 (K2): EN getAll för många nycklar (varje CacheService.get är ett tjänsteanrop ~30–80 ms – calendar-preview gjorde ett per
+// restidspar och ett per platstext, hundratals för 8 veckor). → { <key>: objekt } bara för träffar som är giltig JSON. Kastar aldrig.
+function cacheGetJsonAlla_(keys) {
+  const ut = {};
+  if (!Array.isArray(keys) || !keys.length) return ut;
+  let hit = null;
+  try { hit = availCache().getAll(keys) || {}; } catch (e) { return ut; }
+  keys.forEach(k => { const v = hit[k]; if (typeof v === 'string' && v) { try { ut[k] = JSON.parse(v); } catch (e) { /* trasig post → miss */ } } });
+  return ut;
+}
 
 // --- Maps-nyckel, dagstak, block och varning (spec 4.2, 5.8, A5). Räknaren maps_elements_<YYYYMMDD> ägs av Code.gs. ---
 function mapsApiKey() { return getProp(PROP.MAPS_API_KEY); }
@@ -702,7 +735,10 @@ let AVAIL_RESTID_PENDING = {};
 // availability geokodar med placeId FÖRE låset/beräkningen, och computeAvailability/findSlot/warmSlotCaches (som bara har adressen)
 // träffar memot i samma körning utan att resultatet cachas under den skrivna adressen (se geocodeAddress).
 let AVAIL_GEO_MEMO = {};
-function availResetMemo_() { AVAIL_FIL_MEMO = null; AVAIL_GEOKOD_PENDING = {}; AVAIL_RESTID_PENDING = {}; AVAIL_GEO_MEMO = {}; }
+// AVAIL_GEO_PRIMAT_: nycklar som geoPrimeMemoBatch_ redan slagit upp i CacheService den här körningen (miss inkluderat) – computeAvailabilityCore
+// primar bokarens adress + ankartexter och geokodaAnkare primar ankartexterna igen; missarna ska inte kosta ett andra getAll (version 12).
+let AVAIL_GEO_PRIMAT_ = {};
+function availResetMemo_() { AVAIL_FIL_MEMO = null; AVAIL_GEOKOD_PENDING = {}; AVAIL_RESTID_PENDING = {}; AVAIL_GEO_MEMO = {}; AVAIL_GEO_PRIMAT_ = {}; }
 // Skriver körningens nya geokod- OCH restidsposter till cache-filen (färsk läsning + en skrivning; namnet behålls – doPost anropar det).
 // → true om filen skrevs. Kastar aldrig.
 function availFlushGeokod_() {
@@ -868,6 +904,33 @@ function geoPrimeMemo_(adress, geo) {
   const om = omradeObj_(geo.omrade); if (om) memo.omrade = om;
   AVAIL_GEO_MEMO[key] = memo;
   return true;
+}
+// Version 12 (K2b): primar körningens geokodmemo för många texter med EN getAll på 'geo:<hash(nyckel)>' (samma poster som geocodeAddress
+// cachar: { status:'ok', lat, lng, formaterad, omrade? } | { status:'okand' }). Texter som redan finns i memot hoppas över. Semantiken
+// är oförändrad – en miss går som förut via cache-filen/Maps i geocodeAddress; placeId-flödet berörs inte (memo 'ok' returneras som
+// förut, memo 'okand' + placeId går vidare till geocodeViaPlaceId_). Anropas av geokodaAnkare (unika platstexter) och
+// computeAvailabilityCore (bokarens adress + ankartexter). Nycklar som redan slagits upp i körningen (AVAIL_GEO_PRIMAT_ – även missar)
+// hoppas över. → antal primade nycklar. Kastar aldrig (Node-testerna saknar CacheService/sha256hex).
+function geoPrimeMemoBatch_(texter) {
+  try {
+    if (typeof sha256hex !== 'function' || typeof CacheService === 'undefined') return 0;
+    const perNyckel = {}, keys = [];
+    (Array.isArray(texter) ? texter : []).forEach(t => {
+      const key = normalizeAdressKey(t);
+      if (!key || AVAIL_GEO_MEMO[key] || AVAIL_GEO_PRIMAT_[key] || perNyckel[key] !== undefined) return;
+      AVAIL_GEO_PRIMAT_[key] = true;
+      perNyckel[key] = 'geo:' + sha256hex(key);
+      keys.push(perNyckel[key]);
+    });
+    if (!keys.length) return 0;
+    const hit = cacheGetJsonAlla_(keys);
+    let n = 0;
+    Object.keys(perNyckel).forEach(key => {
+      const h = hit[perNyckel[key]];
+      if (h && (h.status === 'ok' || h.status === 'okand')) { AVAIL_GEO_MEMO[key] = h; n++; }
+    });
+    return n;
+  } catch (e) { return 0; }
 }
 // Ny geokodpost till cache-filen (skrivs samlat av availFlushGeokod_ i doPost) + körningens fil-memo.
 function geoSparaPost_(k, svar) {
@@ -1043,14 +1106,19 @@ function travelSecondsFor(X, platser) {
 // förekommer i flest par, vid lika den första i paret) i batchar om ≤ 25 destinationer; taket/blocket eller ett toppnivåfel avbryter
 // resterande anrop. → { svar:{ <cachenyckel>: sek | { sek, forLangt:true } | null }, overCap:antal }.
 function travelSecondsForPairs_(par, maxNya) {
-  const ut = {}, saknas = [], sett = {};
+  const ut = {}, saknas = [], sett = {}, unika = [];
   (par || []).forEach(p => {
     if (!p || !platsGeokodad(p.a) || !platsGeokodad(p.b)) return;
     const key = cachenyckel(p.a, p.b);
     if (sett[key]) return;
     sett[key] = true;
-    const hit = cacheGetJson('restid:' + key);
-    if (hit && typeof hit.sek === 'number') ut[key] = hit.sek; else saknas.push({ key, a: p.a, b: p.b });
+    unika.push({ key, a: p.a, b: p.b });
+  });
+  // Version 12 (K2a): alla 'restid:<nyckel>' läses med EN getAll i stället för ett get per par (calendar-preview: hundratals par).
+  const hits = cacheGetJsonAlla_(unika.map(s => 'restid:' + s.key));
+  unika.forEach(s => {
+    const hit = hits['restid:' + s.key];
+    if (hit && typeof hit.sek === 'number') ut[s.key] = hit.sek; else saknas.push(s);
   });
   if (!saknas.length) return { svar: ut, overCap: 0 };
 
@@ -1157,11 +1225,13 @@ function computeAvailability(req) {
     undantaHonorerad: !!req.undantaBokningId,
     buildBusy: (from, to) => buildBusyList(from, to, {
       config, bokareId: bokare.id, reservationId: req.reservationId || '', undantaBokningId: req.undantaBokningId || '', farsk: !!req.farsk,
-      inbox: req.inbox || null
+      inbox: req.inbox || null,
+      cacheTtlS: availKonst(() => BUSY_CACHE_VARM_S, 660)   // version 12: en kalenderläsning här är lika färsk som triggerns – skriv busy:<datum> med 11 min, inte 60 s (annars skrivs triggerns poster över efter varje cache-miss)
     }),
     geocode: adress => geocodeAddress(adress),
     travelSek: (X, platser) => travelSecondsFor(X, platser),
-    findBokning: null
+    findBokning: null,
+    medTider: true   // version 12 (K6): data.tider { total, busy, geo, restid, plan } (heltal ms)
   };
   const r = computeAvailabilityCore(req, deps);
   if (!r.ok) throw availThrow(r.error);

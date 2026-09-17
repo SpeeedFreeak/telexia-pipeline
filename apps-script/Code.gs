@@ -22,7 +22,11 @@
  *                      buffert i Calendar.gs finalizeBusy) och restid delad runt platslösa möten (availability restid.inDelar/utDelar +
  *                      pausMin, calendar-preview resor[].delar – version 10, SCRIPT_VERSION 10, CJ:s beslut 2026-09-17),
  *                      blocksynk till en egen Google-kalender "Pipeline – restid" (restid + marginal som händelser, syncBlock_ i
- *                      refreshIcsCache + admin-endpoint block-sync, ping.blockSynk – A61, version 11, SCRIPT_VERSION 11, CJ:s beslut 2026-09-17).
+ *                      refreshIcsCache + admin-endpoint block-sync, ping.blockSynk – A61, version 11, SCRIPT_VERSION 11, CJ:s beslut 2026-09-17),
+ *                      prestanda (version 12, SCRIPT_VERSION 12): Script Properties-memo per körning (getProp/getPropFarsk), förberäknad
+ *                      calendar-preview i triggern (previewSnapKor_ → CacheService preview:snap, busy:<datum> 11 min) som handleCalendarPreview
+ *                      svarar ur (cachad:true, snapshotTs) tills en skrivning invaliderar (previewSnapRensa_), syncBlock_ återanvänder
+ *                      triggerns beräkning, tidsmätning tider i calendar-preview/availability + loggraden.
  *   Calendar.gs      – readBusy(fran, till) (hoppar över blockkalendern, version 11), parseIcs, mergeBusy, applyIgnore (ignorera/räkna + restid-override), finalizeBusy (effektiv buffert), buildBusyList(from, to).
  *   Availability.gs  – computeAvailability(req), dayPlan, placeTravelDelar/placeTravel, geocodeAddress(adress, { placeId }), hamtaAdressforslag(q, token),
  *                      travelMinutes, travelSecondsForPairs_, previewResor, geokodaAnkare, backfillOmrade_, swedishHolidays.
@@ -39,7 +43,7 @@
 // Konstanter
 // ============================================================
 
-const SCRIPT_VERSION = 11;                      // 11 = blocksynk till Google Kalender (installningar.blockSynkAktiv, Script Properties BLOCK_KALENDER_ID/BLOCK_SYNK_SENAST, egen kalender "Pipeline – restid" som aldrig läses, admin-endpoint block-sync, ping.blockSynk, calendars-list blockKalender – valfria fält: MIN_SCRIPT_VERSION förblir 4; A61, CJ:s beslut 2026-09-17); 10 = ren restid (råa Distance Matrix-minuter, inget påslag), marginal efter varje möte (installningar.marginalFysisktMin/marginalOnlineMin → effektiv buffert cooldownMin i Calendar.gs finalizeBusy; ersätter marginalMinstMin/marginalProcent) och restid delad runt platslösa möten (availability slot.restid.inDelar/utDelar + data.pausMin, calendar-preview resor[].delar – valfria fält, inBlock/utBlock = yttre spann: MIN_SCRIPT_VERSION förblir 4; CJ:s beslut 2026-09-17); 9 = manuell restidsklassning + rättad adress per händelse (KALENDER_IGNORERA-postens valfria online/adress/lat/lng/omrade och lage 'restid', Calendar.gs applyIgnore; calendar-preview overrideOnline/overrideAdress/serieId, geocode.omrade – valfria fält: MIN_SCRIPT_VERSION förblir 4); 8 = online-möten ("Microsoft Teams-möte" m.fl. i platsfältet är aldrig restidsankare, Calendar.gs kalLooksLikePlace – MIN_SCRIPT_VERSION förblir 4); MIN_SCRIPT_VERSION i index.html/bokning.js jämförs mot denna (4.12); 3 = M5 (purge, dailyMaintenance, nya ping-fält); 4 = steg 2a (egen-rebook/egen-cancel/egen-update, hello.egna med kanAndras); 5 = steg 2b (adressforslag via Places, placeId i geokodning – valfritt: MIN_SCRIPT_VERSION förblir 4); 6 = steg 2c (block.omrade i availability, omrade + resor i calendar-preview – valfria fält: MIN_SCRIPT_VERSION förblir 4); 7 = optimering (inkorg i CacheService, en cache-filskrivning per körning, ICS-värmare) + restid tydlig (paus-block, 0 min samma adress, Teams-fix, mejltext) + rebook släpper reservation (valfria fält: MIN_SCRIPT_VERSION förblir 4)
+const SCRIPT_VERSION = 12;                      // 12 = prestanda (Script Properties-memo per körning, batchade CacheService-läsningar i Availability.gs, förberäknad calendar-preview i refreshIcsCache – CacheService preview:snap + busy:<datum> 11 min, calendar-preview svarar cachad:true/snapshotTs/tider, availability tider – valfria fält: MIN_SCRIPT_VERSION förblir 4; CJ 2026-09-17: "kalendern är väldigt långsam att ladda"); 11 = blocksynk till Google Kalender (installningar.blockSynkAktiv, Script Properties BLOCK_KALENDER_ID/BLOCK_SYNK_SENAST, egen kalender "Pipeline – restid" som aldrig läses, admin-endpoint block-sync, ping.blockSynk, calendars-list blockKalender – valfria fält: MIN_SCRIPT_VERSION förblir 4; A61, CJ:s beslut 2026-09-17); 10 = ren restid (råa Distance Matrix-minuter, inget påslag), marginal efter varje möte (installningar.marginalFysisktMin/marginalOnlineMin → effektiv buffert cooldownMin i Calendar.gs finalizeBusy; ersätter marginalMinstMin/marginalProcent) och restid delad runt platslösa möten (availability slot.restid.inDelar/utDelar + data.pausMin, calendar-preview resor[].delar – valfria fält, inBlock/utBlock = yttre spann: MIN_SCRIPT_VERSION förblir 4; CJ:s beslut 2026-09-17); 9 = manuell restidsklassning + rättad adress per händelse (KALENDER_IGNORERA-postens valfria online/adress/lat/lng/omrade och lage 'restid', Calendar.gs applyIgnore; calendar-preview overrideOnline/overrideAdress/serieId, geocode.omrade – valfria fält: MIN_SCRIPT_VERSION förblir 4); 8 = online-möten ("Microsoft Teams-möte" m.fl. i platsfältet är aldrig restidsankare, Calendar.gs kalLooksLikePlace – MIN_SCRIPT_VERSION förblir 4); MIN_SCRIPT_VERSION i index.html/bokning.js jämförs mot denna (4.12); 3 = M5 (purge, dailyMaintenance, nya ping-fält); 4 = steg 2a (egen-rebook/egen-cancel/egen-update, hello.egna med kanAndras); 5 = steg 2b (adressforslag via Places, placeId i geokodning – valfritt: MIN_SCRIPT_VERSION förblir 4); 6 = steg 2c (block.omrade i availability, omrade + resor i calendar-preview – valfria fält: MIN_SCRIPT_VERSION förblir 4); 7 = optimering (inkorg i CacheService, en cache-filskrivning per körning, ICS-värmare) + restid tydlig (paus-block, 0 min samma adress, Teams-fix, mejltext) + rebook släpper reservation (valfria fält: MIN_SCRIPT_VERSION förblir 4)
 const TZ = 'Europe/Stockholm';
 const APP_URL = 'https://speeedfreeak.github.io/telexia-pipeline/';   // länk i notismejlet (4.9)
 const MAX_BODY_BYTES = 16384;                   // body kontrolleras före JSON.parse (4.3)
@@ -62,6 +66,11 @@ const INBOX_LIST_MAX = 500;
 const ACK_MAX_IDS = 200;
 const ORSAK_MAX = 500;                          // reject/cancel/rebook-orsak (mejlas till bokaren)
 const PREVIEW_MAX_DAGAR = 56;                   // calendar-preview: högst 8 veckor per förfrågan (M4)
+const PREVIEW_SNAP_KEY = 'preview:snap';        // version 12 (K3c/K4): förberäknad calendar-preview för hela fönstret [idag−7, horisontTom+7] – cacheChunked* (gzip, bitar), skrivs av refreshIcsCache (previewSnapKor_) och av ett live-svar som täcker hela fönstret
+const PREVIEW_SNAP_S = 660;                     // version 12: snapshotens livslängd 11 min – triggern (var 10:e minut) skriver om den innan den går ut; invalideras av previewSnapRensa_ vid varje skrivning (K5)
+const BUSY_CACHE_VARM_S = 660;                  // version 12 (K3b): busy:<datum> som triggern skriver lever 11 min (Calendar.gs readBusy opts.cacheTtlS); klienternas egna läsningar skriver 60 s (KAL_BUSY_CACHE_S) som förut
+const PREVIEW_GEN_KEY = 'preview:gen';          // version 12 (K5, granskning): generationsstämpel (Date.now()) som previewSnapRensa_ skriver – en beräkning som började före stämpeln får inte skriva snapshot/busy:<datum> 11 min (previewSnapGen_)
+const PREVIEW_GEN_S = 21600;                    // stämpelns liv (CacheService max 6 h); saknas den räknas generationen som oförändrad
 const PREVIEW_RESTID_VARNING = 'Restid för fler par än taket beräknas nästa gång';   // steg 2c: > AVAIL_PREVIEW_MAX_PAR nya ankarpar i ett anrop
 const PREVIEW_GEO_VARNING = 'Fler platser än taket geokodas nästa gång';              // steg 2c: > AVAIL_PREVIEW_MAX_GEO ocachade platstexter i ett anrop
 const MAINT_BACKFILL_OMRADE_MAX = 50;             // steg 2c: dailyMaintenance geokodar om högst 50 geokodposter/natt som saknar omrade (mot MAPS_DAILY_CAP)
@@ -359,6 +368,7 @@ function doPostInner_(e) {
     if (typeof kalResetMemo_ === 'function') kalResetMemo_();   // per-anrop-memo (ICS) – varje request är en ny körning
     if (typeof availResetMemo_ === 'function') availResetMemo_();   // per-anrop-memo (cache-filen, A51)
     brevladaResetMemo_();                                          // per-anrop-memo (Drive-filobjekten, version 7)
+    propResetMemo_();                                              // per-anrop-memo (Script Properties, version 12 K1)
 
     if (!e || !e.postData || typeof e.postData.contents !== 'string' || e.postData.contents.length > MAX_BODY_BYTES)
       return respond(errEnvelope('E_VALIDATION', 'Ogiltig eller för stor förfrågan'));
@@ -366,8 +376,10 @@ function doPostInner_(e) {
     try { req = JSON.parse(e.postData.contents); } catch (pe) { req = null; }
     if (!isPlainObject(req)) return respond(errEnvelope('E_VALIDATION', 'Ogiltig eller för stor förfrågan'));
     action = String(req.action || '');
-    const out = route(req, ctx => { bokareId = ctx.bokareId || ''; });
-    console.log(JSON.stringify({ action, bokareId, ok: out.ok, code: out.ok ? '' : out.error.code, ms: Date.now() - t0 }));
+    let loggExtra = null;
+    const out = route(req, ctx => { bokareId = ctx.bokareId || ''; loggExtra = isPlainObject(ctx.logg) ? ctx.logg : null; });
+    // Version 12: handlern kan lägga statiska mätfält i ctx.logg (calendar-preview/availability: tider i ms) – aldrig indata.
+    console.log(JSON.stringify(Object.assign({ action, bokareId, ok: out.ok, code: out.ok ? '' : out.error.code, ms: Date.now() - t0 }, loggExtra || {})));
     return respond(out);
   } catch (err) {
     console.error(JSON.stringify({ action, bokareId, ok: false, code: 'E_INTERNAL', ms: Date.now() - t0, fel: felKlass(err) }));
@@ -404,7 +416,7 @@ function tidszonOk() {
 
 // Routing: kör handlern, översätter kända fel till kuvert. Okända fel bubblar till doPost (E_INTERNAL).
 function route(req, setCtx) {
-  const ctx = { action: String(req.action || ''), bokareId: '', kodKey: '', configRev: null };
+  const ctx = { action: String(req.action || ''), bokareId: '', kodKey: '', configRev: null, logg: null };
   try {
     if (!tidszonOk()) throw new Error('Scriptets tidszon (' + Session.getScriptTimeZone() + ') har andra regler än ' + TZ + ' – sätt den i Projektinställningar');
     const handler = Object.prototype.hasOwnProperty.call(HANDLERS, ctx.action) ? HANDLERS[ctx.action] : null;
@@ -427,9 +439,29 @@ function route(req, setCtx) {
 // Script Properties (4.2)
 // ============================================================
 
-function getProp(name) { return PropertiesService.getScriptProperties().getProperty(name) || ''; }
-function setProp(name, value) { PropertiesService.getScriptProperties().setProperty(name, String(value)); }
-function deleteProp(name) { PropertiesService.getScriptProperties().deleteProperty(name); }
+// Version 12 (K1): memo per körning. Varje PropertiesService-anrop är ett tjänsteanrop (~50–150 ms); ping gjorde ~20 getProperty i serie.
+// getProp läser ur ett memo som fylls EN gång per körning (lat, vid första getProp) med getProperties(); setProp/deleteProp skriver
+// igenom OCH uppdaterar memot. Memot nollställs per körning (doPostInner_, refreshIcsCache, dailyMaintenanceInner_ – bredvid övriga
+// *ResetMemo_). getPropFarsk läser alltid direkt (och uppdaterar memot) – används där läs-ändra-skriv mot en räknare sker
+// (addMapsElements, countBooking, countAndring), i readInbox:s INBOX_REV-kontroll (koherens med låshållarens skrivning) och i
+// avstamningStryk (purge/cancel under låset stryker id:n ur avstamning_saknas – listan får inte läsas ur ett memo som fylldes före låset).
+let PROP_MEMO_ = null;
+function propResetMemo_() { PROP_MEMO_ = null; }
+function propMemo_() {
+  if (!PROP_MEMO_) { const alla = PropertiesService.getScriptProperties().getProperties(); PROP_MEMO_ = isPlainObject(alla) ? alla : {}; }
+  return PROP_MEMO_;
+}
+function getProp(name) {
+  const m = propMemo_();
+  return Object.prototype.hasOwnProperty.call(m, name) && m[name] !== null && m[name] !== undefined ? String(m[name]) : '';
+}
+function getPropFarsk(name) {
+  const v = PropertiesService.getScriptProperties().getProperty(name) || '';
+  if (PROP_MEMO_) { if (v) PROP_MEMO_[name] = v; else delete PROP_MEMO_[name]; }
+  return v;
+}
+function setProp(name, value) { PropertiesService.getScriptProperties().setProperty(name, String(value)); if (PROP_MEMO_) PROP_MEMO_[name] = String(value); }
+function deleteProp(name) { PropertiesService.getScriptProperties().deleteProperty(name); if (PROP_MEMO_) delete PROP_MEMO_[name]; }
 
 // De tre fil-id:na. Saknas något → E_SETUP (M3:s setup fyller dem).
 function getFileIds() {
@@ -442,7 +474,7 @@ function mapsElementsToday() { return parseInt(getProp('maps_elements_' + ymdCom
 // Räknar Maps-element mot dagstaket (5.8). Anropas av Availability.gs vid varje Geocoding-/Distance Matrix-anrop.
 function addMapsElements(n) {
   const key = 'maps_elements_' + ymdCompact(todayStr());
-  const v = (parseInt(getProp(key), 10) || 0) + (Number(n) || 0);
+  const v = (parseInt(getPropFarsk(key), 10) || 0) + (Number(n) || 0);   // färsk läsning: räknaren delas av parallella körningar (version 12)
   setProp(key, v);
   return v;
 }
@@ -587,7 +619,7 @@ function inboxCacheKey_() { return 'inbox:' + getFileIds().inbox; }
 function readInbox() {
   let inbox = null;
   try { inbox = cacheChunkedGet_(inboxCacheKey_()); } catch (e) { inbox = null; }   // trasig/ofullständig cache → Drive
-  if (isPlainObject(inbox) && String(Number(inbox.rev) || 0) !== getProp(PROP.INBOX_REV)) inbox = null;   // speglar inte senaste skrivning → Drive
+  if (isPlainObject(inbox) && String(Number(inbox.rev) || 0) !== getPropFarsk(PROP.INBOX_REV)) inbox = null;   // speglar inte senaste skrivning → Drive (alltid färsk läsning, aldrig memot – version 12)
   if (!isPlainObject(inbox)) {
     inbox = readJsonFile(getFileIds().inbox);
     if (LAS_HALLS_) inboxCacheSpara_(inbox);   // bara låshållaren fyller cachen (se ovan)
@@ -772,7 +804,7 @@ function countBooking(ctx) {
   bumpCounter('book:h:' + ctx.kodKey + ':' + hourWindow(), TTL_H_S);
   bumpCounter('book:d:' + ctx.kodKey + ':' + idag, TTL_D_S);
   const key = 'book_count_' + ymdCompact(idag);
-  setProp(key, (parseInt(getProp(key), 10) || 0) + 1);
+  setProp(key, (parseInt(getPropFarsk(key), 10) || 0) + 1);   // färsk läsning under låset (version 12)
 }
 // Bokarens egna ändringar (steg 2a): kontroll före arbetet, uppräkning efter lyckad ändring – samma gränser som book per kod
 // plus en global dagsräknare (andr_count_<YYYYMMDD>, MAX_ANDR_GLOBAL_D) så att alla bokares ändringsmejl tillsammans med
@@ -790,7 +822,7 @@ function countAndring(ctx) {
   bumpCounter('andr:h:' + ctx.kodKey + ':' + hourWindow(), TTL_H_S);
   bumpCounter('andr:d:' + ctx.kodKey + ':' + idag, TTL_D_S);
   const key = 'andr_count_' + ymdCompact(idag);
-  setProp(key, (parseInt(getProp(key), 10) || 0) + 1);
+  setProp(key, (parseInt(getPropFarsk(key), 10) || 0) + 1);   // färsk läsning under låset (version 12)
 }
 
 // Adressnyckel för gränsräkning: gemener, utan skiljetecken, ett mellanslag, utan "sverige" (samma princip som cache-filen, 4.1).
@@ -1184,6 +1216,7 @@ function egenKanAndras(b, nuMs) {
 // ============================================================
 
 function handleAvailability(req, ctx) {
+  const t0 = Date.now();
   const a = authBokare(req, ctx), bokare = a.bokare, config = a.config, inst = config.installningar;
   const from = datumField(req.from, 'from'), to = datumField(req.to, 'to');
   if (to < from) valideringsfel({ to: 'Slutdatum ligger före startdatum' });
@@ -1199,13 +1232,17 @@ function handleAvailability(req, ctx) {
     checkAdressLimits(ctx, adress);
     geoForBooking(adress, ctx, placeId);   // geokodar (räknar ev. API-anrop mot timgränsen) → cache-träff i computeAvailability
   }
-  return computeAvailability({
+  const data = computeAvailability({
     bokare: bokare, config: config, typ: typ, motestypId: typ.id,
     adress: typ.restid ? adress : '',
     from: from, to: to,
     reservationId: reservationId, undantaBokningId: undanta ? undanta.bokningId : '',
     farsk: false, intern: false
   });
+  // Version 12 (K6): valfritt tider { total, busy, geo, restid, plan } i heltal ms (Availability.gs computeAvailabilityCore mäter delarna;
+  // total = hela handlern inkl. auth/geokodning av bokarens adress) – bara mätvärden, aldrig indata. Speglas i loggraden.
+  if (data && isPlainObject(data.tider)) { data.tider.total = Date.now() - t0; ctx.logg = { tider: data.tider }; }
+  return data;
 }
 
 // ============================================================
@@ -1422,6 +1459,7 @@ function handleBook(req, ctx) {
   });
 
   // 7. Utanför låset: notismejl till CJ. Bekräftelsetexten renderas på bokningssidan.
+  if (ny) previewSnapRensa_();   // version 12 (K5): den förberäknade Kalenderkoll-vyn saknar den nya bokningen
   if (ny) notifyCj(config, bokare, typ, bokning);
   return { bokningId: bokning.bokningId, start: bokning.start, slut: bokning.slut, kalenderEventId: bokning.kalenderEventId, restid: bokning.restid, bokning: bokning };
 }
@@ -1832,6 +1870,7 @@ function handleSetup(req, ctx) {
   setProp(PROP.CACHE_FILE_ID, ids.cache);
   clearSetupCache();
   clearConfigCache();
+  previewSnapRensa_();   // version 12 (K5)
   withScriptLock(() => {
     seedBrevladaFile(filer.config, 'config', { bokare: [], motestyper: [], formular: deepClone(DEFAULT_BOKNINGSFORMULAR), installningar: {}, ignorerade: [], pipelines: [] });
     seedBrevladaFile(filer.inbox, 'inbox', { bokningar: [] });
@@ -1880,7 +1919,9 @@ function handleConfigPush(req, ctx) {
   const rev = req.rev;
   if (!(typeof rev === 'number' && Number.isInteger(rev) && rev >= 0)) valideringsfel({ rev: 'Ogiltigt värde' });
   clearConfigCache();
+  previewSnapRensa_();   // version 12 (K5): inställningar/ignorera/override kan ha ändrats – nästa calendar-preview räknar live och skriver ny snapshot
   const cfg = loadConfig(ctx, { farsk: true });
+  clearBusyCacheWindow(cfg.installningar);   // version 12: busy:<datum> lever 11 min och bär konfigberoende innehåll (kalendrar/läge, restidFor, cooldownMin, preliminära) – annars syns ändringen först efter upp till 11 min
   if (cfg.rev < rev) throw apiError('E_STATE', 'Brevlådans konfiguration är äldre än begärd version – försök igen', { configRev: cfg.rev });
   return { ok: true, rev: cfg.rev, configRev: cfg.rev, varningar: configVarningar(cfg) };
 }
@@ -2056,8 +2097,9 @@ function handleReject(req, ctx) {
   const mejlSkickat = notifyBokareAvvisad(config, bokning, orsak);
   return { ok: true, bokningId: bokningId, status: 'avvisad', kalenderBorttagen: kal.borttagen, kalenderFel: kal.fel, mejlSkickat: mejlSkickat, bokning: bokning };
 }
-// Tömmer Calendar.gs dagscache (busy:<datum>, 4.6) för bokningens dagar efter en ändring i kalendern.
-function clearBusyCacheFor(bokning) {
+// Tömmer Calendar.gs dagscache (busy:<datum>, 4.6) för bokningens dagar efter en ändring i kalendern. Invaliderar även snapshoten
+// (K5) om inte opts.utanSnap – anropare med flera bokningar (rebook, purge) invaliderar en gång efteråt i stället för per bokning.
+function clearBusyCacheFor(bokning, opts) {
   try {
     const a = fromIso(bokning.start).datum, z = fromIso(bokning.slut).datum;
     if (!a) return;
@@ -2065,6 +2107,7 @@ function clearBusyCacheFor(bokning) {
     for (let d = a, g = 0; d <= (z || a) && g < 8; d = addDays(d, 1), g++) keys.push('busy:' + d);
     CacheService.getScriptCache().removeAll(keys);
   } catch (e) { /* cache är en optimering */ }
+  if (!(opts && opts.utanSnap === true)) previewSnapRensa_();   // version 12 (K5): snapshoten speglar inte längre kalendern
 }
 // Tar bort bokningens kalenderhändelse (4.7). → { borttagen, fel }. Ingen händelse-id → inget att ta bort.
 function removeBookingEvent(config, kalenderEventId) {
@@ -2141,23 +2184,75 @@ function notifyBokareAvvisad(config, bokning, orsak) {
 // och delas runt platslösa händelser – delar (kronologiska bitar, valfritt fält) är det appen ritar, start/slut är det yttre spannet
 // (äldre appar ritar som förut); konflikt = hela restiden fick inte plats (delar = ett block närmast mötet). handelser[].cooldownMin är
 // den effektiva bufferten (cooldown eller marginal, Calendar.gs finalizeBusy) – samma värde som hindren/paus-blocken bygger på.
+// Version 12 (K3c/K4, CJ: "kalendern är väldigt långsam att ladda"): kärnan är utbruten till previewBerakna_ (buildBusyList →
+// geokodaAnkare → previewResor → previewExport utan inkorgsvarningar) och körs var 10:e minut i refreshIcsCache (previewSnapKor_) för
+// hela fönstret W = [idag−7, horisontTom+7]; resultatet sparas som snapshot (CacheService preview:snap, PREVIEW_SNAP_S). Ett anrop utan
+// req.farsk === true som ryms i en giltig snapshot svarar ur den (handelser/resor filtrerade på datum) + cachad:true, snapshotTs =
+// snapshotens genererad; avstämning (saknas i inkorgen), avbokade-kvar-varningar och Maps-varningen räknas alltid live (billiga:
+// Script Property ur memot, inkorgen ur CacheService, en cache-get) mot snapshotens handelser (previewSvar_). Ingen/utgången/för smal
+// snapshot → live som förut (busy:<datum>-cachen används). farsk:true ("Uppdatera" i appen) → live MED färsk kalenderläsning
+// (buildBusyList farsk – CJ trycker för att se en nyss inlagd händelse; busy:<datum> skrivs om med BUSY_CACHE_VARM_S så att
+// triggerns värme inte kortas). Täcker ett live-anrop hela W skrivs en ny snapshot – bara om ingen previewSnapRensa_ (generations-
+// stämpeln preview:gen) hunnit köra under beräkningen; annars tas även de nyss skrivna busy:<datum> bort (farsk). Svaret får tider
+// { total, auth, inbox, busy, geo, resor, export, kalla:'snapshot'|'live' } i heltal ms (speglas i loggraden via ctx.logg).
 function handleCalendarPreview(req, ctx) {
+  const t0 = Date.now(), tider = { total: 0, auth: 0, inbox: 0, busy: 0, geo: 0, resor: 0, export: 0, kalla: 'live' };
   authAdmin(req, ctx);
+  const genFore = previewSnapGen_();   // K5: stämpeln läses före loadConfig/readInbox – en invalidering under beräkningen (även under config-läsningen) ska stoppa skrivningen
   const config = loadConfig(ctx), inst = config.installningar;
+  tider.auth = Date.now() - t0;
   const from = datumField(req.from !== undefined && req.from !== null ? req.from : req.fran, 'from');
   const to = datumField(req.to !== undefined && req.to !== null ? req.to : req.till, 'to');
   if (to < from) valideringsfel({ to: 'Slutdatum ligger före startdatum' });
   if (daysBetween(from, to) > PREVIEW_MAX_DAGAR) valideringsfel({ to: 'Högst 8 veckor per förfrågan' });
-  const idag = todayStr(), horisontTom = horisontTomDatum(inst);
-  if (from < addDays(idag, -7)) valideringsfel({ from: 'Utanför fönstret (tidigast 7 dagar bakåt)' });
-  if (to > addDays(horisontTom, 7)) valideringsfel({ to: 'Utanför bokningshorisonten' });
+  const W = previewFonster_(inst);
+  if (from < W.from) valideringsfel({ from: 'Utanför fönstret (tidigast 7 dagar bakåt)' });
+  if (to > W.to) valideringsfel({ to: 'Utanför bokningshorisonten' });
 
   // Inkorgen läses en gång: buildBusyList får den som opts.inbox, och avbokade/avvisade poster används för att flagga händelser
   // som ligger kvar i kalendern (4.7: misslyckad Calendar.Events.remove → status sätts ändå, Kalenderkoll ska visa varning).
-  let inbox = null;
+  let t = Date.now(), inbox = null;
   try { inbox = readInbox(); } catch (e) { inbox = null; }             // null → buildBusyList läser själv och varnar
-  const dodaPoster = avbokadeIInkorgen(inbox);
-  const busyRa = buildBusyList(from, to, { config: config, inbox: inbox, farsk: false });
+  tider.inbox = Date.now() - t;
+  const snap = req.farsk === true ? null : previewSnapLas_(from, to);
+  let ber;
+  if (snap) {
+    ber = previewSnapUrval_(snap, from, to);
+    tider.kalla = 'snapshot';
+  } else {
+    const farsk = req.farsk === true, helaW = from <= W.from && to >= W.to;
+    const gen = genFore;   // läst före config/inkorg (ovan)
+    ber = previewBerakna_(config, inbox, from, to, { farsk: farsk, cacheTtlS: BUSY_CACHE_VARM_S, tider: tider });   // en live-läsning är lika färsk som triggerns – skriv inte över 11-minutersposterna med 60 s
+    if (farsk || helaW) {
+      if (previewSnapGen_() === gen) { if (helaW) previewSnapSkriv_(ber); }   // K5: ingen invalidering under beräkningen
+      else if (farsk) clearBusyCacheWindow(inst, { utanSnap: true });         // busy:<datum> 11 min från före ändringen
+    }
+  }
+  t = Date.now();
+  const svar = previewSvar_(ber, inbox, from, to, W);
+  tider.export += Date.now() - t;
+  if (snap) { svar.cachad = true; svar.snapshotTs = str(snap.genererad); }
+  tider.total = Date.now() - t0;
+  svar.tider = tider;
+  ctx.logg = { tider: tider };
+  return svar;
+}
+// Fönstret W som calendar-preview tillåter och triggern förberäknar (samma som appens bokKalFonster): [idag−7, horisontTom+7].
+function previewFonster_(inst) {
+  const idag = todayStr(), horisontTom = horisontTomDatum(inst);
+  return { idag: idag, horisontTom: horisontTom, from: addDays(idag, -7), to: addDays(horisontTom, 7) };
+}
+// Kärnan (version 12): buildBusyList → geokodaAnkare (tak AVAIL_PREVIEW_MAX_GEO) → previewResor/travelSecondsForPairs_ (tak
+// AVAIL_PREVIEW_MAX_PAR) → previewExport UTAN inkorgsberoende varningar (de läggs på i previewSvar_ – live även ur snapshot).
+// opts: { farsk, cacheTtlS (→ readBusy, triggern skriver busy:<datum> med BUSY_CACHE_VARM_S), tider (delmätningar adderas: busy, geo, resor, export) }.
+// → { from, to, genererad, handelser, resor, varningar (kalenderns/ICS:ens), icsStatus, obesvarade, restidOverCap, geoOverCap, busy (BusyItems – bara för syncBlock_) }.
+function previewBerakna_(config, inbox, from, to, opts) {
+  opts = opts || {};
+  const inst = config.installningar, tider = isPlainObject(opts.tider) ? opts.tider : null;
+  let t = Date.now();
+  const busyRa = buildBusyList(from, to, { config: config, inbox: inbox, farsk: opts.farsk === true, cacheTtlS: opts.cacheTtlS });
+  if (tider) tider.busy += Date.now() - t;
+  t = Date.now();
   let geoNya = 0, geoOverCap = false;   // steg 2c: platstexter → koordinater + omrade (kopior), högst AVAIL_PREVIEW_MAX_GEO nya API-anrop
   const busy = geokodaAnkare(busyRa, adress => {
     const g = geocodeAddress(adress, { utanApi: geoNya >= AVAIL_PREVIEW_MAX_GEO });
@@ -2166,46 +2261,136 @@ function handleCalendarPreview(req, ctx) {
     return g;
   });
   busy.varningar = busyRa.varningar || [];
-  const cfg = mapCfg(inst);
-  const resor = previewResor(busy, cfg, par => travelSecondsForPairs_(par, AVAIL_PREVIEW_MAX_PAR));
-  // Avstämning (4.11, A52): den nattliga listan (Script Property/CacheService) + en LIVE jämförelse av vyn mot inkorgen, så att
-  // "Kontrollera avstämning" ser en föräldralös händelse (bokningId utan inkorgspost) direkt – även före första nattkörningen,
-  // efter att en händelse skapats under dagen och när triggern dött (V1). Anonymiserade händelser (PURGE_ANONYM_TITEL) räknas inte.
+  if (tider) tider.geo += Date.now() - t;
+  t = Date.now();
+  const resor = previewResor(busy, mapCfg(inst), par => travelSecondsForPairs_(par, AVAIL_PREVIEW_MAX_PAR));
+  if (tider) tider.resor += Date.now() - t;
+  t = Date.now();
+  const handelser = busy.map(x => previewExport(x, null, null));
+  const ut = {
+    from: from, to: to, genererad: nowIso(), handelser: handelser, resor: resor.resor,
+    varningar: (busy.varningar || []).map(str).filter(Boolean), icsStatus: icsStatusForPing(config),
+    obesvarade: handelser.filter(h => h.preliminar).length, restidOverCap: resor.overCap > 0, geoOverCap: geoOverCap, busy: busy
+  };
+  if (tider) tider.export += Date.now() - t;
+  return ut;
+}
+// Sätter ihop svaret: avstämning (4.11, A52 – den nattliga listan + LIVE jämförelse av vyn mot inkorgen, så att "Kontrollera avstämning"
+// ser en föräldralös händelse direkt även före första nattkörningen och när triggern dött), avbokade/avvisade poster som ligger kvar
+// i kalendern (4.7), Maps-varningen och taken. Anonymiserade händelser (PURGE_ANONYM_TITEL) räknas inte. ber = previewBerakna_ eller previewSnapUrval_.
+function previewSvar_(ber, inbox, from, to, W) {
+  const dodaPoster = avbokadeIInkorgen(inbox);
   const saknas = avstamningSaknas();
   if (inbox && Array.isArray(inbox.bokningar)) {
     const kanda = {};
     inbox.bokningar.forEach(b => { if (b && b.bokningId) kanda[str(b.bokningId)] = true; });
-    busy.forEach(x => {
-      const id = str(x.bokningId);
-      if (x.kalla === 'bokningar' && id && BOKNING_ID_RE.test(id) && !kanda[id] && str(x.summary) !== PURGE_ANONYM_TITEL && saknas[id] !== true) { saknas[id] = true; saknas.antal++; }
+    ber.handelser.forEach(h => {
+      const id = str(h.bokningId);
+      if (h.kalla === 'bokningar' && id && BOKNING_ID_RE.test(id) && !kanda[id] && str(h.titel) !== PURGE_ANONYM_TITEL && saknas[id] !== true) { saknas[id] = true; saknas.antal++; }
     });
   }
-  const handelser = busy.map(x => previewExport(x, saknas, dodaPoster));
+  const handelser = ber.handelser.map(h => previewVarningarPost_(h, saknas, dodaPoster));
   const varningar = [];
   const lagg = v => { const s = str(v); if (s && varningar.indexOf(s) < 0) varningar.push(s); };
-  (busy.varningar || []).forEach(lagg);
+  (ber.varningar || []).forEach(lagg);
   const kvarIKalendern = handelser.filter(h => h.bokningId && dodaPoster[h.bokningId]).length;
   if (kvarIKalendern) lagg(kvarIKalendern + ' avbokade/avvisade möten ligger kvar i kalendern – ta bort dem manuellt');
   const mapsVarning = CacheService.getScriptCache().get('maps:varning');
   if (mapsVarning) lagg('Maps: ' + mapsVarning);
   const saknasIVyn = handelser.filter(h => h.bokningId && saknas[h.bokningId]).length;
   if (saknas.antal) lagg('Kalenderhändelser som saknas i inkorgen: ' + saknas.antal + (saknasIVyn ? ' (' + saknasIVyn + ' i vyn)' : ''));
-  if (resor.overCap > 0) lagg(PREVIEW_RESTID_VARNING);
-  if (geoOverCap) lagg(PREVIEW_GEO_VARNING);
-  const obesvarade = handelser.filter(h => h.preliminar).length;
+  if (ber.restidOverCap === true) lagg(PREVIEW_RESTID_VARNING);
+  if (ber.geoOverCap === true) lagg(PREVIEW_GEO_VARNING);
   return {
-    from: from, to: to, idag: idag, horisontTom: horisontTom, genererad: nowIso(),
-    handelser: handelser, resor: resor.resor, icsStatus: icsStatusForPing(config), obesvarade: obesvarade, varningar: varningar
+    from: from, to: to, idag: W.idag, horisontTom: W.horisontTom, genererad: nowIso(),
+    handelser: handelser, resor: ber.resor, icsStatus: ber.icsStatus, obesvarade: handelser.filter(h => h.preliminar).length, varningar: varningar
   };
+}
+// Snapshoten (K3c): { from, to, genererad, handelser, resor, varningar, icsStatus, obesvarade, restidOverCap, geoOverCap } – aldrig BusyItems.
+// → true om den rymdes i CacheService (cacheChunkedPut_ – gzip i bitar).
+function previewSnapSkriv_(ber) {
+  return cacheChunkedPut_(PREVIEW_SNAP_KEY, {
+    from: ber.from, to: ber.to, genererad: ber.genererad, handelser: ber.handelser, resor: ber.resor, varningar: ber.varningar,
+    icsStatus: ber.icsStatus, obesvarade: ber.obesvarade, restidOverCap: ber.restidOverCap === true, geoOverCap: ber.geoOverCap === true
+  }, PREVIEW_SNAP_S);
+}
+// Giltig snapshot som täcker [from, to] och är yngre än PREVIEW_SNAP_S, annars null.
+function previewSnapLas_(from, to) {
+  const s = cacheChunkedGet_(PREVIEW_SNAP_KEY);
+  if (!s || !DATUM_RE.test(str(s.from)) || !DATUM_RE.test(str(s.to)) || !Array.isArray(s.handelser) || !Array.isArray(s.resor)) return null;
+  if (s.from > from || s.to < to) return null;
+  const ts = Date.parse(str(s.genererad));
+  if (isNaN(ts) || Date.now() - ts > PREVIEW_SNAP_S * 1000) return null;
+  return s;
+}
+// Snapshoten filtrerad till [from, to] (handelser och resor på datum) i samma form som previewBerakna_ (utan busy).
+function previewSnapUrval_(s, from, to) {
+  const inom = x => x && typeof x.datum === 'string' && x.datum >= from && x.datum <= to;
+  const handelser = s.handelser.filter(inom);
+  return {
+    from: from, to: to, genererad: str(s.genererad), handelser: handelser, resor: s.resor.filter(inom),
+    varningar: (Array.isArray(s.varningar) ? s.varningar : []).map(str).filter(Boolean), icsStatus: isPlainObject(s.icsStatus) ? s.icsStatus : icsStatusForPing(null),
+    obesvarade: handelser.filter(h => h.preliminar).length, restidOverCap: s.restidOverCap === true, geoOverCap: s.geoOverCap === true
+  };
+}
+// Invalidering (K5): book/rebook/cancel/purge/egen-* (via clearBusyCacheFor/clearBusyCacheWindow), config-push, setup, dailyMaintenance.
+// Skriver även generationsstämpeln preview:gen så att en beräkning som redan pågår (triggern, eller ett live-svar för hela W) inte
+// skriver tillbaka en snapshot/busy:<datum> från före ändringen – previewSnapKor_/handleCalendarPreview jämför previewSnapGen_ före och efter.
+function previewSnapRensa_() {
+  cacheChunkedRemove_(PREVIEW_SNAP_KEY);
+  try { CacheService.getScriptCache().put(PREVIEW_GEN_KEY, String(Date.now()), PREVIEW_GEN_S); } catch (e) { /* best effort */ }
+}
+// Aktuell generationsstämpel ('' om ingen invalidering skett på 6 h eller cachen saknar nyckeln).
+function previewSnapGen_() { try { return str(CacheService.getScriptCache().get(PREVIEW_GEN_KEY)); } catch (e) { return ''; } }
+// Triggerns förberäkning (K3, refreshIcsCache – EFTER ICS-läsningen, FÖRE syncBlock_): (a) inkorgscachen fylls under låset (tryLock(0);
+// upptaget → läsning utan fyllning), (b) buildBusyList för hela W med farsk:true och busy:<datum> i BUSY_CACHE_VARM_S, (c) snapshot.
+// → { busy, resor, varningar, from, to } för syncBlock_ (K3d) eller null vid fel. Loggrad { trigger:'previewSnap', ok, ms, dagar, handelser, resor, las } utan titlar.
+// Generationskontroll: har previewSnapRensa_ körts (book/cancel/rebook/purge/config-push …) medan beräkningen pågick skrivs ingen snapshot,
+// de nyss skrivna busy:<datum> (11 min) tas bort igen och syncBlock_ får ingen förberäkning (räknar själv som förut) – loggrad ok:false, skal:'invaliderad'.
+function previewSnapKor_(config, genFore) {
+  const t0 = Date.now();
+  const rad = { trigger: 'previewSnap', ok: true, ms: 0, dagar: 0, handelser: 0, resor: 0, las: false };
+  let ut = null;
+  try {
+    const gen = typeof genFore === 'string' ? genFore : previewSnapGen_();   // helst läst före loadConfig/ICS (refreshIcsCache) – en invalidering under config-läsningen räknas då också
+    const inbox = previewSnapInkorg_(rad);
+    const W = previewFonster_(config.installningar);
+    rad.dagar = daysBetween(W.from, W.to) + 1;
+    const ber = previewBerakna_(config, inbox, W.from, W.to, { farsk: true, cacheTtlS: BUSY_CACHE_VARM_S });
+    rad.handelser = ber.handelser.length; rad.resor = ber.resor.length;
+    if (previewSnapGen_() !== gen) {
+      rad.ok = false; rad.skal = 'invaliderad';
+      clearBusyCacheWindow(config.installningar, { utanSnap: true });
+    } else {
+      rad.ok = previewSnapSkriv_(ber);
+      ut = { busy: ber.busy, resor: ber.resor, varningar: ber.varningar, from: W.from, to: W.to };
+    }
+  } catch (e) { rad.ok = false; rad.klass = felKlass(e); }
+  rad.ms = Date.now() - t0;
+  console.log(JSON.stringify(rad));
+  return ut;
+}
+// Inkorgen för triggern: under scriptlåset (tryLock(0)) så att readInbox får fylla CacheService (LAS_HALLS_, version 7-regeln);
+// är låset upptaget läses den utan fyllning. Nästla aldrig withScriptLock här (syncBlock_ tar inget lås – samma princip).
+function previewSnapInkorg_(rad) {
+  let lock = null, fick = false;
+  try { lock = LockService.getScriptLock(); fick = !!lock.tryLock(0); } catch (e) { fick = false; }
+  if (!fick) { try { return readInbox(); } catch (e) { return null; } }
+  rad.las = true;
+  LAS_HALLS_ = true;
+  try { return readInbox(); }
+  catch (e) { return null; }
+  finally { LAS_HALLS_ = false; try { lock.releaseLock(); } catch (e) { /* redan släppt */ } }
 }
 // Avstämningens lista "saknas i inkorgen" (4.11): Script Property AVSTAMNING_PROP { ts, ids } + CacheService AVSTAMNING_CACHE_KEY
 // (JSON-lista av bokningId), båda skrivna av dailyMaintenance (avstamningSkriv). → { <bokningId>: true, …, antal }.
-function avstamningSaknas() {
+// opts.farsk: propertyn läses direkt (getPropFarsk) – avstamningStryk under låset (K1: läs-ändra-skriv aldrig ur memot).
+function avstamningSaknas(opts) {
   const ut = { antal: 0 };
   const lagg = lista => { if (Array.isArray(lista)) lista.forEach(id => { if (typeof id === 'string' && id && id !== 'antal' && !ut[id]) { ut[id] = true; ut.antal++; } }); };
   // Script Property (skrivs av dailyMaintenance, giltig AVSTAMNING_GILTIG_MS – CacheService klarar högst 6 h, spec säger 24 h, A48) …
   try {
-    const raw = getProp(AVSTAMNING_PROP);
+    const raw = opts && opts.farsk === true ? getPropFarsk(AVSTAMNING_PROP) : getProp(AVSTAMNING_PROP);
     const obj = raw ? JSON.parse(raw) : null;
     if (isPlainObject(obj) && typeof obj.ts === 'string' && Date.now() - new Date(obj.ts).getTime() < AVSTAMNING_GILTIG_MS) lagg(obj.ids);
   } catch (e) { /* best effort */ }
@@ -2252,10 +2437,7 @@ function previewExport(x, saknas, dodaPoster) {
   else if (visaText) titel = text(x.summary);
   const varningarPost = [];
   if (x.varning) varningarPost.push(text(x.varning));
-  if (x.bokningId && saknas && saknas[x.bokningId] === true) varningarPost.push('saknas i inkorgen');
-  const dod = x.bokningId && dodaPoster ? dodaPoster[x.bokningId] : '';
-  if (dod === 'avbokad' || dod === 'avvisad') varningarPost.push((dod === 'avbokad' ? 'Avbokad' : 'Avvisad') + ' i inkorgen men händelsen finns kvar i kalendern – ta bort den manuellt');
-  return {
+  const post = {
     id: str(x.id), ignoreraId: matchIds[0] || '', serieId: kalla === 'reservation' ? '' : str(x.recurringEventId), matchIds: matchIds,
     kalla: kalla, datum: str(x.datum), start: str(x.start), slut: str(x.slut), heldag: x.heldag === true,
     titel: titel, plats: visaText && kalla !== 'reservation' ? text(platsText) : '',
@@ -2268,6 +2450,18 @@ function previewExport(x, saknas, dodaPoster) {
     sammanslagenMed: (Array.isArray(x.sammanslagenMed) ? x.sammanslagenMed : []).map(v => String(v || '')).filter(Boolean),
     varning: varningarPost[0] || '', varningar: varningarPost
   };
+  return previewVarningarPost_(post, saknas, dodaPoster);
+}
+// Inkorgsberoende varningar på en exporterad post (version 12: läggs på live även när posten kommer ur snapshoten): 'saknas i inkorgen'
+// (avstämning) och 'Avbokad/Avvisad i inkorgen men händelsen finns kvar …'. Returnerar en kopia bara när något läggs till.
+function previewVarningarPost_(h, saknas, dodaPoster) {
+  const extra = [];
+  if (h.bokningId && saknas && saknas[h.bokningId] === true) extra.push('saknas i inkorgen');
+  const dod = h.bokningId && dodaPoster ? dodaPoster[h.bokningId] : '';
+  if (dod === 'avbokad' || dod === 'avvisad') extra.push((dod === 'avbokad' ? 'Avbokad' : 'Avvisad') + ' i inkorgen men händelsen finns kvar i kalendern – ta bort den manuellt');
+  if (!extra.length) return h;
+  const varningar = (Array.isArray(h.varningar) ? h.varningar : []).concat(extra);
+  return Object.assign({}, h, { varning: varningar[0] || '', varningar: varningar });
 }
 
 // ---------- rebook (4.4, 4.7, 4.9, 6.3 Omboka, 8.3) – M4 ----------
@@ -2381,8 +2575,9 @@ function rebookUtfor(config, bokare, typ, bokningId, forb, opts) {
       try { patchBookingEvent(config, bokare, typ, Object.assign({}, b, { kalenderEventId: kal.eventId }), { start: fran, slut: franSlut, adress: franAdress, motestypId: str(b.motestypId) }); } catch (e2) { /* best effort */ }
       fel('E_INTERNAL', 'Ombokningen kunde inte sparas – inget har ändrats');
     }
-    clearBusyCacheFor({ start: fran, slut: franSlut });
-    clearBusyCacheFor(b);
+    clearBusyCacheFor({ start: fran, slut: franSlut }, { utanSnap: true });
+    clearBusyCacheFor(b, { utanSnap: true });
+    previewSnapRensa_();   // version 12 (K5): en gång för båda dagarna
     // Version 7: den honorerade reservationen (rebookReservationId – bokningens bokare eller CJ-bokare) har gjort sitt när flytten
     // lyckats; släpp den så att luckan inte ligger kvar som hinder för andra i upp till 5 min (book gör detsamma via releaseOwnReservation).
     if (forb.reservationId) { try { releaseReservation(forb.reservationId); } catch (e) { /* best effort – går ut av sig själv */ } }
@@ -2687,27 +2882,30 @@ function handlePurge(req, ctx) {
       updateCacheFile(obj => { let n = 0; nycklar.forEach(k => { if (obj.geokod && Object.prototype.hasOwnProperty.call(obj.geokod, k)) { delete obj.geokod[k]; n++; } }); ut.geokodBorttagna = n; return n > 0; });
       try { CacheService.getScriptCache().removeAll(nycklar.map(k => 'geo:' + sha256hex(k))); } catch (e) { /* best effort */ }
     }
-    borttagna.forEach(b => clearBusyCacheFor(b));
+    borttagna.forEach(b => clearBusyCacheFor(b, { utanSnap: true }));
     // Händelser utan inkorgspost (kalenderEventIds/sökning) har ingen känd dag utan extra anrop – töm busy:<datum> för hela
     // preview-fönstret (≤ ~80 nycklar, 60 s-cache) så att Kalenderkoll inte visar den raderade händelsen (och 'saknas i inkorgen')
     // i upp till en minut efter "Ta bort ur kalendern".
-    if (Object.keys(handelser).length) clearBusyCacheWindow(config.installningar);
+    if (Object.keys(handelser).length) clearBusyCacheWindow(config.installningar, { utanSnap: true });
+    if (borttagna.length || Object.keys(handelser).length) previewSnapRensa_();   // version 12 (K5): en gång, inte per bokning (låset hålls)
     avstamningStryk(allaIds);
   });
   return ut;
 }
 // Tömmer busy:<datum> för [idag−7, horisont+7] (calendar-preview-fönstret). Cachen är en optimering – fel ignoreras.
-function clearBusyCacheWindow(inst) {
+// opts.utanSnap: som clearBusyCacheFor (purge invaliderar en gång; previewSnapKor_ städar efter en invaliderad beräkning).
+function clearBusyCacheWindow(inst, opts) {
   try {
     const keys = [];
     const till = addDays(horisontTomDatum(inst), 7);
     for (let d = addDays(todayStr(), -7), g = 0; d <= till && g < 120; d = addDays(d, 1), g++) keys.push('busy:' + d);
     CacheService.getScriptCache().removeAll(keys);
   } catch (e) { /* cache är en optimering */ }
+  if (!(opts && opts.utanSnap === true)) previewSnapRensa_();   // version 12 (K5)
 }
 // Stryker id:n (objekt { <bokningId>: … }) ur avstämningslistan utan att ändra listans ts (A48) – purge och cancel { kalenderEventId }.
 function avstamningStryk(idSet) {
-  const saknas = avstamningSaknas();
+  const saknas = avstamningSaknas({ farsk: true });   // version 12: färsk läsning – memot fylldes före låset (purgeAvstamningTs läser sedan ur det uppdaterade memot)
   const kvar = Object.keys(saknas).filter(id => id !== 'antal' && !Object.prototype.hasOwnProperty.call(idSet || {}, id));
   if (kvar.length !== saknas.antal) avstamningSkriv(kvar, purgeAvstamningTs());
 }
@@ -2825,19 +3023,34 @@ function syncBlockNyckel_(b) {
 // (b) ett marginal-block per räknad, tidsatt post med cooldownMin > 0 som slutar före 24:00: '⏱ Marginal efter X (N min)'.
 // → { block:[{ typ, datum, start, slut, titel, ref, nyckel }], from, to, varningar } – dubbletter på nyckel och tomma intervall utelämnas;
 // varningar = buildBusyList.varningar (syncBlock_ hoppar över skrivningarna när källan är ofullständig).
-function syncBlockBerakna_(config, inbox) {
+// forberaknat (valfritt, version 12 K3d) = previewSnapKor_:s { busy, resor, varningar, from, to } ur samma triggerkörning: fönstret
+// [idag−7, horisontTom+7] ⊇ [idag, horisontTom], så busy filtreras på datum och kalla !== 'reservation' (som förut); resor räknas om
+// ur det filtrerade (redan geokodade) busy med previewResor – restidsparen ligger i CacheService efter triggerns beräkning (ett getAll,
+// inga nya Maps-anrop i normalfallet), så kedjan A→C runt en reservation B blir densamma som utan reservationer (som före version 12).
+// Ingen ny kalenderläsning/geokodning. Skyddsnät: ben som ändå rör en reservation utelämnas.
+function syncBlockBerakna_(config, inbox, forberaknat) {
   const inst = config.installningar;
   const from = todayStr(), to = horisontTomDatum(inst);
-  const busyAlla = buildBusyList(from, to, { config: config, inbox: inbox, farsk: false, reservationer: [] });
-  const varningar = Array.isArray(busyAlla.varningar) ? busyAlla.varningar.slice() : [];
-  const busyRa = busyAlla.filter(x => x && x.kalla !== 'reservation');
-  let geoNya = 0;
-  const busy = geokodaAnkare(busyRa, adress => {
-    const g = geocodeAddress(adress, { utanApi: geoNya >= AVAIL_PREVIEW_MAX_GEO });
-    if (g && g.nyttAnrop === true) geoNya++;
-    return g;
-  });
-  const resor = previewResor(busy, mapCfg(inst), par => travelSecondsForPairs_(par, AVAIL_PREVIEW_MAX_PAR)).resor;
+  let busy, resor, varningar;
+  if (forberaknat && Array.isArray(forberaknat.busy) && Array.isArray(forberaknat.resor) && str(forberaknat.from) <= from && str(forberaknat.to) >= to) {
+    varningar = (Array.isArray(forberaknat.varningar) ? forberaknat.varningar : []).slice();
+    const bort = {};
+    forberaknat.busy.forEach(x => { if (x && x.kalla === 'reservation' && x.id) bort[String(x.id)] = true; });
+    busy = forberaknat.busy.filter(x => x && x.kalla !== 'reservation' && x.datum >= from && x.datum <= to);
+    resor = previewResor(busy, mapCfg(inst), par => travelSecondsForPairs_(par, AVAIL_PREVIEW_MAX_PAR)).resor
+      .filter(r => r && r.datum >= from && r.datum <= to && !bort[String(r.franId)] && !bort[String(r.tillId)]);
+  } else {
+    const busyAlla = buildBusyList(from, to, { config: config, inbox: inbox, farsk: false, reservationer: [] });
+    varningar = Array.isArray(busyAlla.varningar) ? busyAlla.varningar.slice() : [];
+    const busyRa = busyAlla.filter(x => x && x.kalla !== 'reservation');
+    let geoNya = 0;
+    busy = geokodaAnkare(busyRa, adress => {
+      const g = geocodeAddress(adress, { utanApi: geoNya >= AVAIL_PREVIEW_MAX_GEO });
+      if (g && g.nyttAnrop === true) geoNya++;
+      return g;
+    });
+    resor = previewResor(busy, mapCfg(inst), par => travelSecondsForPairs_(par, AVAIL_PREVIEW_MAX_PAR)).resor;
+  }
   const kundnamn = {};
   ((inbox && inbox.bokningar) || []).forEach(b => { if (b && b.bokningId && b.kund && b.kund.namn) kundnamn[String(b.bokningId)] = String(b.kund.namn); });
   const titel = {};
@@ -2950,7 +3163,7 @@ function syncBlock_(opts) {
       let inbox = null;
       try { inbox = readInbox(); } catch (e) { inbox = null; }
       if (!inbox) { r.hoppad = 'inkorg'; r.ok = false; const prev = blockSynkSenast_(); r.antal = prev ? (prev.antal | 0) : 0; r.kvar = r.antal; return r; }   // utan kundnamn blev titlarna 'Bokning' – vänta; statusen behåller senaste antal (allt "väntar")
-      const ber = syncBlockBerakna_(config, inbox);
+      const ber = syncBlockBerakna_(config, inbox, opts.forberaknat || null);   // version 12: triggern skickar sin förberäkning (K3d)
       onskade = ber.block;
       if (ber.varningar.some(v => /^Inkorgen kunde inte läsas/.test(v))) r.hoppad = 'inkorg';
       else if (ber.varningar.some(v => /^Outlook-flödet kunde inte läsas/.test(v))) {
@@ -3085,13 +3298,19 @@ function install() {
 // Fel fäller aldrig (try/catch) – readIcs sätter själv felmeta/reserv. Loggrad { trigger:'refreshIcsCache', ok, ms, kalla } utan personuppgifter.
 // Version 11 (A61, K5): EFTER ICS-läsningen körs blocksynken syncBlock_({ maxSkriv: 40 }) i egen try/catch – bara när blockSynkAktiv
 // eller när ett kalender-id finns (städning efter avstängning). Den har sin egen loggrad; ICS-radens ok/kalla påverkas aldrig av den.
+// Version 12 (K3): mellan ICS-läsningen och blocksynken körs previewSnapKor_ (inkorgscache under tryLock(0), buildBusyList för hela
+// fönstret med busy:<datum> i 11 min, snapshot preview:snap) och blocksynken återanvänder dess busy/resor. Tidsbudget: ≤ 30 s per
+// körning i snitt (144 körningar/dygn mot trigger-kvoten 90 min/dygn; syncBlock_ BLOCK_SYNK_MAX_MS_TRIGGER räknas in) – överskrids den
+// återkommande stänger Apps Script av triggers resten av dygnet (ingen ICS-värmning, ingen snapshot, ingen dailyMaintenance).
 function refreshIcsCache() {
   const t0 = Date.now();
-  let ok = true, kalla = 'hoppad', config = null;
+  let ok = true, kalla = 'hoppad', config = null, snapGen = '';
   try {
     if (typeof kalResetMemo_ === 'function') kalResetMemo_();
     if (typeof availResetMemo_ === 'function') availResetMemo_();
     brevladaResetMemo_();
+    propResetMemo_();
+    snapGen = previewSnapGen_();   // K5: stämpeln före config- och ICS-läsningen (previewSnapKor_ jämför efter beräkningen)
     config = loadConfig();
     const res = refreshIcsLas_(config);
     ok = res.ok; kalla = res.kalla;
@@ -3103,8 +3322,13 @@ function refreshIcsCache() {
     console.log(JSON.stringify({ trigger: 'refreshIcsCache', ok: ok, ms: Date.now() - t0, kalla: kalla }));
   }
   if (!config) return;
+  // Version 12 (K3): förberäknad calendar-preview + varma cacher (inkorg, busy:<datum> 11 min) – egen loggrad, fäller aldrig.
+  let forberaknat = null;
+  try { forberaknat = previewSnapKor_(config, snapGen); }
+  catch (e) { console.log(JSON.stringify({ trigger: 'previewSnap', ok: false, ms: 0, klass: felKlass(e) })); }
+  finally { if (typeof availFlushGeokod_ === 'function') availFlushGeokod_(); }
   try {
-    if (blockSynkAktiv_(config) || blockKalenderId_()) syncBlock_({ maxSkriv: BLOCK_SYNK_MAX_SKRIV_TRIGGER, maxMs: BLOCK_SYNK_MAX_MS_TRIGGER, config: config });
+    if (blockSynkAktiv_(config) || blockKalenderId_()) syncBlock_({ maxSkriv: BLOCK_SYNK_MAX_SKRIV_TRIGGER, maxMs: BLOCK_SYNK_MAX_MS_TRIGGER, config: config, forberaknat: forberaknat });
   } catch (e) {
     console.log(JSON.stringify({ trigger: 'syncBlock', ok: false, ms: 0, fel: 1, klass: felKlass(e) }));
   } finally {
@@ -3132,6 +3356,7 @@ function dailyMaintenanceInner_() {
   if (typeof availResetMemo_ === 'function') availResetMemo_();   // egen körning – memona ska vara tomma som i doPost
   if (typeof kalResetMemo_ === 'function') kalResetMemo_();
   brevladaResetMemo_();
+  propResetMemo_();
   const rad = { trigger: 'dailyMaintenance', ok: true, ms: 0, raknare: 0, inkorg: 0, utanImport: 0, geokod: 0, restid: 0, omrade: 0, saknas: 0, fel: [] };
   const nuMs = Date.now();
   // 1. Räknare i Script Properties äldre än 7 dagar (4.2, 4.11) – oberoende av brevlådan.
@@ -3146,7 +3371,7 @@ function dailyMaintenanceInner_() {
         const g = gallraInkorg(inbox.bokningar, nuMs);
         rad.inkorg = g.borttagna.length; rad.utanImport = g.utanImport;
         g.borttagna.forEach(b => { if (b.bokningId) gallradeIds[str(b.bokningId)] = true; });
-        if (g.borttagna.length) { inbox.bokningar = g.kvar; writeInbox(inbox); }
+        if (g.borttagna.length) { inbox.bokningar = g.kvar; writeInbox(inbox); previewSnapRensa_(); }   // version 12 (K5)
         const gallradeNycklar = {};
         g.borttagna.forEach(b => { const k = normalizeAdressKey(b.adress); if (k) gallradeNycklar[k] = true; });
         updateCacheFile(obj => { const c = gallraCacheFil(obj, nuMs, gallradeNycklar); rad.geokod = c.geokod; rad.restid = c.restid; return c.andrad; });
@@ -3187,7 +3412,7 @@ function gallraRaknare(idag) {
   let n = 0;
   Object.keys(props.getProperties()).forEach(k => {
     const m = /^(maps_elements_|book_count_|andr_count_)(\d{8})$/.exec(k);
-    if (m && m[2] < grans) { props.deleteProperty(k); n++; }
+    if (m && m[2] < grans) { deleteProp(k); n++; }   // via deleteProp så att körningens memo (version 12) hålls koherent
   });
   return n;
 }

@@ -1130,6 +1130,8 @@ function getIcsStatus() {
  * readBusy(fran, till, opts) → BusyItem-segment (ej sammanslagna) för Google-kalendrarna i
  * config.installningar.kalendrar + Outlook-ICS. `fran`/`till` = 'YYYY-MM-DD' (inklusive).
  * Cache busy:<datum> 60 s; opts.farsk = true läser färskt (book/rebook).
+ * opts.cacheTtlS (version 12, K3b): TTL för busy:<datum> som skrivs efter en läsning (default KAL_BUSY_CACHE_S) – triggern
+ * refreshIcsCache skriver 11 min (Code.gs BUSY_CACHE_VARM_S) så att availability/calendar-preview träffar cachen mellan körningarna.
  * Returnerar array med egenskapen `varningar` (ICS-fel m.m.).
  * Kastar E_CALENDAR vid API-fel (hellre ingen bokning än dubbelbokning, 5.13).
  */
@@ -1184,7 +1186,8 @@ function readBusy(fran, till, opts) {
     items.forEach(x => { perDag['busy:' + x.datum].push(x); });
     const put = {};
     Object.keys(perDag).forEach(k => { put[k] = JSON.stringify(perDag[k]); });
-    cache.putAll(put, KAL_BUSY_CACHE_S);
+    const ttlS = Number(opts.cacheTtlS) > 0 ? Math.min(21600, Math.round(Number(opts.cacheTtlS))) : KAL_BUSY_CACHE_S;
+    cache.putAll(put, ttlS);
   } catch (err) { /* cache är en optimering */ }
 
   items.varningar = varningar;
@@ -1195,7 +1198,7 @@ function readBusy(fran, till, opts) {
  * buildBusyList(from, to, opts) → sammanslagen, ignorera-filtrerad lista av BusyItem-segment (spec 5.2):
  *   readBusy + bekräftade bokningar ur inkorgen (ny/importerad, framtida) + aktiva reservationer
  *   → mergeBusy → applyIgnore (ignorera/räkna + restid-override, 3.5) → finalizeBusy (härledda fält + effektiv buffert, version 10).
- * opts: { config, inbox, farsk, reservationId (anropande bokarens egen), bokareId (för egen/kundnamn),
+ * opts: { config, inbox, farsk, cacheTtlS (→ readBusy, version 12), reservationId (anropande bokarens egen), bokareId (för egen/kundnamn),
  *         undantaBokningId (ombokning: alla poster med samma bokningId tas bort helt, samt ICS-poster vars UID är bokningens
  *         Google-iCalUID – Outlooks accepterade kopia; se kalUndantaBokning_) }
  * Returnerar array med egenskapen `varningar`.
@@ -1215,7 +1218,7 @@ function buildBusyList(from, to, opts) {
   opts = opts || {};
   const config = kalConfig_(opts);
   const cooldownFor = kalCooldownFn_(config), restidFor = kalRestidFn_(config);
-  const busy = readBusy(from, to, { config, farsk: !!opts.farsk });
+  const busy = readBusy(from, to, { config, farsk: !!opts.farsk, cacheTtlS: opts.cacheTtlS });
   const varningar = (busy.varningar || []).slice();
   let items = busy.slice();
 

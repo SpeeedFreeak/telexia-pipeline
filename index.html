@@ -1049,6 +1049,7 @@ const PURGE_SCRIPT_VERSION = 3;   // scriptversion med purge på riktigt (M5); �
 const SJALVSERVICE_SCRIPT_VERSION = 4;   // scriptversion med bokarens självservice (steg 2a); äldre script → bokningssidan saknar Omboka/Ändra/Avboka (Drift-panelen varnar)
 const ADRESSFORSLAG_SCRIPT_VERSION = 5;   // scriptversion med adressförslag (steg 2b, 'adressforslag'); äldre script → fritext utan fel (Drift-panelen visar "Adressförslag: av")
 const BLOCKSYNK_SCRIPT_VERSION = 11;   // scriptversion med blocksynk till Google Kalender (A61, 'block-sync' + ping.blockSynk); äldre script → inställningen har ingen verkan (Drift-panelen varnar)
+const KALSNAPSHOT_SCRIPT_VERSION = 12;   // scriptversion med förberäknad kalender (K3/K4: calendar-preview svarar cachad/snapshotTs/tider, tar farsk); äldre script → svaret saknar fälten, appen ritar som förut
 const BOK_TIMEOUT_MS = { hello: 15000, availability: 15000, geocode: 15000, ping: 15000, adressforslag: 10000, 'block-sync': 180000 };   // övriga (skrivande) 45 000; block-sync (K4/K5): upp till 80 kalenderskrivningar + restidsberäkning i samma körning (Apps Script-tak 6 min)
 function bokScriptUrl() {
   const u = (typeof BOKNINGSINSTALLNINGAR === 'object' && BOKNINGSINSTALLNINGAR) ? BOKNINGSINSTALLNINGAR.scriptUrl : '';
@@ -3746,6 +3747,8 @@ function kortTidLabel(iso) {   // '16/9 14:03' ur ISO (Stockholm)
   const p = tzParts(d); return (+p.datum.slice(8, 10)) + '/' + (+p.datum.slice(5, 7)) + ' ' + p.tid;
 }
 function kortDatumLabel(dateStr) { return /^\d{4}-\d{2}-\d{2}$/.test(dateStr || '') ? (+dateStr.slice(8, 10)) + '/' + (+dateStr.slice(5, 7)) : (dateStr || ''); }
+function msLabel(ms) { ms = Math.max(0, Math.round(Number(ms) || 0)); return ms >= 1000 ? (ms / 1000).toFixed(1).replace('.', ',') + ' s' : ms + ' ms'; }   // '1,3 s' / '420 ms' (Drift-panelen)
+function kalKlockslag(iso) { const kt = kortTidLabel(iso), idagL = kortDatumLabel(todayStr()) + ' '; return kt.startsWith(idagL) ? kt.slice(idagL.length) : kt; }   // bara klockslag i dag ('14:03'), annars '16/9 14:03'
 function sleepMs(ms) { return new Promise(r => setTimeout(r, ms)); }
 async function sha256Hex(s) {
   const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(String(s)));
@@ -4021,7 +4024,9 @@ async function testaAnslutning() {
 //   första), avstamningSaknas? (M5: antal kalenderhändelser som saknas i inkorgen enligt scriptets avstämning 4.11) }. Saknade fält
 //   (äldre script) → null/'–'. Allt valideras/klipps. Sparas i minnet (inte i Drive) och visas i Inställningar › Drift och kvoter samt
 //   som gula rader i statusraden (Maps-varning, ICS-fel, avstämning).
-let bokDrift = { ping: null, pingTs: '', pingFel: '', pingVersion: 0, pagar: false };
+// kal (version 12, K7): senaste calendar-preview-hämtning – { ts, klientMs (Date.now runt bokAdminApi, långsammaste biten), tider (scriptets
+//   tider eller null när scriptet inte rapporterar), kalla:'snapshot'|'live', bitar } – visas som raden "Kalender: senaste hämtning …" i Drift-panelen.
+let bokDrift = { ping: null, pingTs: '', pingFel: '', pingVersion: 0, pagar: false, kal: null };
 let bokSenasteKalKoll = null;   // { ts, varningar:[], saknasIds:[], saknasAntal } ur senaste calendar-preview (avstämningen 4.11)
 function normPing(d) {
   d = isPlainObject(d) ? d : {};
@@ -4148,6 +4153,14 @@ function bokDriftRader() {   // gemensamma rader för Drift-panelen; statusraden
     else if (p.blockSynk && p.blockSynk.kalenderId) rader.push({ text: 'Blocksynk: av – kalendern "Pipeline – restid" finns kvar; scriptet tömmer den vid nästa körning (var 10:e minut)', kind: 'info', omrade: 'blocksynk' });
     else rader.push({ text: 'Blocksynk (restid/marginal → Google Kalender): av', kind: 'info', omrade: 'blocksynk' });
   }
+  // Kalender (version 12, K7): senaste calendar-preview – klientmätt total + scriptets tider (K4) och källa snapshot/live. Saknar svaret
+  // tider (äldre script) visas bara klienttiden med en hint om scriptversionen.
+  const kal = bokDrift.kal;
+  if (kal) {
+    const t = kal.tider;
+    rader.push({ text: 'Kalender: senaste hämtning ' + msLabel(kal.klientMs) + ' (' + (t ? 'script ' + msLabel(t.total) + ': busy ' + msLabel(t.busy) + ' · geo ' + msLabel(t.geo) + ' · restid ' + msLabel(t.resor) + ' · export ' + msLabel(t.export) + ' · kalla ' + kal.kalla
+      : 'scriptet rapporterar inga tider – kräver scriptversion ' + KALSNAPSHOT_SCRIPT_VERSION) + ')' + (kal.bitar > 1 ? ' · ' + kal.bitar + ' bitar' : '') + ' · ' + kortTidLabel(kal.ts), kind: 'info', omrade: 'kalender' });
+  }
   // Avstämning (4.11): den egna kontrollen (calendar-preview, bokSenasteKalKoll) i första hand; annars scriptets nattliga körning
   // (ping.avstamningSaknas) – t.ex. när kontrollen gjordes före nattens körning eller när händelserna ligger utanför hämtat intervall.
   // Är den egna kontrollen nyare än ping-svaret (cachat 5 min) gäller den även när den säger 0 – t.ex. efter purge/"Ta bort ur kalendern",
@@ -4266,7 +4279,7 @@ async function importeraBokningar(orsak) {
     else if (r.fel) setBokStatus(r.fel, 'err');
     else if (orsak === 'manuell') setBokStatus('Inga nya bokningar ' + nowTimeStr(), 'info');
     if (r.andrat || r.nya > 0) {
-      bokKalInvalidera();   // M4: nya/ändrade bokningar → Kalender-underfliken hämtar om snapshoten i stället för att visa "saknas i kalendern"
+      bokKalInvalidera(true);   // M4: nya/ändrade bokningar → Kalender-underfliken hämtar om snapshoten (live, K7) i stället för att visa "saknas i kalendern"
       renderBoard(); renderStats(); renderKpis(); renderCustomerRegistry(); renderActivity();
     }
     updateBokningTabCount(); renderBookingsIfVisible();
@@ -4286,7 +4299,7 @@ async function importeraBokningar(orsak) {
           bokInkorgCache = bokningar;
           const r = await bearbetaInkorg(bokningar);
           senasteImportTs = new Date().toISOString();
-          if (r.andrat || r.nya > 0) { bokKalInvalidera(); renderBoard(); renderStats(); renderKpis(); renderCustomerRegistry(); renderActivity(); }
+          if (r.andrat || r.nya > 0) { bokKalInvalidera(true); renderBoard(); renderStats(); renderKpis(); renderCustomerRegistry(); renderActivity(); }
           updateBokningTabCount(); renderBookingsIfVisible();
           setBokStatus((r.nya > 0 ? r.nya + ' ' + (r.nya === 1 ? 'ny bokning importerad' : 'nya bokningar importerade') + ' ' : 'Inkorgen hämtad via scriptet ') + nowTimeStr() + ' – Drive svarade inte: ' + (e && e.message || e), r.fel ? 'err' : 'warn');
           reserv = true;
@@ -4780,7 +4793,7 @@ async function avvisaBokning(bokningId) {
   saveBokningImport(BOKNING_IMPORT);
   if (problem.length) setBokStatus('Bokningen avvisad, men ' + problem.join('; '), 'warn');
   else setBokStatus('Bokningen avvisad – ' + (harEpost ? 'bokaren (' + namn + ') meddelas per e-post' : 'ingen bokare att meddela'), 'ok');
-  bokKalInvalidera();   // M4: Kalender-underfliken ska inte visa den avvisade bokningen ur snapshoten
+  bokKalInvalidera(true);   // M4: Kalender-underfliken ska inte visa den avvisade bokningen ur snapshoten (live, K7)
   renderBoard(); renderActivity(); updateBokningTabCount(); renderBookingsIfVisible();
 }
 
@@ -5542,7 +5555,7 @@ const BOK_KAL_KALLA_NAMN = { privat: 'Privat kalender', bokningar: 'Bokningar', 
 // ritas). Bara i minnet – kalenderns titlar/platser lagras aldrig (spec 3.5/6.3). ogiltigGen räknar ogiltigmarkeringar (bokKalInvalidera)
 // så att en ändring under pågående hämtning inte går förlorad. hamtar = pågående bakgrundshämtning (promise, delas av alla som väntar);
 // hamtFel = feltext från senaste misslyckade hämtning; scriptHorisont = scriptets horisontTom ur senaste svar (dag = när det lästes).
-let bokKal = { vy: '', datum: todayStr(), lage: 'grid', panel: '', seq: 0, data: null, segment: [], resor: [], valdSid: -1, snapshot: null, ogiltigGen: 0, hamtar: null, hamtFel: '', scriptHorisont: { tom: '', dag: '' }, sjalv: { bokareId: '', kundId: '', kontaktId: '' } };
+let bokKal = { vy: '', datum: todayStr(), lage: 'grid', panel: '', seq: 0, data: null, segment: [], resor: [], valdSid: -1, snapshot: null, ogiltigGen: 0, hamtar: null, hamtFel: '', farskTill: 0, scriptHorisont: { tom: '', dag: '' }, sjalv: { bokareId: '', kundId: '', kontaktId: '' } };
 bokKal.cache = { clear: () => bokKalInvalidera() };   // bakåtkompatibelt alias (tidigare Map per intervall) – ny kod anropar bokKalInvalidera()
 function bokKalArMobil() { return window.innerWidth <= 720; }
 function bokKalVy() { if (!bokKal.vy) bokKal.vy = bokKalArMobil() ? 'dag' : 'vecka'; return bokKal.vy; }
@@ -5596,10 +5609,19 @@ function bokKalRubrik() {
 // Version 10 (K5): minuter = Googles råa körtid (inget påslag); delar (valfritt, ≤ 8, kronologiskt) = restiden uppdelad runt platslösa
 //   möten (Teams m.m.) – start/slut förblir det yttre spannet så att äldre appar ritar som förut; appen ritar ett block per del.
 // Restider med minuter 0 (K3: identiska koordinater) hoppas över i normKalResor – de ritas inte.
+// Version 12 (K4/K7, valfritt): request farsk:true vid tvingad hämtning (Uppdatera-knappen / laddaBokKalVy(true)) och efter egna skrivande
+//   åtgärder (bokKalInvalidera(true), se BOK_KAL_FARSK_EFTER_ANDRING_MS) – annars utelämnat så att scriptet får svara ur sin förberäknade
+//   snapshot (triggern var 10:e minut). OBS: farsk:true hoppar bara över scriptets snapshot (beräkningen körs live); busy:<datum>-cachen
+//   (K3: skrivs av triggern med 11 min TTL) styrs av scriptet, så en ändring gjord direkt i Google Kalender kan dröja upp till dess TTL
+//   även efter Uppdatera. Svar: cachad:true + snapshotTs (ISO, när snapshoten genererades) när svaret kommer ur scriptets snapshot –
+//   statusraden visar 'Hämtat HH:MM · snapshot från HH:MM'; tider { total, auth, inbox, busy, geo, resor, export, kalla:'snapshot'|'live' }
+//   (heltal ms) → Drift-panelen (bokDrift.kal). Appens egen snapshot-modell (120 s ovan) behålls och kombineras med scriptets.
 // Marginal efter mötet (K2/version 10): handelser[].cooldownMin (heltal 0–600) = effektiv buffert (mötestypens paus eller marginal
 // fysiskt/online ur inställningarna, scriptets finalizeBusy) behålls per segment och ritas som en ljus remsa .kb-paus
 // slutMin → slutMin+cooldownMin under händelsen i samma lane (bara om slutet ligger före midnatt).
 const BOK_KAL_SNAPSHOT_FARSK_MS = 120000;              // äldre snapshot ritas direkt men hämtas om i bakgrunden
+const BOK_KAL_FARSK_EFTER_ANDRING_MS = 660000;         // version 12 (K5/K7): efter en egen skrivande åtgärd (bokad/ombokad/avbokad/avvisad/purge, import med nya/ändrade bokningar)
+                                                       //   skickar nästa hämtning farsk:true – scriptets snapshot kan sakna ändringen tills triggern skrivit om den (PREVIEW_SNAP_S = 660 s)
 // Fönstret idag−7 … horisont+7 ur den LOKALA horisonten, klippt mot scriptets horisontTom+7 när det är känt från i dag (en osynkad
 // högre horisont skulle annars ge E_VALIDATION 'Utanför bokningshorisonten' för svansen vid varje hämtning). Vyer bortom klippet visar
 // placeholdern 'Utanför förhandsgranskningsfönstret'; efter lyckad config-push nollställs klippet (pushBokningConfigKor).
@@ -5616,15 +5638,29 @@ function bokKalFonsterBitar() {   // hela fönstret i ≤ 56-dagarsbitar (script
 }
 function bokKalTacker(snap, fran, till) { return !!snap && snap.fran <= fran && snap.till >= till; }   // täcker snapshoten intervallet?
 // Ett calendar-preview-anrop för en bit av fönstret (ingen cache – snapshoten är cachen). horisontTom = scriptets horisont (valfritt fält).
-async function hamtaKalenderPreview(fran, till) {
-  const r = await bokAdminApi('calendar-preview', { fran, till, from: fran, to: till });
-  if (!r.ok) return { ok: false, fel: bokFelText(r), kod: r.error && r.error.code };
+// farsk (version 12, K7): true bara vid tvingad hämtning → skickas som farsk:true (scriptet räknar live); annars utelämnas fältet.
+// klientMs = Date.now runt bokAdminApi (Drift-panelen); cachad/snapshotTs/tider ur svaret (valfria – äldre script saknar dem).
+async function hamtaKalenderPreview(fran, till, farsk) {
+  const payload = { fran, till, from: fran, to: till };
+  if (farsk === true) payload.farsk = true;
+  const t0 = Date.now();
+  const r = await bokAdminApi('calendar-preview', payload);
+  const klientMs = Date.now() - t0;
+  if (!r.ok) return { ok: false, fel: bokFelText(r), kod: r.error && r.error.code, klientMs };
   const d = isPlainObject(r.data) ? r.data : {};
   const handelser = [];
   (Array.isArray(d.handelser) ? d.handelser : []).filter(isPlainObject).forEach(h => { normKalHandelse(h).forEach(s => handelser.push(s)); });
   const varningar = (Array.isArray(d.varningar) ? d.varningar : []).filter(v => typeof v === 'string').map(v => v.slice(0, 300)).slice(0, 20);
   const horisontTom = bstr(d.horisontTom, 10);
-  return { ok: true, handelser, resor: normKalResor(d.resor), varningar, fran, till, horisontTom: BOK_KAL_DATUM_RE.test(horisontTom) ? horisontTom : '' };
+  const cachad = d.cachad === true, snapshotTs = bstr(d.snapshotTs, 40);
+  return { ok: true, handelser, resor: normKalResor(d.resor), varningar, fran, till, horisontTom: BOK_KAL_DATUM_RE.test(horisontTom) ? horisontTom : '',
+    cachad, snapshotTs: cachad && !isNaN(Date.parse(snapshotTs)) ? snapshotTs : '', tider: normKalTider(d.tider), klientMs };
+}
+// Svarets tider (version 12, K4): heltal ms per steg + kalla 'snapshot'|'live'; null när fältet saknas (äldre script) → Drift-raden visar en hint.
+function normKalTider(t) {
+  if (!isPlainObject(t)) return null;
+  const n = k => Math.max(0, Math.round(Number(t[k]) || 0));
+  return { total: n('total'), auth: n('auth'), inbox: n('inbox'), busy: n('busy'), geo: n('geo'), resor: n('resor'), export: n('export'), kalla: t.kalla === 'snapshot' ? 'snapshot' : 'live' };
 }
 // Toppnivåvarningar upprepas per bit, ibland med bitspecifika tal ('saknas i inkorgen: 2 (1 i vyn)' / '… 2'): nyckel utan siffror och
 // parenteser, den variant som har högst tal (vid lika: längst text) behålls.
@@ -5636,14 +5672,19 @@ function kalVarnTal(v) { const m = /\d+/.exec(v); return m ? Number(m[0]) : 0; }
 // avvisas (E_VALIDATION för svansen när horisonten inte är synkad, eller nätfel) byggs snapshoten av de bitar som gick:
 // res.till = sista lyckade bitens till och res.svans = { fran, fel, kod } (ritaKalVarningar visar raden, laddaBokKalVy felrutan för vyer
 // utanför). Scriptets horisontTom ur svaret sparas i bokKal.scriptHorisont så att bokKalFonster klipper fönstret inför nästa hämtning.
+// tvinga (eller en egen ändring inom BOK_KAL_FARSK_EFTER_ANDRING_MS, bokKal.farskTill) skickas vidare som farsk:true till varje bit
+// (version 12, K7); farskTill förbrukas först när en tvingad hämtning lyckats. Snapshoten får cachad (någon bit ur scriptets snapshot) och
+// snapshotTs (äldsta genererad bland de cachade bitarna); bokDrift.kal får den långsammaste bitens klientMs/tider.
 function hamtaKalenderSnapshot(tvinga) {
   if (bokKal.hamtar) return bokKal.hamtar;   // pågående hämtning vinner även över en färsk snapshot (den som väntar ritar svaret)
   const bitar = bokKalFonsterBitar(), snap = bokKalSnapshot();
   if (!tvinga && snap && !snap.ogiltig && bokKalTacker(snap, bitar[0].fran, bitar[bitar.length - 1].till) && Date.now() - Date.parse(snap.hamtadTs) < BOK_KAL_SNAPSHOT_FARSK_MS) return Promise.resolve(snap.res);
   const gen = bokKal.ogiltigGen;
-  bokKal.hamtar = Promise.all(bitar.map(b => hamtaKalenderPreview(b.fran, b.till))).then(svar => {
+  const farsk = tvinga === true || Date.now() < bokKal.farskTill;   // egen ändring nyligen → live även när laddningen inte är tvingad
+  bokKal.hamtar = Promise.all(bitar.map(b => hamtaKalenderPreview(b.fran, b.till, farsk))).then(svar => {
     const felIx = svar.findIndex(r => !r.ok), fel = felIx >= 0 ? svar[felIx] : null, gick = felIx >= 0 ? svar.slice(0, felIx) : svar;   // bitarna i ordning – efter första felet klipps svansen
     if (!gick.length) { bokKal.hamtFel = fel.fel; return fel; }
+    bokKal.farskTill = 0;   // förbrukas först vid lyckat svar (även en utgången flagga nollas här) – misslyckas den tvingade hämtningen ska nästa laddning också gå live (egen ändring får inte ritas ur en gammal scriptsnapshot)
     const sedda = new Set(), handelser = [], resor = [], varningar = [];
     gick.forEach(r => {
       r.handelser.forEach(s => { const k = s.id + '|' + s.datum + '|' + s.startMin; if (sedda.has(k)) return; sedda.add(k); handelser.push(s); });   // dagssegment i bitgränsen får inte dubbleras
@@ -5652,11 +5693,15 @@ function hamtaKalenderSnapshot(tvinga) {
       if (r.horisontTom) bokKal.scriptHorisont = { tom: r.horisontTom, dag: todayStr() };
     });
     const fran = bitar[0].fran, till = gick[gick.length - 1].till, hamtadTs = new Date().toISOString();
-    const res = { ok: true, handelser, resor, varningar: varningar.slice(0, 20), fran, till, hamtadTs };
+    let snapshotTs = '';
+    gick.forEach(r => { if (r.cachad && r.snapshotTs && (!snapshotTs || Date.parse(r.snapshotTs) < Date.parse(snapshotTs))) snapshotTs = r.snapshotTs; });   // äldsta scriptsnapshoten som bidrog
+    const res = { ok: true, handelser, resor, varningar: varningar.slice(0, 20), fran, till, hamtadTs, cachad: gick.some(r => r.cachad), snapshotTs };
     if (fel) res.svans = { fran: bitar[felIx].fran, fel: fel.fel, kod: fel.kod || '' };
     bokKal.snapshot = { fran, till, res, hamtadTs, ogiltig: bokKal.ogiltigGen !== gen };   // ändrat lokalt under hämtningen → hämtas om vid nästa laddning
     bokKal.hamtFel = '';
-    sparaKalKollAvstamning(res); renderBokStatus();   // avstämningsvarningar (4.11) → Drift och kvoter + statusraden
+    const langsam = gick.reduce((a, r) => (!a || r.klientMs > a.klientMs) ? r : a, null);   // bitarna går parallellt – den långsammaste ≈ upplevd väntetid
+    bokDrift.kal = { ts: hamtadTs, klientMs: langsam.klientMs, tider: langsam.tider, kalla: langsam.tider ? langsam.tider.kalla : (langsam.cachad ? 'snapshot' : 'live'), bitar: gick.length };
+    sparaKalKollAvstamning(res); renderBokStatus(); ritaBokDrift();   // avstämningsvarningar (4.11) → Drift och kvoter + statusraden; Drift-raden "Kalender: senaste hämtning …"
     return res;
   }, e => { bokKal.hamtFel = (e && e.message) || String(e); return { ok: false, fel: bokKal.hamtFel, kod: '' }; }).finally(() => { bokKal.hamtar = null; });
   return bokKal.hamtar;
@@ -5664,7 +5709,11 @@ function hamtaKalenderSnapshot(tvinga) {
 // Markerar snapshoten ogiltig efter en lokal ändring (import, bokning, ombokning, avbokning, ignorera, purge, sparade inställningar):
 // den visas fortfarande men nästa laddaBokKalVy hämtar om hela fönstret i bakgrunden. Räknaren gäller även när ingen snapshot finns än
 // eller en hämtning pågår (dess svar räknades före ändringen).
-function bokKalInvalidera() { bokKal.ogiltigGen++; if (bokKal.snapshot) bokKal.snapshot.ogiltig = true; }
+// farsk (version 12, K5/K7): true efter en skrivande åtgärd som ändrat kalendern (bokad/ombokad/avbokad/avvisad/purge, import med
+// nya/ändrade bokningar) → nästa hämtning inom BOK_KAL_FARSK_EFTER_ANDRING_MS skickar farsk:true, så att vyn inte ritas ur en
+// scriptsnapshot som saknar ändringen (t.ex. "lokal bokning saknas i kalendern" tills triggern kört). Inställningar/ignorera invalideras
+// av scriptet självt vid config-push (K5) och behöver inte farsk.
+function bokKalInvalidera(farsk) { bokKal.ogiltigGen++; if (bokKal.snapshot) bokKal.snapshot.ogiltig = true; if (farsk === true) bokKal.farskTill = Date.now() + BOK_KAL_FARSK_EFTER_ANDRING_MS; }
 function bokKalSnapshot() { return bokKal.snapshot; }   // bara i minnet (spec 3.5/6.3: inget ur kalendern lagras på enheten)
 // Restid mellan restidsankare (steg 2c): valideras/klipps fält för fält, högst 400 resor per svar; ogiltiga poster och ben med 0 minuter hoppas över.
 function normKalResor(lista) {
@@ -6098,10 +6147,11 @@ function ritaKalVarningar() {
     const saknas = bokKal.segment.filter(s => s.kalla === 'lokal').length;
     if (saknas) rader.push({ text: saknas + (saknas === 1 ? ' lokal bokning saknas' : ' lokala bokningar saknas') + ' i kalendern (visas rödstreckade)', kind: 'warn' });
     bokKal.resor.filter(r => r.konflikt).slice(0, 20).forEach(r => rader.push({ text: 'Restiden mellan ' + kalResaNamn(r.fran) + ' och ' + kalResaNamn(r.till) + ' ' + kortDatumLabel(r.datum) + ' ryms inte (' + kalResaMin(r) + ')', kind: 'warn' }));   // steg 2c
-    const kt = kortTidLabel(bokKal.data.hamtadTs), idagL = kortDatumLabel(todayStr()) + ' ', tid = kt.startsWith(idagL) ? kt.slice(idagL.length) : kt;   // bara klockslag i dag, annars '16/9 14:03'
+    const tid = kalKlockslag(bokKal.data.hamtadTs);   // bara klockslag i dag, annars '16/9 14:03'
     if (bokKal.hamtFel && !bokKal.hamtar) rader.push({ text: 'Kunde inte uppdatera – visar data från ' + tid + ' (' + bokKal.hamtFel + ')', kind: 'warn' });
     if (bokKal.data.svans) rader.push({ text: 'Kalendern från ' + kortDatumLabel(bokKal.data.svans.fran) + ' kunde inte hämtas (' + bokKal.data.svans.fel + ')', kind: 'warn' });   // svansen avvisad (t.ex. horisont som inte är synkad)
-    rader.push({ text: 'Hämtat ' + tid + ' · ' + bokKal.segment.length + ' händelser' + (bokKal.resor.length ? ' · ' + bokKal.resor.length + ' restider' : '') + (bokKal.hamtar ? ' · uppdaterar…' : ''), kind: 'info' });
+    const snap = bokKal.data.cachad ? ' · snapshot' + (bokKal.data.snapshotTs ? ' från ' + kalKlockslag(bokKal.data.snapshotTs) : '') : '';   // version 12 (K7): svaret kom ur scriptets förberäknade snapshot
+    rader.push({ text: 'Hämtat ' + tid + snap + ' · ' + bokKal.segment.length + ' händelser' + (bokKal.resor.length ? ' · ' + bokKal.resor.length + ' restider' : '') + (bokKal.hamtar ? ' · uppdaterar…' : ''), kind: 'info' });
   }
   el.innerHTML = rader.map(r => `<div class="bok-status-row ${r.kind}">${escapeHtml(r.text)}</div>`).join('');
   el.className = rader.length ? 'bok-kal-varningar' : '';
@@ -6611,7 +6661,7 @@ async function embedValdTid(d) {
   const post = bokInkorgCache.find(x => x.bokningId === bokningId);
   if (post) { post.start = nyStart; if (nySlut) post.slut = nySlut; post.rev = ev.bokningRev; if (nyAdress) post.adress = nyAdress; }
   if (bokEmbed === e) stangBokningEmbed(true);
-  bokKalInvalidera();
+  bokKalInvalidera(true);
   setBokStatus(problem.length ? 'Ombokad till ' + longDateLabel(ev.datum) + ' ' + ev.tid + ', men ' + problem.join('; ') : 'Ombokad till ' + longDateLabel(ev.datum) + ' ' + ev.tid + (harEpost ? ' – bokaren (' + bokare.namn + ') meddelas per e-post' : ''), problem.length ? 'warn' : 'ok');
   renderBoard(); renderActivity(); renderBookingsIfVisible();
 }
@@ -6624,7 +6674,7 @@ function embedEgenAndrad(d) {
   const bokningId = bstr(d.bokningId, 64), atgard = ['ombokad', 'avbokad', 'andrad'].includes(d.atgard) ? d.atgard : 'andrad';
   if (!BOKNING_ID_RE.test(bokningId)) return;
   const text = { ombokad: 'Bokningen ombokad', avbokad: 'Bokningen avbokad', andrad: 'Uppgifterna ändrade' }[atgard];
-  bokKalInvalidera();
+  bokKalInvalidera(true);
   setBokStatus(text + ' på bokningssidan – hämtar inkorgen…', 'info');
   importeraBokningar('sjalv').then(() => {
     const hit = hittaLokalBokning(bokningId);
@@ -6641,12 +6691,12 @@ function embedBokad(d) {
   // CJ stänger själv med Stäng (som skickar `stang`); ett senare `bokad` från "Boka ett till möte" hanteras på samma sätt.
   e.bokad = true;
   document.getElementById('bokningEmbedHint').textContent = 'Bokningen skapad – kopiera bekräftelsetexten på sidan och stäng panelen när du är klar';
-  bokKalInvalidera();
+  bokKalInvalidera(true);
   setBokStatus('Bokningen skapad – importerar…', 'info');
   importeraBokningar('sjalv').then(() => {   // 'sjalv' tvingar läsning (6.3)
     if (hittaLokalBokning(bokningId)) setBokStatus('Bokningen importerad', 'ok');
     else if (!bokStatusMsg || bokStatusMsg.kind !== 'err') setBokStatus('Bokningen skapad – importen kommer vid nästa hämtning (Inkorg › Hämta nu)', 'warn');
-    if (bokningSub === 'kalender') laddaBokKalVy();   // cache-respekterande: har importen redan ritat om Kalender är svaret färskt (cachen tömdes ovan)
+    if (bokningSub === 'kalender') laddaBokKalVy();   // cache-respekterande: har importen redan ritat om Kalender är svaret färskt (cachen tömdes ovan; farsk:true via bokKalInvalidera(true), K7)
   });
 }
 document.getElementById('bokningEmbedStangBtn').addEventListener('click', () => stangBokningEmbed());
@@ -6707,7 +6757,7 @@ async function avbokaBokning(bokningId) {
   const post = bokInkorgCache.find(x => x.bokningId === bokningId);
   if (post) post.status = 'avbokad';
   if (bokEmbed && bokEmbed.lage === 'omboka' && bokEmbed.bokning && bokEmbed.bokning.ev.bokningId === bokningId) stangBokningEmbed(true);
-  bokKalInvalidera();
+  bokKalInvalidera(true);
   setBokStatus(problem.length ? 'Bokningen avbokad, men ' + problem.join('; ') : 'Bokningen avbokad – ' + (harEpost ? 'bokaren (' + namn + ') meddelas per e-post' : 'ingen bokare att meddela'), problem.length ? 'warn' : 'ok');
   renderBoard(); renderActivity(); updateBokningTabCount(); renderBookingsIfVisible();
 }
@@ -6769,7 +6819,7 @@ async function bokPurgeRadering(p) {
     const typ = bstr(f.typ, 40);
     return { id: bstr(f.eventId, 256) || bstr(f.kalenderEventId, 256) || bstr(f.bokningId, 64), typ, fel: PURGE_TYP_TEXT[typ] || bstr(f.fel, 200) || bstr(f.message, 200) || bstr(f.kod, 40) || 'kalenderfel' };
   }).filter(Boolean);
-  bokKalInvalidera();   // kalendern har ändrats
+  bokKalInvalidera(true);   // kalendern har ändrats (nästa hämtning live, K7)
   bokInkorgCache = bokInkorgCache.filter(b => !bokningIds.includes(String(b.bokningId || '')) && !(orgnr && b.kund && normalizeOrgnr(b.kund.orgnr) === normalizeOrgnr(orgnr)));
   return ut;
 }
