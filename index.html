@@ -364,6 +364,9 @@
   .bok-connect-log .err { color: #fca5a5; }
   .bok-key-box { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; word-break: break-all; background: #11141b; border: 1px solid #2a2e37; border-radius: 6px; padding: 8px 10px; color: #e5e7eb; }
   .cj-badge { display: inline-block; font-size: 10px; font-weight: 700; padding: 1px 6px; border-radius: 8px; margin-left: 6px; background: #3b82f6; color: #fff; vertical-align: middle; }
+  .konto-badge { display: inline-block; font-size: 10px; font-weight: 600; padding: 1px 7px; border-radius: 8px; background: #374151; color: #d1d5db; vertical-align: middle; white-space: nowrap; }   /* steg 3: kontostatus i Bokare-tabellen */
+  .konto-badge.ok { background: #065f46; color: #d1fae5; }
+  .konto-badge.warn { background: #78350f; color: #fde68a; }
   .bok-warn-text { color: #fbbf24; font-size: 11px; }
   .bok-sep-row td { background: #11141b; color: #9ca3af; font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: .03em; }
   .bok-inactive td { opacity: .5; }
@@ -953,13 +956,21 @@
 <!-- Bokare-modal (spec 6.4) -->
 <div class="modal-backdrop" id="bokareModalBackdrop">
   <div class="modal">
-    <h2 id="bokareModalTitle">Ny bokare</h2>
+    <h2 id="bokareModalTitle">Ny CJ-bokare</h2>
     <input type="hidden" id="bokareId">
-    <label class="check-row" id="bokareArCjRow"><input type="checkbox" id="bokareArCj"> CJ:s egen bokare för pipelinen</label>
-    <div class="hint" id="bokareArCjHint">Används av "Boka själv"/"Omboka" i Kalender-underfliken. Högst en per pipeline.</div>
-    <div class="field"><label>Namn</label><input type="text" id="bokareNamn" maxlength="120" autocomplete="off"></div>
-    <div class="field" id="bokareOrgField"><label>Organisation</label><input type="text" id="bokareOrganisation" maxlength="120" autocomplete="off"></div>
-    <div class="field" id="bokareEpostField"><label>E-post (meddelanden vid avvisning/ombokning/avbokning)</label><input type="email" id="bokareEpost" maxlength="120" autocomplete="off"></div>
+    <label class="check-row" id="bokareArCjRow"><input type="checkbox" id="bokareArCj" disabled> CJ:s egen bokare för pipelinen</label>
+    <div class="hint" id="bokareArCjHint">Används av "Boka själv"/"Omboka" i Kalender-underfliken. Högst en per pipeline. Vanliga bokare registrerar sig själva på bokningssidan.</div>
+    <div id="bokareKontoFalt">
+      <div class="field-row">
+        <div class="field"><label>Förnamn</label><input type="text" id="bokareFornamn" maxlength="60" readonly></div>
+        <div class="field"><label>Efternamn</label><input type="text" id="bokareEfternamn" maxlength="60" readonly></div>
+      </div>
+      <div class="field-row">
+        <div class="field"><label>E-post (inloggning och meddelanden)</label><input type="email" id="bokareEpost" maxlength="120" readonly></div>
+        <div class="field"><label>Mobil</label><input type="text" id="bokareMobil" maxlength="30" readonly></div>
+      </div>
+      <div class="hint" id="bokareKontoHint" style="margin-bottom:8px">Uppgifterna ägs av bokaren och uppdateras från kontot.</div>
+    </div>
     <div class="field-row">
       <div class="field"><label>Pipeline</label><select id="bokarePipeline"></select></div>
       <div class="field"><label>Landningskolumn (ny process)</label><select id="bokareStage"></select><div class="hint" id="bokareStageHint" style="display:none;margin-top:4px">Tidigare kolumn finns inte längre – första kolumnen förvald</div></div>
@@ -967,15 +978,38 @@
     <div class="field"><label>Tillåtna mötestyper (inga ikryssade = alla i pipelinen + globala)</label><div id="bokareMotestyper" class="check-list"></div></div>
     <div class="field-row">
       <div class="field"><label>Taggfärg</label><input type="color" id="bokareFarg" class="color-input" value="#3b82f6"></div>
-      <div class="field"><label>Status</label><label class="check-row"><input type="checkbox" id="bokareAktiv" checked> Aktiv (länken fungerar)</label></div>
+      <div class="field"><label>Status</label><label class="check-row"><input type="checkbox" id="bokareAktiv" checked> Aktiv (kan logga in och boka)</label></div>
     </div>
-    <div class="hint" id="bokareKodHint" style="display:none">Bokarkoden genereras när bokaren sparas. Länken kopieras från tabellen.</div>
+    <div class="hint" id="bokareKodHint" style="display:none">Koden för det inbäddade flödet genereras när CJ-bokaren sparas. Länken kopieras från tabellen.</div>
     <div class="modal-actions">
       <div class="left">
         <button class="btn ghost" id="bokareCancelBtn">Avbryt</button>
         <button class="btn ghost danger-btn" id="bokareDeleteBtn" style="display:none">Ta bort</button>
+        <button class="btn ghost danger-btn" id="bokareKontoRaderaBtn" style="display:none" title="Raderar kontot i scriptet (GDPR) – bokaren inaktiveras, gamla bokningar behåller namnet">Ta bort konto</button>
       </div>
       <button class="btn" id="bokareSaveBtn">Spara</button>
+    </div>
+  </div>
+</div>
+
+<!-- Tillåtelselistan (steg 3, 3.2/6.1): domän eller hel e-postadress → pipeline + landningskolumn -->
+<div class="modal-backdrop" id="domanModalBackdrop">
+  <div class="modal">
+    <h2 id="domanModalTitle">Ny post i tillåtelselistan</h2>
+    <input type="hidden" id="domanId">
+    <div class="field"><label>Domän eller e-postadress</label><input type="text" id="domanVarde" maxlength="253" autocomplete="off" spellcheck="false" autocapitalize="off" placeholder="byra.se eller kalle@gmail.com">
+      <div class="hint" style="margin-top:4px">En domän släpper in alla med e-post på domänen (subdomäner läggs upp separat). En hel adress släpper in en person och vinner över domänen. Lägg aldrig upp gmail.com, hotmail.com o.d. som domän.</div></div>
+    <div class="field-row">
+      <div class="field"><label>Pipeline</label><select id="domanPipeline"></select></div>
+      <div class="field"><label>Landningskolumn (ny process)</label><select id="domanStage"></select></div>
+    </div>
+    <label class="check-row"><input type="checkbox" id="domanAktiv" checked> Aktiv (nya bokare kan registrera sig)</label>
+    <div class="modal-actions">
+      <div class="left">
+        <button class="btn ghost" id="domanCancelBtn">Avbryt</button>
+        <button class="btn ghost danger-btn" id="domanDeleteBtn" style="display:none">Ta bort</button>
+      </div>
+      <button class="btn" id="domanSaveBtn">Spara</button>
     </div>
   </div>
 </div>
@@ -1044,7 +1078,8 @@
 // bokScriptUrl(), som föredrar BOKNINGSINSTALLNINGAR.scriptUrl (klistras in under Bokningar › Inställningar) och annars
 // använder konstanten BOK_SCRIPT_URL. Båda är publika, inga hemligheter. bokAdminApi finns bara här (appen).
 const BOK_SCRIPT_URL = 'https://script.google.com/macros/s/AKfycbxqBn2wQt8pqF0USTj81kiyGHOmV3ICNqxBRYPksJiwBkvkqFjFCHZ1SzYtAo1gRdeROg/exec';   // publik, ej hemlighet – CJ byter efter script-deploy
-const MIN_SCRIPT_VERSION = 4;     // 4 = steg 2a: bokarens självservice (egen-rebook/egen-cancel/egen-update, hello.egna med kanAndras)
+const MIN_SCRIPT_VERSION = 13;    // 13 = steg 3: bokarkonton (konton-list/konto-radera, setup kontonFileId, ping.konton, config.domaner, session s på bokningssidan); tidigare 4 (steg 2a)
+const KONTON_SCRIPT_VERSION = 13;   // scriptversion med bokarkonton (steg 3); äldre script → Bokare-fliken kan inte hämta konton (Drift-panelen varnar)
 const PURGE_SCRIPT_VERSION = 3;   // scriptversion med purge på riktigt (M5); äldre script → radering av processer/kunder med bokningar avbryts (Drift-panelen varnar)
 const SJALVSERVICE_SCRIPT_VERSION = 4;   // scriptversion med bokarens självservice (steg 2a); äldre script → bokningssidan saknar Omboka/Ändra/Avboka (Drift-panelen varnar)
 const ADRESSFORSLAG_SCRIPT_VERSION = 5;   // scriptversion med adressförslag (steg 2b, 'adressforslag'); äldre script → fritext utan fel (Drift-panelen visar "Adressförslag: av")
@@ -1208,6 +1243,7 @@ function migrateLeads(data) {
       if (typeof ev.lng !== 'number') ev.lng = null;
       if (typeof ev.bokningId !== 'string') ev.bokningId = '';
       if (typeof ev.bokadAv !== 'string') ev.bokadAv = '';
+      if (!isPlainObject(ev.bokadAvKontakt)) ev.bokadAvKontakt = null;   // steg 3 (3.3, B9): { namn, epost, telefon } – snapshot ur inkorgsposten vid import
       if (!['bokad','avbokad','avvisad','hallet','noshow'].includes(ev.status)) ev.status = '';
       if (!ev.restid || typeof ev.restid !== 'object') ev.restid = null;
       if (typeof ev.kalenderEventId !== 'string') ev.kalenderEventId = '';
@@ -1376,6 +1412,7 @@ const BOKNINGSFORMULAR_KEY = 'telexia_pipeline_bookingform_v1';
 const BOKNINGSINSTALLNINGAR_KEY = 'telexia_pipeline_bookingsettings_v1';
 const KALENDER_IGNORERA_KEY = 'telexia_pipeline_calendar_ignore_v1';
 const BOKNING_IMPORT_KEY = 'telexia_pipeline_booking_import_v1';
+const BOKARDOMANER_KEY = 'telexia_pipeline_bookerdomains_v1';   // steg 3 (3.2): tillåtelselistan – domän eller hel adress → pipeline + landningskolumn
 const ENHET_KEY = 'telexia_pipeline_device_v1';   // per enhet, synkas ej
 
 const DEFAULT_BOKNINGSFORMULAR = {
@@ -1391,8 +1428,9 @@ const DEFAULT_BOKNINGSFORMULAR = {
 
 const DEFAULT_BOKNINGSINSTALLNINGAR = {
   version: 1,
-  adminNyckel: '', brevladaFiler: { config: '', inbox: '', cache: '' },
+  adminNyckel: '', brevladaFiler: { config: '', inbox: '', cache: '', konton: '' },   // konton (steg 3, 4.1): telexia-bokning-konton.json – skapas av Återanslut
   senastSyncTs: '', senastSyncRev: 0, senasteKonfigAndringTs: '',
+  kontonModifiedTime: '',   // steg 3 (6.3): kontofilens modifiedTime vid senaste konton-list – sync-fält, lämnar aldrig appen
   scriptUrl: '',   // Script-URL klistras in under Inställningar; tom = konstanten BOK_SCRIPT_URL (lämnar aldrig appen)
   bokningSidaUrl: 'https://redneckengineering.se/bokning',
   arbetstider: { '1': { start: '08:00', slut: '17:00' }, '2': { start: '08:00', slut: '17:00' }, '3': { start: '08:00', slut: '17:00' },
@@ -1464,6 +1502,7 @@ function loadBokningsformular() { return fillDefaults(loadJsonObject(BOKNINGSFOR
 function loadBokningsinstallningar() { return fillDefaults(loadJsonObject(BOKNINGSINSTALLNINGAR_KEY), DEFAULT_BOKNINGSINSTALLNINGAR); }
 function loadKalenderIgnorera() { return loadJsonArray(KALENDER_IGNORERA_KEY); }
 function loadBokningImport() { return gallraBokningImport(loadJsonArray(BOKNING_IMPORT_KEY)); }
+function loadBokardomaner() { return loadJsonArray(BOKARDOMANER_KEY); }
 function loadEnhetId() {
   let id = '';
   try { id = localStorage.getItem(ENHET_KEY) || ''; } catch(e) {}
@@ -1477,6 +1516,7 @@ let BOKNINGSFORMULAR = loadBokningsformular();
 let BOKNINGSINSTALLNINGAR = loadBokningsinstallningar();
 let KALENDER_IGNORERA = loadKalenderIgnorera();
 let BOKNING_IMPORT = loadBokningImport();
+let BOKARDOMANER = loadBokardomaner();
 let enhetId = loadEnhetId();
 
 // pushBokningConfig() (debouncad config-push till brevlådan) definieras i bokningsmodulens adminblock längre ned – hoistad funktionsdeklaration.
@@ -1488,6 +1528,12 @@ function touchBokningConfig() {
 }
 function saveBokare(b) {
   localStorage.setItem(BOKARE_KEY, JSON.stringify(b));
+  touchSavedLabel();
+  scheduleDrivePush();
+  touchBokningConfig();
+}
+function saveBokardomaner(list) {   // steg 3 (3.2): tillåtelselistan – skickas i config-filen som domaner
+  localStorage.setItem(BOKARDOMANER_KEY, JSON.stringify(list));
   touchSavedLabel();
   scheduleDrivePush();
   touchBokningConfig();
@@ -1540,8 +1586,33 @@ function kalSaneraOverride(p) {
 function kalHarOverride(p) { return typeof p.online === 'boolean' || !!p.adress; }
 // Idempotent migrering av bokningsposter (spec 3.6): defaults + dubblettskydd för bokningId.
 // Körs vid boot (efter migratePipelines) och efter Drive-pull. Refererar inte TAG_DEFAULT_COLOR (deklareras senare i filen).
+// Tillåtelselistan (steg 3, 3.2): en post är en domän ('byra.se') eller en hel adress ('kalle@gmail.com'). Samma matchning som i
+// scriptet (Konton.gs matchaLista_): aktiv post med exakt adressträff först, annars aktiv post med exakt domänträff (allt efter '@',
+// gemener; subdomäner räknas inte, B7). Används av importen (6.3) och av Bokare-fliken (avstängning när en post tas bort, B8).
+function normaliseraListpost(v) { return String(v || '').trim().toLowerCase().replace(/^@+/, ''); }
+function listpostArAdress(v) { return String(v || '').indexOf('@') >= 0; }
+function listpostGiltig(v) { return listpostArAdress(v) ? (v.length <= 120 && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(v)) : (v.length <= 253 && /^[a-z0-9-]+(\.[a-z0-9-]+)+$/.test(v)); }
+function epostDoman(e) { const s = String(e || '').trim().toLowerCase(); const i = s.indexOf('@'); return i >= 0 ? s.slice(i + 1) : ''; }
+function matchaLista(epost, lista) {
+  const e = String(epost || '').trim().toLowerCase();
+  if (!e) return null;
+  const d = epostDoman(e);
+  const akt = (Array.isArray(lista) ? lista : []).filter(p => isPlainObject(p) && p.aktiv !== false && typeof p.doman === 'string');
+  return akt.find(p => p.doman === e) || (d ? akt.find(p => p.doman === d) : null) || null;
+}
 function migrateBokning() {
   if (!Array.isArray(BOKARE)) BOKARE = [];
+  if (!Array.isArray(BOKARDOMANER)) BOKARDOMANER = [];
+  BOKARDOMANER = BOKARDOMANER.filter(isPlainObject);
+  BOKARDOMANER.forEach(d => {
+    if (typeof d.id !== 'string' || !d.id) d.id = 'dom_' + uid();
+    d.doman = normaliseraListpost(d.doman);
+    if (typeof d.pipelineId !== 'string') d.pipelineId = '';
+    if (typeof d.stageKey !== 'string') d.stageKey = '';
+    if (typeof d.aktiv !== 'boolean') d.aktiv = true;
+    if (typeof d.skapadTs !== 'string') d.skapadTs = '';
+  });
+  BOKARDOMANER = BOKARDOMANER.filter(d => d.doman);
   if (!Array.isArray(MOTESTYPER)) MOTESTYPER = [];
   if (!Array.isArray(KALENDER_IGNORERA)) KALENDER_IGNORERA = [];
   if (!Array.isArray(BOKNING_IMPORT)) BOKNING_IMPORT = [];
@@ -1561,6 +1632,10 @@ function migrateBokning() {
     if (typeof b.skapadTs !== 'string') b.skapadTs = '';
     if (typeof b.arCj !== 'boolean') b.arCj = false;
     if (typeof b.farg !== 'string' || !b.farg) b.farg = '#3b82f6';   // = TAG_DEFAULT_COLOR
+    // Steg 3 (3.1): kontofält – ägs av bokaren via kontot och speglas av synkaBokareFranKonton; '' för CJ-bokare och gamla kodbokare
+    ['fornamn', 'efternamn', 'mobil', 'listaId', 'kontoVerifieradTs', 'kontoSenastInloggadTs'].forEach(k => { if (typeof b[k] !== 'string') b[k] = ''; });
+    if (!['', 'overifierad', 'aktiv', 'raderad'].includes(b.kontoStatus)) b.kontoStatus = '';
+    if (!b.arCj && b.kod) { b.kod = ''; b.kodRoteradTs = ''; }   // B12 (version 13): bokarkod finns bara för CJ-bokare – gamla länkar är döda
   });
   MOTESTYPER = MOTESTYPER.filter(isPlainObject);
   MOTESTYPER.forEach(m => {
@@ -1670,6 +1745,7 @@ function persistAllPipelineData() {
   localStorage.setItem(BOKNINGSINSTALLNINGAR_KEY, JSON.stringify(BOKNINGSINSTALLNINGAR));
   localStorage.setItem(KALENDER_IGNORERA_KEY, JSON.stringify(KALENDER_IGNORERA));
   localStorage.setItem(BOKNING_IMPORT_KEY, JSON.stringify(BOKNING_IMPORT));
+  localStorage.setItem(BOKARDOMANER_KEY, JSON.stringify(BOKARDOMANER));
 }
 migratePipelines();
 migrateBokning();
@@ -1844,7 +1920,7 @@ async function findOrCreateDriveFile() {
     driveFileId = listData.files[0].id;
     return 'existing';
   }
-  const seed = JSON.stringify({ leads, questions, customers, stages: STAGES, tags: TAGS, pipelines: PIPELINES, bokare: BOKARE, motestyper: MOTESTYPER, bokningsformular: BOKNINGSFORMULAR, bokningsinstallningar: BOKNINGSINSTALLNINGAR, kalenderIgnorera: KALENDER_IGNORERA, bokningImport: BOKNING_IMPORT });
+  const seed = JSON.stringify({ leads, questions, customers, stages: STAGES, tags: TAGS, pipelines: PIPELINES, bokare: BOKARE, motestyper: MOTESTYPER, bokningsformular: BOKNINGSFORMULAR, bokningsinstallningar: BOKNINGSINSTALLNINGAR, kalenderIgnorera: KALENDER_IGNORERA, bokningImport: BOKNING_IMPORT, bokardomaner: BOKARDOMANER });
   const metadata = { name: DRIVE_FILE_NAME, mimeType: 'application/json' };
   const form = new FormData();
   form.append('metadata', new Blob([JSON.stringify(metadata)], { type: 'application/json' }));
@@ -1868,7 +1944,7 @@ async function pushToDrive() {
   if (!accessToken || !driveFileId) return;
   setDriveStatus('Synkar...');
   try {
-    const body = JSON.stringify({ leads, questions, customers, stages: STAGES, tags: TAGS, pipelines: PIPELINES, bokare: BOKARE, motestyper: MOTESTYPER, bokningsformular: BOKNINGSFORMULAR, bokningsinstallningar: BOKNINGSINSTALLNINGAR, kalenderIgnorera: KALENDER_IGNORERA, bokningImport: BOKNING_IMPORT });
+    const body = JSON.stringify({ leads, questions, customers, stages: STAGES, tags: TAGS, pipelines: PIPELINES, bokare: BOKARE, motestyper: MOTESTYPER, bokningsformular: BOKNINGSFORMULAR, bokningsinstallningar: BOKNINGSINSTALLNINGAR, kalenderIgnorera: KALENDER_IGNORERA, bokningImport: BOKNING_IMPORT, bokardomaner: BOKARDOMANER });
     const res = await driveFetch('https://www.googleapis.com/upload/drive/v3/files/' + driveFileId + '?uploadType=media', {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
@@ -1919,6 +1995,7 @@ async function onSignedIn() {
         if (isPlainObject(remote.bokningsinstallningar)) BOKNINGSINSTALLNINGAR = remote.bokningsinstallningar;
         if (Array.isArray(remote.kalenderIgnorera)) KALENDER_IGNORERA = remote.kalenderIgnorera;
         if (Array.isArray(remote.bokningImport)) BOKNING_IMPORT = remote.bokningImport;
+        if (Array.isArray(remote.bokardomaner)) BOKARDOMANER = remote.bokardomaner;   // steg 3
         migratePipelines();
         migrateBokning();
         persistAllPipelineData();
@@ -2587,7 +2664,8 @@ function renderLeadEvents() {
     if (bokad) {
       const mt = getMotestypById(ev.motestypId), b = getBokareById(ev.bokadAv);
       const statusText = ev.status === 'avbokad' ? ' · Avbokad' : (ev.status === 'avvisad' ? ' · Avvisad' : '');
-      html += `<div class="event-booking-label">Bokat · ${escapeHtml(mt ? mt.titel : (ev.text || 'Möte'))} · ${escapeHtml(b ? b.namn : (ev.bokadAv || 'okänd bokare'))}${statusText}</div>`;
+      const bk = bokarKontaktFor(ev, null);   // steg 3 (6.5): namn + kontakt i title
+      html += `<div class="event-booking-label" title="${escapeHtml(bk ? [bk.namn, bk.telefon, bk.epost].filter(Boolean).join(' · ') : '')}">Bokat · ${escapeHtml(mt ? mt.titel : (ev.text || 'Möte'))} · ${escapeHtml(bk ? bk.namn : (b ? b.namn : (ev.bokadAv || 'okänd bokare')))}${statusText}</div>`;
     }
     html += `
       <input type="text" data-idx="${idx}" class="eventTextInput" placeholder="t.ex. ring kund om avtalsförslag" value="${escapeHtml(ev.text)}"${ro}>
@@ -3391,8 +3469,8 @@ document.getElementById('plSaveBtn').addEventListener('click', () => {
   // Spärr (spec 3.7): en pipeline som tas bort i DENNA sparning får inte refereras av bokare eller mötestyper.
   // Redan föräldralösa referenser (pipelineId som inte fanns före sparningen) blockerar inte.
   const borttagen = id => !!id && oldIds.has(id) && !keptIds.has(id);
-  const refererad = BOKARE.some(b => borttagen(b.pipelineId)) || MOTESTYPER.some(m => borttagen(m.pipelineId));
-  if (refererad) { alert('Pipelinen används av bokare/mötestyper – ta bort eller flytta dem först'); return; }
+  const refererad = BOKARE.some(b => borttagen(b.pipelineId)) || MOTESTYPER.some(m => borttagen(m.pipelineId)) || BOKARDOMANER.some(d => borttagen(d.pipelineId));
+  if (refererad) { alert('Pipelinen används av bokare/mötestyper/tillåtelselistan – ta bort eller flytta dem först'); return; }
   // Nya pipelines får en egen uppsättning standardkategorier
   cleaned.forEach(p => {
     if (!oldIds.has(p.id)) STAGES = STAGES.concat(seedStagesFor(p.id));
@@ -3808,6 +3886,9 @@ function renderBokStatus() {
   else if (s.senastSyncRev) rows.push({ text: 'Konfiguration synkad rev ' + s.senastSyncRev + (s.senastSyncTs ? ' · ' + kortTidLabel(s.senastSyncTs) : ''), kind: 'ok' });
   const saknade = BOKARE.filter(b => !stageKeyValidFor(b.stageKey, b.pipelineId)).length;
   if (saknade) rows.push({ text: saknade + ' bokare pekar på en kolumn som saknas – första kolumnen används', kind: 'warn' });
+  const vantar = BOKARE.filter(b => b.kontoStatus === 'overifierad').length;   // steg 3 (6.1)
+  if (vantar) rows.push({ text: vantar + ' bokare väntar på att bekräfta sin e-postadress', kind: 'warn' });
+  if (bokAnsluten() && !(BOKNINGSINSTALLNINGAR.brevladaFiler && BOKNINGSINSTALLNINGAR.brevladaFiler.konton)) rows.push({ text: 'Kontofilen för bokarkonton saknas – kör Återanslut under Inställningar › Anslut brevlåda', kind: 'warn' });
   // Gula rader för ICS-/Maps-varningar och avstämningen ur senaste ping/calendar-preview (6.1, 10.4) – inte på Inställningar (Drift-panelen
   // visar allt) och inte på Kalender (varningsraden ovanför kalendern visar scriptets varningar).
   if (bokAnsluten() && bokningSub !== 'installningar' && bokningSub !== 'kalender') bokDriftRader().filter(r => r.kind === 'warn' && ['maps', 'ics', 'avstamning', 'bokningar'].includes(r.omrade)).forEach(r => {
@@ -3832,15 +3913,16 @@ async function byggBokningConfig(rev) {
   for (const b of BOKARE) {
     bokare.push({ id: b.id, namn: b.namn, organisation: b.organisation, epost: b.epost, pipelineId: b.pipelineId,
       tillatnaMotestypIds: (b.tillatnaMotestypIds || []).slice(), aktiv: b.aktiv !== false, arCj: b.arCj === true,
-      kodHash: b.kod ? await sha256Hex(b.kod) : '' });
+      kodHash: b.arCj === true && b.kod ? await sha256Hex(b.kod) : '' });   // steg 3 (B12): kodHash bara för CJ-bokare – vanliga bokare loggar in med konto (scriptet slår ihop med kontot på id)
   }
   const inst = deepClone(BOKNINGSINSTALLNINGAR);
-  ['adminNyckel', 'brevladaFiler', 'senastSyncTs', 'senastSyncRev', 'senasteKonfigAndringTs', 'scriptUrl'].forEach(k => { delete inst[k]; });
+  ['adminNyckel', 'brevladaFiler', 'senastSyncTs', 'senastSyncRev', 'senasteKonfigAndringTs', 'scriptUrl', 'kontonModifiedTime'].forEach(k => { delete inst[k]; });
   delete inst.marginalMinstMin; delete inst.marginalProcent;   // version 10: utgångna restidspåslag skickas aldrig (scriptet ignorerar dem ändå)
   return {
     schemaVersion: 1, rev, updatedAt: nowIsoWithOffset(), updatedBy: 'app',
     bokare, motestyper: deepClone(MOTESTYPER), formular: deepClone(BOKNINGSFORMULAR), installningar: inst,
-    ignorerade: deepClone(KALENDER_IGNORERA), pipelines: PIPELINES.map(p => ({ id: p.id, name: p.name, color: p.color }))
+    ignorerade: deepClone(KALENDER_IGNORERA), pipelines: PIPELINES.map(p => ({ id: p.id, name: p.name, color: p.color })),
+    domaner: BOKARDOMANER.map(d => ({ id: d.id, doman: d.doman, pipelineId: d.pipelineId, aktiv: d.aktiv !== false }))   // steg 3 (4.1): tillåtelselistan utan stageKey (bara importen behöver den)
   };
 }
 let bokConfigPushTimer = null, bokConfigPushPagar = false, bokConfigPushIgen = false, bokConfigPushPromise = null;
@@ -3901,7 +3983,8 @@ async function pushBokningConfigKor() {
 const BREVLADA_FILER = {
   config: { namn: 'telexia-bokning-config.json', seed: () => ({ schemaVersion: 1, rev: 0, updatedAt: nowIsoWithOffset(), updatedBy: 'app', bokare: [], motestyper: [], formular: {}, installningar: {}, ignorerade: [], pipelines: [] }) },
   inbox:  { namn: 'telexia-bokning-inbox.json',  seed: () => ({ schemaVersion: 1, rev: 0, updatedAt: nowIsoWithOffset(), updatedBy: 'app', bokningar: [] }) },
-  cache:  { namn: 'telexia-bokning-cache.json',  seed: () => ({ schemaVersion: 1, rev: 0, updatedAt: nowIsoWithOffset(), updatedBy: 'app', geokod: {}, restid: {}, icsReserv: null }) }
+  cache:  { namn: 'telexia-bokning-cache.json',  seed: () => ({ schemaVersion: 1, rev: 0, updatedAt: nowIsoWithOffset(), updatedBy: 'app', geokod: {}, restid: {}, icsReserv: null }) },
+  konton: { namn: 'telexia-bokning-konton.json', seed: () => ({ schemaVersion: 1, rev: 0, updatedAt: nowIsoWithOffset(), updatedBy: 'app', konton: [] }) }   // steg 3 (4.1): bokarkonton – skrivs bara av scriptet
 };
 // findOrCreateDriveFile-mönstret parametriserat på namn och seed (4.1). drive.file ser bara filer appen själv skapat.
 async function findOrCreateBrevladaFil(namn, seedObj) {
@@ -3939,8 +4022,8 @@ async function anslutBrevladaSteg1() {
     const v = Number(ping.scriptVersion) || 0;
     bsLogg('Scriptversion ' + v + (v < MIN_SCRIPT_VERSION ? ' – uppdatera scriptet (kräver minst ' + MIN_SCRIPT_VERSION + ')' : ''), v < MIN_SCRIPT_VERSION ? 'warn' : 'ok');
     const s = BOKNINGSINSTALLNINGAR;
-    if (!isPlainObject(s.brevladaFiler)) s.brevladaFiler = { config: '', inbox: '', cache: '' };
-    for (const key of ['config', 'inbox', 'cache']) {
+    if (!isPlainObject(s.brevladaFiler)) s.brevladaFiler = { config: '', inbox: '', cache: '', konton: '' };
+    for (const key of ['config', 'inbox', 'cache', 'konton']) {
       const f = BREVLADA_FILER[key];
       const r = await findOrCreateBrevladaFil(f.namn, f.seed());
       s.brevladaFiler[key] = r.id;
@@ -3964,7 +4047,7 @@ async function anslutBrevladaSteg2() {
   const s = BOKNINGSINSTALLNINGAR;
   if (!s.adminNyckel || !s.brevladaFiler.config) { bsLogg('Kör "Anslut" först.', 'err'); return; }
   bsLogg('Kör setup i scriptet…');
-  const r = await bokAdminApi('setup', { configFileId: s.brevladaFiler.config, inboxFileId: s.brevladaFiler.inbox, cacheFileId: s.brevladaFiler.cache });
+  const r = await bokAdminApi('setup', { configFileId: s.brevladaFiler.config, inboxFileId: s.brevladaFiler.inbox, cacheFileId: s.brevladaFiler.cache, kontonFileId: s.brevladaFiler.konton || '' });   // kontonFileId (steg 3): valfritt för äldre script
   if (!r.ok) {
     const kod = r.error && r.error.code;
     if (kod === 'E_ADMIN') bsLogg('Scriptet: ' + bokFelText(r) + '. Kontrollera att ADMIN_KEY i Script Properties är exakt nyckeln nedan och klicka "Fortsätt" igen.', 'err');
@@ -3975,6 +4058,9 @@ async function anslutBrevladaSteg2() {
   }
   const d = r.data || {};
   bsLogg('Filerna ägs av ' + bstr(d.ownerEmail, 120), 'ok');
+  if (d.kontonFil === true) bsLogg('Kontofilen för bokarkonton är ansluten', 'ok');
+  else if (d.kontonFil === false) bsLogg('Kontofilen kunde inte anslutas – kör Återanslut igen', 'warn');
+  else bsLogg('Scriptet saknar stöd för bokarkonton (kräver scriptversion ' + KONTON_SCRIPT_VERSION + ')', 'warn');
   const lista = Array.isArray(d.kalendrar) ? d.kalendrar.filter(isPlainObject) : [];
   s.kalendrar = mergeKalendrar(s.kalendrar, lista);
   saveBokningsinstallningar(s, false);
@@ -4039,8 +4125,14 @@ function normPing(d) {
     avstamningSaknas: bnum(d.avstamningSaknas),
     icsStatus: ics ? { ok: ics.ok === true, hamtadTs: bstr(ics.hamtadTs, 40), antal: Math.max(0, Number(ics.antal) || 0), medPlats: Math.max(0, Number(ics.medPlats) || 0), preliminara: Math.max(0, Number(ics.preliminara) || 0), fel: bstr(ics.fel, 200),
       hamtningMs: Math.max(0, Number(ics.hamtningMs) || 0), cachad: ics.cachad === true, langsam: ics.langsam === true } : null,
-    blockSynk: normBlockSynk(d.blockSynk)   // version 11 (A61, K5): null = fältet saknas (äldre script)
+    blockSynk: normBlockSynk(d.blockSynk),   // version 11 (A61, K5): null = fältet saknas (äldre script)
+    konton: normKonton(d.konton)   // steg 3 (4.3): { kontonFil, kontonAntal, kontoMailIdag, inloggningsforsokIdag, hemligheter } | null (äldre script)
   };
+}
+function normKonton(k) {
+  if (!isPlainObject(k)) return null;
+  const n = v => Math.max(0, Math.round(Number(v) || 0));
+  return { kontonFil: k.kontonFil === true, kontonAntal: n(k.kontonAntal), kontoMailIdag: n(k.kontoMailIdag), inloggningsforsokIdag: n(k.inloggningsforsokIdag), hemligheter: k.hemligheter === true };
 }
 // ping.blockSynk (K5): { aktiv, kalenderId, senast: { ts, in, bort, andrade, kvar, antal, fel } | null }. Alla räknare klipps till heltal ≥ 0;
 // kalender-id:t visas aldrig (bara "finns"), inga titlar i svaret.
@@ -4152,6 +4244,12 @@ function bokDriftRader() {   // gemensamma rader för Drift-panelen; statusraden
     }
     else if (p.blockSynk && p.blockSynk.kalenderId) rader.push({ text: 'Blocksynk: av – kalendern "Pipeline – restid" finns kvar; scriptet tömmer den vid nästa körning (var 10:e minut)', kind: 'info', omrade: 'blocksynk' });
     else rader.push({ text: 'Blocksynk (restid/marginal → Google Kalender): av', kind: 'info', omrade: 'blocksynk' });
+    // Bokarkonton (steg 3): kontofil, antal konton, dagens kontomail (gräns 30) och misslyckade inloggningar (gräns 300).
+    const ko = p.konton;
+    if (v > 0 && v < KONTON_SCRIPT_VERSION) rader.push({ text: 'Scriptversion ' + v + ' < ' + KONTON_SCRIPT_VERSION + ' – bokarkonton saknas: bokare kan inte registrera sig eller logga in förrän scriptet uppdaterats (Hantera distributioner › Ny version)', kind: 'warn', omrade: 'konton' });
+    else if (!ko) rader.push({ text: 'Bokarkonton: status saknas i svaret', kind: 'info', omrade: 'konton' });
+    else if (!ko.kontonFil) rader.push({ text: 'Bokarkonton: kontofilen saknas i scriptet – kör Återanslut (Anslut brevlåda) så att telexia-bokning-konton.json skapas', kind: p.konfigurerad ? 'warn' : 'info', omrade: 'konton' });
+    else rader.push({ text: 'Bokarkonton: ' + ko.kontonAntal + ' konton · ' + ko.kontoMailIdag + ' kontomail idag av 30 · ' + ko.inloggningsforsokIdag + ' misslyckade inloggningar idag' + (ko.hemligheter ? '' : ' · OBS: hemligheter saknas – kör install() i scriptet'), kind: ko.hemligheter && ko.inloggningsforsokIdag < 100 && ko.kontoMailIdag < 30 ? 'info' : 'warn', omrade: 'konton' });
   }
   // Kalender (version 12, K7): senaste calendar-preview – klientmätt total + scriptets tider (K4) och källa snapshot/live. Saknar svaret
   // tider (äldre script) visas bara klienttiden med en hint om scriptversionen.
@@ -4254,6 +4352,7 @@ async function importeraBokningar(orsak) {
   if (!accessToken || !bokAnsluten() || importPagar || importPausadTillInloggning) return;
   importPagar = true;
   try {
+    await synkaKontonOmAndrade(orsak);   // steg 3 (6.3): nya/ändrade bokarkonton → BOKARE (egen felhantering; E_AUTH bubblar hit)
     const inboxId = encodeURIComponent(BOKNINGSINSTALLNINGAR.brevladaFiler.inbox);
     const metaRes = await driveFetch('https://www.googleapis.com/drive/v3/files/' + inboxId + '?fields=modifiedTime', { silent401: true });
     if (!metaRes.ok) throw new Error('Drive svarade ' + metaRes.status);
@@ -4416,12 +4515,14 @@ function skapaFranPlan(b, plan, ctx) {
     utford: false, langdMin, motestypId: mt ? mt.id : bstr(b.motestypId, 64), adress, lat: bnum(geo.lat), lng: bnum(geo.lng),
     bokningId, bokadAv: bstr(b.bokareId, 64), status: 'bokad', restid, kalenderEventId: bstr(b.kalenderEventId, 200),
     bokningRev: Number(b.rev) || 0, notering,
-    bokHistorikN: Array.isArray(b.historik) ? b.historik.length : 0   // markör för speglingen (8.3) – ligger på händelsen så att den överlever gallringen av importposten
+    bokHistorikN: Array.isArray(b.historik) ? b.historik.length : 0,   // markör för speglingen (8.3) – ligger på händelsen så att den överlever gallringen av importposten
+    // Steg 3 (3.3, B9): bokarens kontaktuppgifter som snapshot ur inkorgsposten (scriptet skriver bokning.bokare vid book) – sätts en gång
+    bokadAvKontakt: isPlainObject(b.bokare) && bstr(b.bokare.namn, 120) ? { namn: bstr(b.bokare.namn, 120), epost: bstr(b.bokare.epost, 120), telefon: bstr(b.bokare.mobil, 30) } : null
   };
   // Loggposter
   const log = [];
-  const bokareText = bokare ? bokare.namn + (bokare.organisation ? ' (' + bokare.organisation + ')' : '') : 'Borttagen bokare';
-  log.push({ id: uid(), type: 'text', content: 'Bokat av ' + bokareText + ' via bokningslänk ' + (kortTidLabel(bstr(b.skapad, 40)) || nowLabel()), ts: nowLabel() });
+  const bokareText = bokare ? bokare.namn + (bokare.organisation ? ' (' + bokare.organisation + ')' : '') : (ev.bokadAvKontakt ? ev.bokadAvKontakt.namn + ' (ännu inte hämtad som bokare)' : 'Borttagen bokare');
+  log.push({ id: uid(), type: 'text', content: 'Bokat av ' + bokareText + (ev.bokadAvKontakt && (ev.bokadAvKontakt.telefon || ev.bokadAvKontakt.epost) ? ' – ' + [ev.bokadAvKontakt.telefon, ev.bokadAvKontakt.epost].filter(Boolean).join(', ') : '') + ' via bokningssidan ' + (kortTidLabel(bstr(b.skapad, 40)) || nowLabel()), ts: nowLabel() });
   if (notering) log.push({ id: uid(), type: 'text', content: 'Notering från bokaren: ' + notering, ts: nowLabel() });
   Object.keys(extra).forEach(k => {
     if (k === '_kundId') return;
@@ -4723,7 +4824,7 @@ function renderInkorgRad(r) {
       ${PIPELINES.length > 1 ? plBadge(lead.pipelineId) : ''}
     </div>
     <div class="bok-line">${escapeHtml(kund.namn || 'Namnlös kund')}${kund.orgnr ? ' (' + escapeHtml(kund.orgnr) + ')' : ''}${kontakt.namn ? ' · ' + escapeHtml(kontakt.namn) : ''}${kontakt.telefon ? ` · <a href="tel:${escapeHtml(kontakt.telefon)}" class="card-link" style="color:#60a5fa;text-decoration:none">${escapeHtml(kontakt.telefon)}</a>` : ''}${kontakt.email ? ' · ' + escapeHtml(kontakt.email) : ''}</div>
-    <div class="bok-line muted">${ev.adress ? `<a href="${mapsUrl(ev.adress)}" target="_blank" rel="noopener" style="color:#60a5fa;text-decoration:none">📍 ${escapeHtml(ev.adress)}</a> · ` : ''}Bokad av ${escapeHtml(bokare ? bokare.namn : 'Borttagen bokare')}${bokadTs ? ' ' + escapeHtml(bokadTs) : ''}${andrad ? ' · <span class="bok-andrad">Ändrad av bokaren ' + escapeHtml(kortTidLabel(imp.andradAvBokareTs)) + (andradTyp ? ' (' + andradTyp + ')' : '') + '</span>' : ''}${ev.restid && ev.restid.status !== 'ok' ? '<span class="ev-warn">⚠ restid ' + (ev.restid.status === 'schablon' ? 'schablon' : 'okänd') + '</span>' : ''}</div>
+    <div class="bok-line muted">${ev.adress ? `<a href="${mapsUrl(ev.adress)}" target="_blank" rel="noopener" style="color:#60a5fa;text-decoration:none">📍 ${escapeHtml(ev.adress)}</a> · ` : ''}Bokad av ${bokarKontaktHtml(ev, post)}${bokadTs ? ' ' + escapeHtml(bokadTs) : ''}${andrad ? ' · <span class="bok-andrad">Ändrad av bokaren ' + escapeHtml(kortTidLabel(imp.andradAvBokareTs)) + (andradTyp ? ' (' + andradTyp + ')' : '') + '</span>' : ''}${ev.restid && ev.restid.status !== 'ok' ? '<span class="ev-warn">⚠ restid ' + (ev.restid.status === 'schablon' ? 'schablon' : 'okänd') + '</span>' : ''}</div>
     ${notering || extra.length ? `<div class="bok-line" title="${escapeHtml(notering)}">${notering ? '💬 ' + escapeHtml(notering.slice(0, 160)) + (notering.length > 160 ? '…' : '') : ''}${extra.length ? (notering ? ' · ' : '') + escapeHtml(extra.join(' · ')) : ''}</div>` : ''}
     <div class="bok-actions">
       <button type="button" data-act="oppna" data-id="${escapeHtml(ev.bokningId)}">Öppna process</button>
@@ -4741,7 +4842,7 @@ function renderInkorgVantar(post) {
   return `<div class="agenda-item is-vantar">
     <div class="agenda-item-top"><span style="display:inline-flex;align-items:center;gap:6px;flex-wrap:wrap"><span class="ev-warn" style="margin:0">Väntar på import</span><span class="bok-when">${escapeHtml(p.datum ? longDateLabel(p.datum) : '')} ${escapeHtml(p.tid)}${slutP.tid ? '–' + escapeHtml(slutP.tid) : ''}</span>${mt ? `<span class="mt-badge">${escapeHtml(mt.titel)}</span>` : ''}</span>${PIPELINES.length > 1 ? plBadge(bstr(post.pipelineId, 64)) : ''}</div>
     <div class="bok-line">${escapeHtml(bstr(kund.namn, 120))}${kund.orgnr ? ' (' + escapeHtml(bstr(kund.orgnr, 13)) + ')' : ''}${kontakt.namn ? ' · ' + escapeHtml(bstr(kontakt.namn, 120)) : ''}${kontakt.telefon ? ' · ' + escapeHtml(bstr(kontakt.telefon, 30)) : ''}</div>
-    <div class="bok-line muted">Bokad av ${escapeHtml(bokarNamn(bstr(post.bokareId, 64)))} ${escapeHtml(kortTidLabel(bstr(post.skapad, 40)))}${gammal ? '<span class="ev-warn">⚠ äldre än 7 dagar – importen (ack) har misslyckats</span>' : ''}</div>
+    <div class="bok-line muted">Bokad av ${bokarKontaktHtml(null, post)} ${escapeHtml(kortTidLabel(bstr(post.skapad, 40)))}${gammal ? '<span class="ev-warn">⚠ äldre än 7 dagar – importen (ack) har misslyckats</span>' : ''}</div>
     <div class="bok-actions"><button type="button" data-act="hamta" data-id="${escapeHtml(post.bokningId)}">Försök importera</button><button type="button" class="danger" data-act="avvisa" data-id="${escapeHtml(post.bokningId)}">Avvisa</button></div>
   </div>`;
 }
@@ -4763,10 +4864,8 @@ async function inkorgAtgard(act, bokningId) {
 async function avvisaBokning(bokningId) {
   const hit = hittaLokalBokning(bokningId);
   const post = bokInkorgCache.find(b => b.bokningId === bokningId);
-  const bokareId = hit ? hit.ev.bokadAv : bstr(post && post.bokareId, 64);
-  const namn = bokarNamn(bokareId);
-  const bokare = getBokareById(bokareId);
-  const harEpost = !!(bokare && bokare.epost);   // CJ-bokare saknar e-post – ingen att meddela
+  const namn = bokarNamnFor(hit ? hit.ev : null, post);
+  const harEpost = !!bokarEpostFor(hit ? hit.ev : null, post);   // snapshot (steg 3) eller bokarposten; CJ-bokare saknar e-post – ingen att meddela
   const orsak = prompt(harEpost ? 'Orsak (skickas till bokaren):' : 'Orsak (loggas på processen):');
   if (orsak === null) return;
   if (!confirm('Kan inte ångras – Outlook-inbjudan tas bort och ' + (harEpost ? 'bokaren (' + namn + ') meddelas per e-post' : 'ingen bokare meddelas (' + namn + ' saknar e-post)') + '. Fortsätt?')) return;
@@ -4797,11 +4896,62 @@ async function avvisaBokning(bokningId) {
   renderBoard(); renderActivity(); updateBokningTabCount(); renderBookingsIfVisible();
 }
 
-// ---------- Bokare (6.4) ----------
+// ---------- Bokare (6.4) – steg 3 (bokarkonton, spec "[C] Bokningsmodul - specifikation steg 3 bokarkonton.md" 6.1–6.3) ----------
+// Vanliga bokare registrerar sig själva på bokningssidan (e-post + lösenord); vem som får det styrs av tillåtelselistan
+// BOKARDOMANER (domän eller hel adress → pipeline + landningskolumn). Appen skapar bara CJ-bokare (kod för det inbäddade flödet).
+// Kontona ägs av scriptet (telexia-bokning-konton.json) och speglas hit av synkaBokareFranKonton (konton-list) – fälten fornamn/
+// efternamn/mobil/epost/kontoStatus är därför skrivskyddade i modalen; pipeline/kolumn/mötestyper/aktiv/färg ägs av CJ.
 function bokningarForBokare(id) { return leads.reduce((n, l) => n + (l.events || []).filter(ev => ev.bokadAv === id && ev.status !== 'avvisad').length, 0); }
 function bokareHarHandelser(id) { return leads.some(l => (l.events || []).some(ev => ev.bokadAv === id)); }
+function bokareHarKonto(b) { return !!b && !b.arCj && (b.kontoStatus === 'overifierad' || b.kontoStatus === 'aktiv'); }
+// Bokarens kontaktuppgifter för en händelse (B9): snapshot på händelsen (bokadAvKontakt, satt vid import), annars inkorgspostens
+// bokare-snapshot, annars bokarposten. → { namn, epost, telefon } | null
+function bokarKontaktFor(ev, post) {
+  if (ev && isPlainObject(ev.bokadAvKontakt) && ev.bokadAvKontakt.namn) return ev.bokadAvKontakt;
+  if (post && isPlainObject(post.bokare) && bstr(post.bokare.namn, 120)) return { namn: bstr(post.bokare.namn, 120), epost: bstr(post.bokare.epost, 120), telefon: bstr(post.bokare.mobil, 30) };
+  const b = getBokareById(ev ? ev.bokadAv : bstr(post && post.bokareId, 64));
+  return b ? { namn: b.namn, epost: b.epost || '', telefon: b.mobil || '' } : null;
+}
+function bokarEpostFor(ev, post) { const k = bokarKontaktFor(ev, post); const b = getBokareById(ev ? ev.bokadAv : bstr(post && post.bokareId, 64)); return (k && k.epost) || (b && b.epost) || ''; }
+function bokarNamnFor(ev, post) { const k = bokarKontaktFor(ev, post); return k && k.namn ? k.namn : bokarNamn(ev ? ev.bokadAv : bstr(post && post.bokareId, 64)); }
+// "Bokad av Anna Ek · 070-… · anna@…" – namn via escapeHtml, telefon/e-post som tel:/mailto:-länkar (encodeURIComponent i href, 6.5).
+function bokarKontaktHtml(ev, post) {
+  const k = bokarKontaktFor(ev, post);
+  if (!k) return escapeHtml(bokarNamn(ev ? ev.bokadAv : bstr(post && post.bokareId, 64)));
+  let h = escapeHtml(k.namn || 'Borttagen bokare');
+  if (k.telefon) h += ` · <a href="tel:${encodeURIComponent(String(k.telefon).replace(/\s+/g, ''))}" class="card-link" style="color:#60a5fa;text-decoration:none">${escapeHtml(k.telefon)}</a>`;
+  if (k.epost) h += ` · <a href="mailto:${encodeURIComponent(k.epost)}" class="card-link" style="color:#60a5fa;text-decoration:none">${escapeHtml(k.epost)}</a>`;
+  return h;
+}
+function kontoBadgeHtml(b) {
+  if (b.arCj) return '<span class="konto-badge off">Kod (inbäddat flöde)</span>';
+  const st = b.kontoStatus || '';
+  if (st === 'aktiv') return '<span class="konto-badge ok">Aktiv</span>' + (b.kontoSenastInloggadTs ? ' <span class="bok-muted">inloggad ' + escapeHtml(kortTidLabel(b.kontoSenastInloggadTs)) + '</span>' : '');
+  if (st === 'overifierad') return '<span class="konto-badge warn">Väntar på bekräftelse</span>';
+  if (st === 'raderad') return '<span class="konto-badge off">Konto borttaget</span>';
+  return '<span class="konto-badge off">Ingen inloggning</span> <span class="bok-muted">ta bort – bokaren registrerar sig själv</span>';
+}
+function listpostTraffar(d) { return BOKARE.filter(b => bokareHarKonto(b) && b.epost && matchaLista(b.epost, BOKARDOMANER) === d); }
+// Kontobokare som blir utan aktiv träff om posten bortId tas bort/inaktiveras (B8) – de stängs av; bokare som matchar en annan aktiv post rörs inte.
+function bokareUtanTraffEfter(bortId) {
+  const kvar = BOKARDOMANER.filter(p => p.id !== bortId && p.aktiv !== false);
+  return BOKARE.filter(b => bokareHarKonto(b) && b.aktiv !== false && !matchaLista(b.epost, kvar));
+}
 function renderBokBokare(body) {
   const vanliga = BOKARE.filter(b => !b.arCj), cj = BOKARE.filter(b => b.arCj);
+  const listRad = d => {
+    const pl = getPipelineById(d.pipelineId);
+    const stage = STAGES.find(s => s.pipelineId === d.pipelineId && s.key === d.stageKey);
+    const kolumnOk = stageKeyValidFor(d.stageKey, d.pipelineId);
+    return `<tr class="${d.aktiv === false ? 'bok-inactive' : ''}">
+      <td>${escapeHtml(d.doman)}${listpostArAdress(d.doman) ? ' <span class="konto-badge off">Adress</span>' : ''}</td>
+      <td>${pl ? plBadge(d.pipelineId) : '<span class="bok-warn-text">⚠ pipeline saknas</span>'}</td>
+      <td>${kolumnOk ? escapeHtml(stage.name) : '<span class="bok-warn-text">⚠ saknas – första kolumnen används</span>'}</td>
+      <td>${listpostTraffar(d).length}</td>
+      <td><input type="checkbox" class="domanAktivCheck" data-id="${escapeHtml(d.id)}"${d.aktiv !== false ? ' checked' : ''} title="Aktiv – nya bokare kan registrera sig"></td>
+      <td class="row-actions"><button type="button" data-dact="redigera" data-id="${escapeHtml(d.id)}">Redigera</button><button type="button" data-dact="tabort" data-id="${escapeHtml(d.id)}" style="color:#f87171">Ta bort</button></td>
+    </tr>`;
+  };
   const rad = b => {
     const pl = getPipelineById(b.pipelineId);
     const stage = STAGES.find(s => s.pipelineId === b.pipelineId && s.key === b.stageKey);
@@ -4811,37 +4961,59 @@ function renderBokBokare(body) {
     const anv = bokareHarHandelser(b.id);
     return `<tr class="${b.aktiv ? '' : 'bok-inactive'}">
       <td>${escapeHtml(b.namn)}${b.arCj ? '<span class="cj-badge">CJ</span>' : ''}</td>
-      <td>${escapeHtml(b.organisation || '')}</td>
+      <td>${b.epost ? `<a href="mailto:${encodeURIComponent(b.epost)}" style="color:#60a5fa;text-decoration:none">${escapeHtml(b.epost)}</a>` : '<span class="bok-muted">–</span>'}</td>
+      <td>${b.mobil ? `<a href="tel:${encodeURIComponent(String(b.mobil).replace(/\s+/g, ''))}" style="color:#60a5fa;text-decoration:none">${escapeHtml(b.mobil)}</a>` : '<span class="bok-muted">–</span>'}</td>
       <td>${pl ? plBadge(b.pipelineId) : '<span class="bok-warn-text">⚠ pipeline saknas</span>'}</td>
       <td>${kolumnOk ? escapeHtml(stage.name) : '<span class="bok-warn-text">⚠ saknas – första kolumnen används</span>'}</td>
       <td>${mts.length ? escapeHtml(mts.join(', ')) : '<span class="bok-muted">Alla</span>'}</td>
       <td><span class="pl-dot" style="background:${safeColor(tag ? tag.color : b.farg)}"></span></td>
       <td>${bokningarForBokare(b.id)}</td>
-      <td><input type="checkbox" class="bokAktivCheck" data-id="${escapeHtml(b.id)}"${b.aktiv ? ' checked' : ''} title="Aktiv – länken fungerar"></td>
-      <td class="row-actions"><button type="button" data-act="kopiera" data-id="${escapeHtml(b.id)}">Kopiera länk</button><button type="button" data-act="rotera" data-id="${escapeHtml(b.id)}">Ny länk</button></td>
+      <td>${b.arCj ? `<span class="row-actions"><button type="button" data-act="kopiera" data-id="${escapeHtml(b.id)}">Kopiera länk</button><button type="button" data-act="rotera" data-id="${escapeHtml(b.id)}">Ny kod</button></span>` : kontoBadgeHtml(b)}</td>
+      <td><input type="checkbox" class="bokAktivCheck" data-id="${escapeHtml(b.id)}"${b.aktiv ? ' checked' : ''} title="${b.arCj ? 'Aktiv – koden fungerar' : 'Aktiv – kan logga in och boka'}"></td>
       <td class="row-actions"><button type="button" data-act="redigera" data-id="${escapeHtml(b.id)}">Redigera</button>${anv ? '' : `<button type="button" data-act="tabort" data-id="${escapeHtml(b.id)}" style="color:#f87171">Ta bort</button>`}</td>
     </tr>`;
   };
-  const head = '<tr><th>Namn</th><th>Organisation</th><th>Pipeline</th><th>Kolumn</th><th>Mötestyper</th><th>Tagg</th><th>Bokningar</th><th>Aktiv</th><th>Länk</th><th></th></tr>';
-  body.innerHTML = `<div class="toolbar" style="justify-content:space-between">
-      <div class="bok-inline"><button type="button" class="btn" id="bokareNyBtn">+ Ny bokare</button><button type="button" class="btn ghost" id="bokareRoteraAllaBtn">Rotera alla koder</button></div>
-      <span class="bok-muted">En personlig länk per person – rotera vid personalbyte.</span>
+  const listHead = '<tr><th>Domän / adress</th><th>Pipeline</th><th>Kolumn</th><th>Bokare</th><th>Aktiv</th><th></th></tr>';
+  const head = '<tr><th>Namn</th><th>E-post</th><th>Mobil</th><th>Pipeline</th><th>Kolumn</th><th>Mötestyper</th><th>Tagg</th><th>Bokningar</th><th>Konto</th><th>Aktiv</th><th></th></tr>';
+  body.innerHTML = `<div class="section-title">Tillåtna domäner och adresser</div>
+    <div class="toolbar" style="justify-content:space-between">
+      <div class="bok-inline"><button type="button" class="btn" id="domanNyBtn">+ Ny post</button></div>
+      <span class="bok-muted">Alla med e-post på en tillåten domän – eller med en tillåten adress – kan registrera sig på bokningssidan och hamnar i vald pipeline och kolumn. En adress vinner över sin domän. Ändra per bokare nedan.</span>
+    </div>
+    <div class="table-wrap"><table><thead>${listHead}</thead><tbody>
+      ${BOKARDOMANER.length ? BOKARDOMANER.map(listRad).join('') : '<tr><td colspan="6" style="color:#fbbf24;text-align:center;padding:20px">Listan är tom – ingen bokare kan registrera sig ännu</td></tr>'}
+    </tbody></table></div>
+    <div class="section-title" style="margin-top:16px">Bokare</div>
+    <div class="toolbar" style="justify-content:space-between">
+      <div class="bok-inline"><button type="button" class="btn ghost" id="bokareHamtaBtn">Hämta konton nu</button><button type="button" class="btn ghost" id="bokareNyBtn">+ CJ-bokare</button>${cj.length ? '<button type="button" class="btn ghost" id="bokareRoteraAllaBtn">Ny kod för CJ-bokare</button>' : ''}</div>
+      <span class="bok-muted">Vanliga bokare registrerar sig själva på bokningssidan och dyker upp här när kontot är bekräftat (hämtas automatiskt tillsammans med inkorgen).</span>
     </div>
     <div class="table-wrap"><table><thead>${head}</thead><tbody>
-      ${vanliga.length ? vanliga.map(rad).join('') : '<tr><td colspan="10" style="color:#6b7280;text-align:center;padding:20px">Inga bokare ännu</td></tr>'}
-      ${cj.length ? '<tr class="bok-sep-row"><td colspan="10">CJ:s egna bokare (Boka själv / Omboka)</td></tr>' + cj.map(rad).join('') : ''}
+      ${vanliga.length ? vanliga.map(rad).join('') : '<tr><td colspan="11" style="color:#6b7280;text-align:center;padding:20px">Inga bokare ännu</td></tr>'}
+      ${cj.length ? '<tr class="bok-sep-row"><td colspan="11">CJ:s egna bokare (Boka själv / Omboka)</td></tr>' + cj.map(rad).join('') : ''}
     </tbody></table></div>
-    ${!cj.length ? '<div class="bok-note">Tips: skapa en CJ-bokare per pipeline (kryssrutan i modalen) så att Boka själv/Omboka fungerar i Kalender-underfliken.</div>' : ''}`;
+    ${!cj.length ? '<div class="bok-note">Tips: skapa en CJ-bokare per pipeline (+ CJ-bokare) så att Boka själv/Omboka fungerar i Kalender-underfliken.</div>' : ''}`;
+  body.querySelector('#domanNyBtn').addEventListener('click', () => openDomanModal(''));
   body.querySelector('#bokareNyBtn').addEventListener('click', () => openBokareModal(''));
-  body.querySelector('#bokareRoteraAllaBtn').addEventListener('click', roteraAllaKoder);
+  body.querySelector('#bokareHamtaBtn').addEventListener('click', () => { setBokStatus('Hämtar konton…', 'info'); importeraBokningar('manuell'); });
+  const rotAlla = body.querySelector('#bokareRoteraAllaBtn'); if (rotAlla) rotAlla.addEventListener('click', roteraAllaKoder);
+  body.querySelectorAll('.domanAktivCheck').forEach(el => el.addEventListener('change', async () => {
+    const d = BOKARDOMANER.find(x => x.id === el.dataset.id); if (!d) return;
+    if (!el.checked) { const ok = await taBortDoman(d, true); if (!ok) el.checked = true; return; }
+    d.aktiv = true; saveBokardomaner(BOKARDOMANER); renderBookings();
+  }));
+  body.querySelectorAll('[data-dact]').forEach(btn => btn.addEventListener('click', () => {
+    const d = BOKARDOMANER.find(x => x.id === btn.dataset.id); if (!d) return;
+    if (btn.dataset.dact === 'redigera') openDomanModal(d.id); else taBortDoman(d, false);
+  }));
   body.querySelectorAll('.bokAktivCheck').forEach(el => el.addEventListener('change', async () => {
     const b = getBokareById(el.dataset.id); if (!b) return;
-    if (!el.checked && !confirm('Stäng av länken för ' + b.namn + '?')) { el.checked = true; return; }
+    if (!el.checked && !confirm((b.arCj ? 'Stäng av koden för ' : 'Stäng av inloggningen för ') + b.namn + '?')) { el.checked = true; return; }
     b.aktiv = el.checked; saveBokare(BOKARE);
     if (!b.aktiv) {
       setBokStatus('Inaktiverar…', 'info');
       const ok = await pushBokningConfigNu();
-      setBokStatus(ok ? 'Länken avstängd (' + b.namn + ')' : 'Kunde inte nå scriptet – gamla länken kan fungera tills synk lyckas (max 10 min efter lyckad synk)', ok ? 'ok' : 'err');
+      setBokStatus(ok ? (b.arCj ? 'Koden avstängd (' : 'Inloggningen avstängd (') + b.namn + ')' : 'Kunde inte nå scriptet – bokaren kan logga in tills synk lyckas (max 10 min efter lyckad synk)', ok ? 'ok' : 'err');
     }
     renderBookings();
   }));
@@ -4851,6 +5023,7 @@ async function bokareAtgard(act, id) {
   const b = getBokareById(id); if (!b) return;
   if (act === 'redigera') { openBokareModal(id); return; }
   if (act === 'kopiera') {
+    if (!b.arCj) return;
     const ok = await kopieraText(bokarLank(b));
     const varning = konfigEjSynkad() ? ' – OBS: konfigurationen är inte synkad, länken fungerar först efter synk' : '';
     if (!ok) prompt('Kunde inte kopiera automatiskt – kopiera länken manuellt:', bokarLank(b));   // koden hamnar aldrig i statusraden (9.3)
@@ -4858,12 +5031,13 @@ async function bokareAtgard(act, id) {
     return;
   }
   if (act === 'rotera') {
-    if (!confirm('Skapa ny länk för ' + b.namn + '? Den gamla länken slutar fungera när konfigurationen synkats.')) return;
+    if (!b.arCj) return;
+    if (!confirm('Skapa ny kod för ' + b.namn + '? Den gamla slutar fungera när konfigurationen synkats.')) return;
     b.kod = genereraBokarkod(); b.kodRoteradTs = nowIsoWithOffset();
     saveBokare(BOKARE);
     setBokStatus('Synkar ny kod…', 'info');
     const ok = await pushBokningConfigNu();
-    setBokStatus(ok ? 'Länken avstängd – ny länk skapad för ' + b.namn + ' (Kopiera länk)' : 'Kunde inte nå scriptet – gamla länken kan fungera tills synk lyckas (max 10 min efter lyckad synk)', ok ? 'ok' : 'err');
+    setBokStatus(ok ? 'Ny kod skapad för ' + b.namn + ' (Kopiera länk)' : 'Kunde inte nå scriptet – gamla koden kan fungera tills synk lyckas (max 10 min efter lyckad synk)', ok ? 'ok' : 'err');
     renderBookings();
     return;
   }
@@ -4871,44 +5045,188 @@ async function bokareAtgard(act, id) {
 }
 async function taBortBokare(b) {
   if (bokareHarHandelser(b.id)) {
-    if (confirm('Bokaren har bokningar och kan inte tas bort. Inaktivera i stället?')) {
+    if (bokareHarKonto(b)) {
+      if (confirm('Bokaren har bokningar och kan inte tas bort. Ta bort kontot (inloggningen upphör, uppgifterna raderas) och inaktivera bokaren?')) await taBortKonto(b);
+    } else if (confirm('Bokaren har bokningar och kan inte tas bort. Inaktivera i stället?')) {
       b.aktiv = false; saveBokare(BOKARE);
       document.getElementById('bokareModalBackdrop').classList.remove('open');
       setBokStatus('Inaktiverar…', 'info');
       const ok = await pushBokningConfigNu();
-      setBokStatus(ok ? 'Länken avstängd (' + b.namn + ')' : 'Kunde inte nå scriptet – gamla länken kan fungera tills synk lyckas (max 10 min efter lyckad synk)', ok ? 'ok' : 'err');
+      setBokStatus(ok ? 'Inaktiverad (' + b.namn + ')' : 'Kunde inte nå scriptet – synken görs om senare', ok ? 'ok' : 'err');
       renderBookings();
     }
     return;
   }
-  if (!confirm('Ta bort bokaren ' + b.namn + '? Länken slutar fungera.')) return;
+  if (!confirm('Ta bort bokaren ' + b.namn + '?' + (bokareHarKonto(b) ? ' Kontot raderas och inloggningen upphör.' : ''))) return;
+  if (bokareHarKonto(b)) {
+    setBokStatus('Tar bort kontot…', 'info');
+    const r = await bokAdminApi('konto-radera', { id: b.id });
+    if (!r.ok) { setBokStatus('Kunde inte ta bort kontot: ' + bokFelText(r), 'err'); return; }
+  }
   BOKARE = BOKARE.filter(x => x.id !== b.id);
   if (b.tagId && !leads.some(l => (l.tags || []).includes(b.tagId)) && !BOKARE.some(x => x.tagId === b.tagId)) {
     TAGS = TAGS.filter(t => t.id !== b.tagId); saveTags(TAGS);
   }
   saveBokare(BOKARE);
   document.getElementById('bokareModalBackdrop').classList.remove('open');
+  setBokStatus('Bokaren borttagen (' + b.namn + ')', 'ok');
+  renderBookings(); renderBoard();
+}
+// GDPR (steg 3, 6.2/9): kontot raderas i scriptet; bokarposten behålls anonymiserad (namnet kvar för gamla händelser) och inaktiveras.
+async function taBortKonto(b) {
+  setBokStatus('Tar bort kontot…', 'info');
+  const r = await bokAdminApi('konto-radera', { id: b.id });
+  if (!r.ok) { setBokStatus('Kunde inte ta bort kontot: ' + bokFelText(r), 'err'); return; }
+  b.aktiv = false; b.kontoStatus = 'raderad'; b.epost = ''; b.mobil = ''; b.fornamn = ''; b.efternamn = ''; b.kontoVerifieradTs = ''; b.kontoSenastInloggadTs = '';
+  saveBokare(BOKARE);
+  document.getElementById('bokareModalBackdrop').classList.remove('open');
+  const ok = await pushBokningConfigNu();
+  setBokStatus(ok ? 'Kontot borttaget och bokaren inaktiverad (' + b.namn + ')' : 'Kontot borttaget – konfigurationen kunde inte synkas ännu', ok ? 'ok' : 'warn');
   renderBookings();
 }
 async function roteraAllaKoder() {
-  if (!BOKARE.length) return;
-  if (!confirm('Rotera koderna för ALLA ' + BOKARE.length + ' bokare? Alla gamla länkar slutar fungera när konfigurationen synkats.')) return;
+  const cj = BOKARE.filter(b => b.arCj);
+  if (!cj.length) return;
+  if (!confirm('Ny kod för ' + cj.length + ' CJ-bokare? De gamla slutar fungera när konfigurationen synkats.')) return;
   const ts = nowIsoWithOffset();
-  BOKARE.forEach(b => { b.kod = genereraBokarkod(); b.kodRoteradTs = ts; });
+  cj.forEach(b => { b.kod = genereraBokarkod(); b.kodRoteradTs = ts; });
   saveBokare(BOKARE);
   setBokStatus('Synkar nya koder…', 'info');
   const ok = await pushBokningConfigNu();
-  setBokStatus(ok ? 'Alla länkar avstängda – nya länkar skapade' : 'Kunde inte nå scriptet – gamla länkarna kan fungera tills synk lyckas (max 10 min efter lyckad synk)', ok ? 'ok' : 'err');
+  setBokStatus(ok ? 'Nya koder skapade för CJ-bokarna' : 'Kunde inte nå scriptet – gamla koderna kan fungera tills synk lyckas (max 10 min efter lyckad synk)', ok ? 'ok' : 'err');
   renderBookings();
 }
-// Modal
-let bokareModalId = '';
-function populateBokareStageSelect(plId, current) {   // mönster populateStageSelect, egen select #bokareStage (6.4)
-  const sel = document.getElementById('bokareStage'), hint = document.getElementById('bokareStageHint');
+// ---------- Tillåtelselistan: modal + borttagning (steg 3, 3.2/6.1) ----------
+let domanModalId = '';
+function fyllStageSelect(sel, plId, current) {   // mönster populateStageSelect (rad 723), egen select per modal
   const stages = STAGES.filter(s => s.pipelineId === plId);
   sel.innerHTML = stages.map(s => `<option value="${escapeHtml(s.key)}">${escapeHtml(s.name)}</option>`).join('');
-  if (current && stages.some(s => s.key === current)) { sel.value = current; hint.style.display = 'none'; }
-  else { if (stages.length) sel.value = stages[0].key; hint.style.display = current ? 'block' : 'none'; }
+  if (current && stages.some(s => s.key === current)) { sel.value = current; return true; }
+  if (stages.length) sel.value = stages[0].key;
+  return false;
+}
+function openDomanModal(id) {
+  const d = id ? BOKARDOMANER.find(x => x.id === id) : null;
+  domanModalId = d ? d.id : '';
+  document.getElementById('domanModalTitle').textContent = d ? 'Redigera post' : 'Ny post i tillåtelselistan';
+  document.getElementById('domanVarde').value = d ? d.doman : '';
+  const plSel = document.getElementById('domanPipeline');
+  plSel.innerHTML = PIPELINES.map(p => `<option value="${escapeHtml(p.id)}">${escapeHtml(p.name)}</option>`).join('');
+  const plId = d && getPipelineById(d.pipelineId) ? d.pipelineId : activePipelineId;
+  plSel.value = plId;
+  fyllStageSelect(document.getElementById('domanStage'), plId, d ? d.stageKey : '');
+  document.getElementById('domanAktiv').checked = d ? d.aktiv !== false : true;
+  document.getElementById('domanDeleteBtn').style.display = d ? 'inline-block' : 'none';
+  document.getElementById('domanModalBackdrop').classList.add('open');
+  if (!d) setTimeout(() => document.getElementById('domanVarde').focus(), 50);
+}
+document.getElementById('domanPipeline').addEventListener('change', e => fyllStageSelect(document.getElementById('domanStage'), e.target.value, ''));
+document.getElementById('domanCancelBtn').addEventListener('click', () => document.getElementById('domanModalBackdrop').classList.remove('open'));
+document.getElementById('domanModalBackdrop').addEventListener('click', e => { if (e.target.id === 'domanModalBackdrop') e.target.classList.remove('open'); });
+document.getElementById('domanDeleteBtn').addEventListener('click', () => { const d = BOKARDOMANER.find(x => x.id === domanModalId); if (d) taBortDoman(d, false); });
+document.getElementById('domanSaveBtn').addEventListener('click', () => {
+  const varde = normaliseraListpost(document.getElementById('domanVarde').value);
+  if (!varde || !listpostGiltig(varde)) { alert('Ange en domän (t.ex. byra.se) eller en hel e-postadress (t.ex. kalle@gmail.com)'); return; }
+  if (BOKARDOMANER.some(x => x.doman === varde && x.id !== domanModalId)) { alert('Posten finns redan i listan'); return; }
+  const plId = document.getElementById('domanPipeline').value;
+  if (!getPipelineById(plId)) { alert('Välj pipeline'); return; }
+  let stageKey = document.getElementById('domanStage').value;
+  if (!stageKeyValidFor(stageKey, plId)) stageKey = firstStageKeyFor(plId);
+  let d = domanModalId ? BOKARDOMANER.find(x => x.id === domanModalId) : null;
+  const aktiv = document.getElementById('domanAktiv').checked;
+  const inaktiveras = !!(d && d.aktiv !== false && !aktiv);
+  if (!d) { d = { id: 'dom_' + uid(), skapadTs: nowIsoWithOffset() }; BOKARDOMANER.push(d); }
+  Object.assign(d, { doman: varde, pipelineId: plId, stageKey, aktiv });
+  document.getElementById('domanModalBackdrop').classList.remove('open');
+  if (inaktiveras) {   // samma avstängningsregel som Ta bort (B8), men posten ligger kvar
+    const beror = bokareUtanTraffEfter(d.id);
+    if (beror.length) { beror.forEach(b => { b.aktiv = false; }); saveBokare(BOKARE); }
+    saveBokardomaner(BOKARDOMANER);
+    setBokStatus('Stänger av…', 'info');
+    pushBokningConfigNu().then(ok => { setBokStatus(ok ? 'Posten inaktiverad – ' + beror.length + ' bokare avstängda' : 'Kunde inte nå scriptet – bokarna kan logga in tills synk lyckas (max 10 min efter lyckad synk)', ok ? 'ok' : 'err'); renderBookings(); });
+  } else { saveBokardomaner(BOKARDOMANER); setBokStatus('Posten sparad (' + varde + ')', 'ok'); }
+  renderBookings();
+});
+// Ta bort (inaktivera=false) eller inaktivera (true) en post: kontobokare utan annan aktiv träff stängs av (B8). → true om utfört.
+async function taBortDoman(d, inaktivera) {
+  const beror = bokareUtanTraffEfter(d.id);
+  const vad = inaktivera ? 'Inaktivera ' : 'Ta bort ';
+  if (!confirm(vad + d.doman + '? ' + (beror.length ? beror.length + ' bokare stängs av och kan inte längre logga in: ' + beror.map(b => b.namn).join(', ') : 'Ingen bokare påverkas') + '.')) return false;
+  beror.forEach(b => { b.aktiv = false; });
+  if (inaktivera) d.aktiv = false; else BOKARDOMANER = BOKARDOMANER.filter(x => x.id !== d.id);
+  if (beror.length) saveBokare(BOKARE);
+  saveBokardomaner(BOKARDOMANER);
+  document.getElementById('domanModalBackdrop').classList.remove('open');
+  setBokStatus('Stänger av…', 'info');
+  const ok = await pushBokningConfigNu();
+  setBokStatus(ok ? (inaktivera ? 'Posten inaktiverad' : 'Posten borttagen') + ' – ' + beror.length + ' bokare avstängda' : 'Kunde inte nå scriptet – bokarna kan logga in tills synk lyckas (max 10 min efter lyckad synk)', ok ? 'ok' : 'err');
+  renderBookings();
+  return true;
+}
+// ---------- Import av konton (steg 3, 6.3): konton-list → BOKARE ----------
+// Körs i importcykeln (importeraBokningar) när kontofilens modifiedTime ändrats, eller vid "Hämta konton nu"/"Hämta nu" (manuell).
+// Fel här fäller aldrig inkorgsimporten (eget try/catch); E_AUTH bubblar upp till importeraBokningar (paus tills inloggning).
+async function synkaKontonOmAndrade(orsak) {
+  const s = BOKNINGSINSTALLNINGAR;
+  const fil = s.brevladaFiler && s.brevladaFiler.konton;
+  if (!fil) return;
+  const tvinga = orsak === 'manuell';
+  try {
+    const metaRes = await driveFetch('https://www.googleapis.com/drive/v3/files/' + encodeURIComponent(fil) + '?fields=modifiedTime', { silent401: true });
+    if (!metaRes.ok) throw new Error('Drive svarade ' + metaRes.status);
+    const meta = await metaRes.json();
+    const mt = bstr(meta.modifiedTime, 40);
+    if (!tvinga && mt && mt === s.kontonModifiedTime) return;
+    const r = await bokAdminApi('konton-list', {});
+    if (!r.ok) { if (tvinga) setBokStatus('Kunde inte hämta konton: ' + bokFelText(r), 'err'); return; }
+    const konton = ((r.data && Array.isArray(r.data.konton)) ? r.data.konton : []).filter(k => isPlainObject(k) && /^bokare_[A-Za-z0-9_-]{1,64}$/.test(String(k.id || '')));
+    const res = synkaBokareFranKonton(konton);
+    s.kontonModifiedTime = mt; saveBokningsinstallningar(s, false);
+    if (res.nya.length) setBokStatus('Ny bokare: ' + res.nya.map(b => b.namn + (b.organisation ? ' (' + b.organisation + ')' : '')).join(', ') + ' – hamnar i ' + (res.nya.length === 1 ? 'pipelinen ' + ((getPipelineById(res.nya[0].pipelineId) || {}).name || '?') : 'listpostens pipeline'), 'ok');
+    else if (tvinga) setBokStatus('Konton hämtade ' + nowTimeStr() + ' – ' + konton.length + ' konton, inga nya', 'info');
+    if (res.nya.length || res.andrade) { renderBoard(); renderBookingsIfVisible(); }
+  } catch (e) {
+    if (e && e.message === 'E_AUTH') throw e;
+    if (tvinga) setBokStatus('Kunde inte hämta konton: ' + (e && e.message || e), 'err');
+  }
+}
+// Skapar/uppdaterar BOKARE ur kontolistan (6.3). Ny post får listpostens pipeline/kolumn (kontots pipelineId sattes av samma post vid
+// registreringen), tagg via ensureBokareTag. Aldrig ändras pipelineId/stageKey/tillatnaMotestypIds/aktiv/farg på befintliga poster.
+// Kontobokare som saknas i svaret → kontoStatus 'raderad' (gallrat overifierat konto eller borttaget). → { nya:[bokare], andrade:bool }
+function synkaBokareFranKonton(konton) {
+  const nya = []; let andrad = false;
+  const satt = (b, k, v) => { if (b[k] !== v) { b[k] = v; andrad = true; } };
+  konton.forEach(k => {
+    const post = BOKARDOMANER.find(p => p.id === bstr(k.listaId, 64)) || matchaLista(bstr(k.epost, 120), BOKARDOMANER);
+    let b = getBokareById(k.id);
+    if (!b) {
+      const kPl = bstr(k.pipelineId, 64);
+      const plId = getPipelineById(kPl) ? kPl : (post && getPipelineById(post.pipelineId) ? post.pipelineId : (PIPELINES[0] ? PIPELINES[0].id : ''));
+      b = { id: k.id, kod: '', kodRoteradTs: '', skapadTs: bstr(k.skapadTs, 40) || nowIsoWithOffset(), tagId: '', arCj: false, farg: TAG_DEFAULT_COLOR,
+            namn: '', organisation: '', epost: '', fornamn: '', efternamn: '', mobil: '',
+            pipelineId: plId, stageKey: (post && post.pipelineId === plId && stageKeyValidFor(post.stageKey, plId)) ? post.stageKey : firstStageKeyFor(plId),
+            tillatnaMotestypIds: [], aktiv: true, listaId: post ? post.id : '', kontoStatus: '', kontoVerifieradTs: '', kontoSenastInloggadTs: '' };
+      BOKARE.push(b); nya.push(b); andrad = true;
+    }
+    satt(b, 'fornamn', bstr(k.fornamn, 60)); satt(b, 'efternamn', bstr(k.efternamn, 60)); satt(b, 'mobil', bstr(k.mobil, 30)); satt(b, 'epost', bstr(k.epost, 120));
+    satt(b, 'namn', (b.fornamn + ' ' + b.efternamn).trim() || b.namn);
+    satt(b, 'organisation', bstr(k.doman, 253));
+    satt(b, 'kontoStatus', ['overifierad', 'aktiv'].includes(k.status) ? k.status : '');
+    satt(b, 'kontoVerifieradTs', bstr(k.verifieradTs, 40)); satt(b, 'kontoSenastInloggadTs', bstr(k.senastInloggadTs, 40));
+    const tag = getTagById(b.tagId);
+    if (!tag || tag.name !== b.namn) { ensureBokareTag(b); andrad = true; }
+  });
+  const ids = new Set(konton.map(k => k.id));
+  BOKARE.forEach(b => { if (bokareHarKonto(b) && !ids.has(b.id)) { b.kontoStatus = 'raderad'; andrad = true; } });
+  if (andrad) saveBokare(BOKARE);
+  return { nya, andrade: andrad };
+}
+// ---------- Bokare-modalen (6.2) ----------
+let bokareModalId = '';
+function populateBokareStageSelect(plId, current) {
+  const hint = document.getElementById('bokareStageHint');
+  const traff = fyllStageSelect(document.getElementById('bokareStage'), plId, current);
+  hint.style.display = !traff && current ? 'block' : 'none';
 }
 function renderBokareMotestypChecks(plId, valda) {
   const el = document.getElementById('bokareMotestyper');
@@ -4917,40 +5235,43 @@ function renderBokareMotestypChecks(plId, valda) {
     ? list.map(m => `<label class="check-row"><input type="checkbox" class="bokareMtCheck" value="${escapeHtml(m.id)}"${valda.includes(m.id) ? ' checked' : ''}> ${escapeHtml(m.titel)}${m.global ? ' <span class="bok-muted">(global)</span>' : ''}</label>`).join('')
     : '<div class="bok-muted">Inga aktiva mötestyper i pipelinen – alla typer tillåts.</div>';
 }
+// Ny post i appen är alltid en CJ-bokare (kryssrutan låst); för befintliga bokare visas kontaktfälten skrivskyddade (ägs av kontot).
 function uppdateraBokareCjUi() {
   const chk = document.getElementById('bokareArCj'), hint = document.getElementById('bokareArCjHint');
   const plId = document.getElementById('bokarePipeline').value;
-  const annan = BOKARE.find(b => b.arCj && b.pipelineId === plId && b.id !== bokareModalId);
-  chk.disabled = !!annan;
-  if (annan) { chk.checked = false; hint.textContent = 'Pipelinen har redan en CJ-bokare (' + annan.namn + ') – högst en per pipeline.'; }
-  else hint.textContent = 'Används av "Boka själv"/"Omboka" i Kalender-underfliken. Högst en per pipeline.';
-  const cj = chk.checked && !chk.disabled;
-  const namn = document.getElementById('bokareNamn');
-  namn.readOnly = cj; if (cj) namn.value = 'CJ';
-  document.getElementById('bokareOrgField').style.display = cj ? 'none' : '';
-  document.getElementById('bokareEpostField').style.display = cj ? 'none' : '';
+  const b = bokareModalId ? getBokareById(bokareModalId) : null;
+  const annan = BOKARE.find(x => x.arCj && x.pipelineId === plId && x.id !== bokareModalId);
+  chk.checked = b ? b.arCj === true : true;
+  chk.disabled = true;
+  if (chk.checked) hint.textContent = annan ? 'Pipelinen har redan en CJ-bokare (' + annan.namn + ') – välj en annan pipeline eller redigera den befintliga.' : 'Används av "Boka själv"/"Omboka" i Kalender-underfliken. Högst en per pipeline. Vanliga bokare registrerar sig själva på bokningssidan.';
+  else hint.textContent = 'Vanlig bokare – loggar in med e-post och lösenord på bokningssidan.';
+  const cj = chk.checked;
+  document.getElementById('bokareKontoFalt').style.display = cj ? 'none' : '';
+  const kontoHint = document.getElementById('bokareKontoHint');
+  if (b && !cj) kontoHint.textContent = bokareHarKonto(b) ? 'Uppgifterna ägs av bokaren och uppdateras från kontot.' : (b.kontoStatus === 'raderad' ? 'Kontot är borttaget – bokaren kan registrera sig på nytt.' : 'Bokaren har ingen inloggning – ta bort posten och låt personen registrera sig på bokningssidan.');
+  document.getElementById('bokareKodHint').style.display = cj && !b ? 'block' : 'none';
+  document.getElementById('bokareKontoRaderaBtn').style.display = b && bokareHarKonto(b) ? 'inline-block' : 'none';
 }
 function openBokareModal(id) {
   const b = id ? getBokareById(id) : null;
   bokareModalId = b ? b.id : '';
-  document.getElementById('bokareModalTitle').textContent = b ? 'Redigera bokare' : 'Ny bokare';
+  document.getElementById('bokareModalTitle').textContent = b ? (b.arCj ? 'Redigera CJ-bokare' : 'Redigera bokare') : 'Ny CJ-bokare';
   document.getElementById('bokareId').value = bokareModalId;
   const plSel = document.getElementById('bokarePipeline');
   plSel.innerHTML = PIPELINES.map(p => `<option value="${escapeHtml(p.id)}">${escapeHtml(p.name)}</option>`).join('');
   const plId = b && getPipelineById(b.pipelineId) ? b.pipelineId : activePipelineId;
   plSel.value = plId;
-  document.getElementById('bokareNamn').value = b ? b.namn : '';
-  document.getElementById('bokareOrganisation').value = b ? b.organisation : '';
-  document.getElementById('bokareEpost').value = b ? b.epost : '';
+  document.getElementById('bokareFornamn').value = b ? (b.fornamn || '') : '';
+  document.getElementById('bokareEfternamn').value = b ? (b.efternamn || (b.fornamn ? '' : b.namn)) : '';
+  document.getElementById('bokareEpost').value = b ? (b.epost || '') : '';
+  document.getElementById('bokareMobil').value = b ? (b.mobil || '') : '';
   document.getElementById('bokareFarg').value = safeColor(b ? b.farg : TAG_DEFAULT_COLOR);
   document.getElementById('bokareAktiv').checked = b ? b.aktiv !== false : true;
-  document.getElementById('bokareArCj').checked = !!(b && b.arCj);
   populateBokareStageSelect(plId, b ? b.stageKey : '');
   renderBokareMotestypChecks(plId, b ? (b.tillatnaMotestypIds || []) : []);
   uppdateraBokareCjUi();
   document.getElementById('bokareDeleteBtn').style.display = b ? 'inline-block' : 'none';
   document.getElementById('bokareDeleteBtn').textContent = b && bokareHarHandelser(b.id) ? 'Inaktivera' : 'Ta bort';
-  document.getElementById('bokareKodHint').style.display = b ? 'none' : 'block';
   document.getElementById('bokareModalBackdrop').classList.add('open');
 }
 document.getElementById('bokarePipeline').addEventListener('change', e => {
@@ -4959,31 +5280,27 @@ document.getElementById('bokarePipeline').addEventListener('change', e => {
   renderBokareMotestypChecks(e.target.value, valda);
   uppdateraBokareCjUi();
 });
-document.getElementById('bokareArCj').addEventListener('change', uppdateraBokareCjUi);
 document.getElementById('bokareCancelBtn').addEventListener('click', () => document.getElementById('bokareModalBackdrop').classList.remove('open'));
 document.getElementById('bokareModalBackdrop').addEventListener('click', e => { if (e.target.id === 'bokareModalBackdrop') e.target.classList.remove('open'); });
 document.getElementById('bokareDeleteBtn').addEventListener('click', () => { const b = getBokareById(bokareModalId); if (b) taBortBokare(b); });
+document.getElementById('bokareKontoRaderaBtn').addEventListener('click', () => { const b = getBokareById(bokareModalId); if (b && bokareHarKonto(b) && confirm('Ta bort kontot för ' + b.namn + '? Inloggningen upphör och namn, e-post och mobil raderas; bokaren inaktiveras. Gamla bokningar behåller namnet.')) taBortKonto(b); });
 document.getElementById('bokareSaveBtn').addEventListener('click', () => {
-  const chk = document.getElementById('bokareArCj');
-  const arCj = chk.checked && !chk.disabled;
+  const b0 = bokareModalId ? getBokareById(bokareModalId) : null;
+  const arCj = b0 ? b0.arCj === true : true;   // ny post i appen = CJ-bokare (steg 3, 6.2)
   const plId = document.getElementById('bokarePipeline').value;
   if (!getPipelineById(plId)) { alert('Välj pipeline'); return; }
-  const namn = arCj ? 'CJ' : document.getElementById('bokareNamn').value.trim().slice(0, 120);
-  if (!namn) { alert('Ange namn'); return; }
   if (arCj && BOKARE.some(b => b.arCj && b.pipelineId === plId && b.id !== bokareModalId)) { alert('Pipelinen har redan en CJ-bokare'); return; }
   let stageKey = document.getElementById('bokareStage').value;
   if (!stageKeyValidFor(stageKey, plId)) stageKey = firstStageKeyFor(plId);
-  const epost = arCj ? '' : document.getElementById('bokareEpost').value.trim().slice(0, 120);
-  if (epost && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(epost)) { alert('Ogiltig e-postadress'); return; }
-  let b = bokareModalId ? getBokareById(bokareModalId) : null;
+  let b = b0;
   const isNew = !b;
-  if (!b) b = { id: 'bokare_' + uid(), kod: genereraBokarkod(), kodRoteradTs: '', skapadTs: nowIsoWithOffset(), tagId: '' };
+  if (!b) b = { id: 'bokare_' + uid(), kod: genereraBokarkod(), kodRoteradTs: '', skapadTs: nowIsoWithOffset(), tagId: '', namn: 'CJ', organisation: '', epost: '', fornamn: '', efternamn: '', mobil: '', listaId: '', kontoStatus: '', kontoVerifieradTs: '', kontoSenastInloggadTs: '' };
   Object.assign(b, {
-    namn, organisation: arCj ? '' : document.getElementById('bokareOrganisation').value.trim().slice(0, 120), epost,
     pipelineId: plId, stageKey, tillatnaMotestypIds: Array.from(document.querySelectorAll('.bokareMtCheck:checked')).map(x => x.value),
     aktiv: document.getElementById('bokareAktiv').checked, arCj, farg: safeColor(document.getElementById('bokareFarg').value)
   });
-  if (!b.kod) b.kod = genereraBokarkod();
+  if (arCj) { b.namn = 'CJ'; b.organisation = ''; if (!b.kod) b.kod = genereraBokarkod(); }
+  else { b.kod = ''; b.kodRoteradTs = ''; }   // B12: bara CJ-bokare har kod
   ensureBokareTag(b);
   if (isNew) BOKARE.push(b);
   saveBokare(BOKARE);
@@ -5200,7 +5517,7 @@ function renderBokInstallningar(body) {
     <div class="section-title">Bokningssida</div>
     <div class="field"><label>Adress till bokningssidan (utan parametrar)</label>
       <div class="bok-inline"><input type="text" id="bsBokningSidaUrl" autocomplete="off" spellcheck="false"><button type="button" class="btn ghost" id="bsOppnaSidaBtn">Öppna</button></div>
-      <div class="hint" style="margin-top:4px">Sidan ligger på sajten och deployas separat – se setup-guiden steg 3b. Byts domänen måste appens CSP (frame-src) uppdateras.</div></div>
+      <div class="hint" style="margin-top:4px">Sidan ligger på sajten och deployas separat – se setup-guiden steg 3b. Byts domänen måste appens CSP (frame-src) uppdateras. Bokare registrerar sig själva på sidan med e-post och lösenord; vem som får det styrs under Bokare › Tillåtna domäner och adresser.</div></div>
   </div>
 
   <div class="bok-inline" style="margin-bottom:24px"><button type="button" class="btn" id="bsSparaBtn">Spara inställningar</button><span class="bok-muted">Sparas lokalt + Drive och synkas till brevlådan.</span></div>`;
@@ -5304,7 +5621,7 @@ function uppdateraAnslutKnappar() {
   const delar = [];
   delar.push(bokAnsluten() ? 'Ansluten' : 'Inte ansluten');
   if (s.senastSyncRev) delar.push('konfiguration synkad rev ' + s.senastSyncRev + (s.senastSyncTs ? ' ' + kortTidLabel(s.senastSyncTs) : ''));
-  if (s.brevladaFiler && s.brevladaFiler.config) delar.push('Drive-filer: config/inbox/cache');
+  if (s.brevladaFiler && s.brevladaFiler.config) delar.push('Drive-filer: config/inbox/cache' + (s.brevladaFiler.konton ? '/konton' : ' (konton saknas – kör Återanslut)'));
   if (s.adminNyckel) delar.push('adminnyckel finns i appen');
   info.textContent = delar.join(' · ');
   btn.textContent = bokAnsluten() ? 'Återanslut' : 'Anslut';
@@ -6246,7 +6563,7 @@ function ritaKalDetalj() {
     ${s.plats || s.omrade ? `<div class="rad">📍 ${s.plats ? `<a href="${mapsUrl(s.plats)}" target="_blank" rel="noopener" style="color:#60a5fa;text-decoration:none">${escapeHtml(s.plats)}</a>` : ''}${s.omrade ? (s.plats ? ' <span class="bok-muted">(' + escapeHtml(s.omrade) + ')</span>' : '<span class="bok-muted">' + escapeHtml(s.omrade) + '</span>') : ''}${s.restid ? ' · restid beräknas runt händelsen' : ''}</div>` : ''}
     ${kalDetaljRestidRad(s)}
     ${kalDetaljOverrideBlock(s, st)}
-    ${lokal ? `<div class="rad">Kund: <b>${escapeHtml(kund ? kund.namn : 'Namnlös kund')}</b>${kund && kund.orgnr ? ' (' + escapeHtml(kund.orgnr) + ')' : ''} · ${escapeHtml(mt ? mt.titel : lokal.ev.text)} · Bokad av ${escapeHtml(bokarNamn(lokal.ev.bokadAv))} · Status: ${escapeHtml(lokal.ev.status || '–')}${lokal.ev.restid && lokal.ev.restid.status !== 'ok' ? '<span class="ev-warn">⚠ restid ' + (lokal.ev.restid.status === 'schablon' ? 'schablon' : 'okänd') + '</span>' : ''}${PIPELINES.length > 1 ? ' ' + plBadge(lokal.lead.pipelineId) : ''}</div>` : ''}
+    ${lokal ? `<div class="rad">Kund: <b>${escapeHtml(kund ? kund.namn : 'Namnlös kund')}</b>${kund && kund.orgnr ? ' (' + escapeHtml(kund.orgnr) + ')' : ''} · ${escapeHtml(mt ? mt.titel : lokal.ev.text)} · Bokad av ${bokarKontaktHtml(lokal.ev, null)} · Status: ${escapeHtml(lokal.ev.status || '–')}${lokal.ev.restid && lokal.ev.restid.status !== 'ok' ? '<span class="ev-warn">⚠ restid ' + (lokal.ev.restid.status === 'schablon' ? 'schablon' : 'okänd') + '</span>' : ''}${PIPELINES.length > 1 ? ' ' + plBadge(lokal.lead.pipelineId) : ''}</div>` : ''}
     ${s.kalla === 'bokningar' && !lokal ? '<div class="rad bok-warn-text">Bokningen finns i kalendern men inte lokalt – kör "Hämta nu" i Inkorg</div>' : ''}
     <div class="rad">Källa: ${escapeHtml(BOK_KAL_KALLA_NAMN[s.kalla] || s.kalla)} · Tillgänglighet: ${kalStatusText(s)}</div>
     ${s.varning ? `<div class="rad bok-warn-text">⚠ ${escapeHtml(s.varning)}</div>` : ''}
@@ -6624,9 +6941,9 @@ async function embedValdTid(d) {
   const adress = bstr(d.adress, BOK_MAXLEN.adress);
   const reservationId = /^[A-Za-z0-9_:-]{1,80}$/.test(String(d.reservationId || '')) ? String(d.reservationId) : '';
   const p = fromIso(start), kund = getCustomerById(lead.kundId);
-  const bokare = getBokareById(ev.bokadAv), harEpost = !!(bokare && bokare.epost);
+  const harEpost = !!bokarEpostFor(ev, null), bokareNamnText = bokarNamnFor(ev, null);   // steg 3: snapshot på händelsen, annars bokarposten
   const gammal = (ev.datum || '') + ' ' + (ev.tid || '');
-  if (!confirm('Omboka ' + (kund ? kund.namn : 'mötet') + ' till ' + longDateLabel(p.datum) + ' ' + p.tid + '? Outlook uppdateras och ' + (harEpost ? 'bokaren (' + bokare.namn + ') meddelas per e-post – hen kontaktar kunden' : 'ingen bokare meddelas (' + bokarNamn(ev.bokadAv) + ' saknar e-post)') + '.')) {
+  if (!confirm('Omboka ' + (kund ? kund.namn : 'mötet') + ' till ' + longDateLabel(p.datum) + ' ' + p.tid + '? Outlook uppdateras och ' + (harEpost ? 'bokaren (' + bokareNamnText + ') meddelas per e-post – hen kontaktar kunden' : 'ingen bokare meddelas (' + bokareNamnText + ' saknar e-post)') + '.')) {
     skickaOmbokaMeddelande();   // låser upp sidan så en annan lucka kan väljas
     return;
   }
@@ -6728,7 +7045,7 @@ async function avbokaBokning(bokningId) {
   if (!hit) { setBokStatus('Bokningen finns inte lokalt', 'warn'); return; }
   const { lead, ev } = hit;
   if (ev.status !== 'bokad') { setBokStatus('Bokningen är redan ' + (ev.status || 'utan status'), 'warn'); return; }
-  const bokare = getBokareById(ev.bokadAv), namn = bokarNamn(ev.bokadAv), harEpost = !!(bokare && bokare.epost);
+  const namn = bokarNamnFor(ev, null), harEpost = !!bokarEpostFor(ev, null);   // steg 3: snapshot på händelsen, annars bokarposten
   const kund = getCustomerById(lead.kundId);
   const orsak = prompt('Avboka ' + (kund ? kund.namn : 'mötet') + ' ' + longDateLabel(ev.datum) + ' ' + (ev.tid || '') + '\nOrsak' + (harEpost ? ' (skickas till bokaren):' : ' (loggas på processen):'));
   if (orsak === null) return;

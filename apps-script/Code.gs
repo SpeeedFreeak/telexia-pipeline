@@ -5,7 +5,10 @@
  * avsnitt 4 (brevlåda, transport, endpoints, säkerhet), 5 (tillgänglighet – anropas i Availability.gs), 9 (säkerhet/GDPR)
  * och 11 (steg 2: bokarens egen ombokning/avbokning – CJ:s beslut 2026-09-15, se "Bokar-endpoints egen-*" nedan).
  *
- * Projektet består av tre filer:
+ * Projektet består av fyra filer (Konton.gs tillkom i version 13):
+ *   Konton.gs        – bokarkonton (steg 3, SCRIPT_VERSION 13, spec "[C] Bokningsmodul - specifikation steg 3 bokarkonton.md"): kontofilen
+ *                      telexia-bokning-konton.json, lösenordshash, sessioner (req.s i alla bokar-endpoints), tillåtelselistan config.domaner,
+ *                      endpoints konto-* + konton-list/konto-radera, konto-mail, gallring, runKontoTests().
  *   Code.gs          – denna fil: Script Properties, filhantering, doPost/doGet, autentisering, gränser,
  *                      reservation, book, kalenderskrivning, notismejl, hello/ping/geocode/release,
  *                      admin-endpoints setup/config-push/calendars-list/inbox-list/ack/reject (M3),
@@ -33,7 +36,7 @@
  *
  * Regler som gäller hela filen (spec 4.1, 4.3, 9):
  *   - Inga hemligheter i koden. MAPS_API_KEY, ADMIN_KEY och fil-id:n finns bara i Script Properties.
- *   - Inga Drive-anrop utöver DriveApp.getFileById(<de tre id:na>) + getBlob/setContent/getName/getMimeType/getOwner/isTrashed.
+ *   - Inga Drive-anrop utöver DriveApp.getFileById(<de fyra id:na>) + getBlob/setContent/getName/getMimeType/getOwner/isTrashed.
  *   - Loggning bara via den strukturerade raden i doPost: aldrig indata, koder, nycklar eller kund-/kontaktfält.
  *   - Alla svar är JSON-kuvert (ContentService) – även vid okontrollerade fel (yttersta try/catch i doPost).
  *   - Allt som skrivs till kalender/mejl får < och > strippade; mejl är alltid plain text.
@@ -43,7 +46,7 @@
 // Konstanter
 // ============================================================
 
-const SCRIPT_VERSION = 12;                      // 12 = prestanda (Script Properties-memo per körning, batchade CacheService-läsningar i Availability.gs, förberäknad calendar-preview i refreshIcsCache – CacheService preview:snap + busy:<datum> 11 min, calendar-preview svarar cachad:true/snapshotTs/tider, availability tider – valfria fält: MIN_SCRIPT_VERSION förblir 4; CJ 2026-09-17: "kalendern är väldigt långsam att ladda"); 11 = blocksynk till Google Kalender (installningar.blockSynkAktiv, Script Properties BLOCK_KALENDER_ID/BLOCK_SYNK_SENAST, egen kalender "Pipeline – restid" som aldrig läses, admin-endpoint block-sync, ping.blockSynk, calendars-list blockKalender – valfria fält: MIN_SCRIPT_VERSION förblir 4; A61, CJ:s beslut 2026-09-17); 10 = ren restid (råa Distance Matrix-minuter, inget påslag), marginal efter varje möte (installningar.marginalFysisktMin/marginalOnlineMin → effektiv buffert cooldownMin i Calendar.gs finalizeBusy; ersätter marginalMinstMin/marginalProcent) och restid delad runt platslösa möten (availability slot.restid.inDelar/utDelar + data.pausMin, calendar-preview resor[].delar – valfria fält, inBlock/utBlock = yttre spann: MIN_SCRIPT_VERSION förblir 4; CJ:s beslut 2026-09-17); 9 = manuell restidsklassning + rättad adress per händelse (KALENDER_IGNORERA-postens valfria online/adress/lat/lng/omrade och lage 'restid', Calendar.gs applyIgnore; calendar-preview overrideOnline/overrideAdress/serieId, geocode.omrade – valfria fält: MIN_SCRIPT_VERSION förblir 4); 8 = online-möten ("Microsoft Teams-möte" m.fl. i platsfältet är aldrig restidsankare, Calendar.gs kalLooksLikePlace – MIN_SCRIPT_VERSION förblir 4); MIN_SCRIPT_VERSION i index.html/bokning.js jämförs mot denna (4.12); 3 = M5 (purge, dailyMaintenance, nya ping-fält); 4 = steg 2a (egen-rebook/egen-cancel/egen-update, hello.egna med kanAndras); 5 = steg 2b (adressforslag via Places, placeId i geokodning – valfritt: MIN_SCRIPT_VERSION förblir 4); 6 = steg 2c (block.omrade i availability, omrade + resor i calendar-preview – valfria fält: MIN_SCRIPT_VERSION förblir 4); 7 = optimering (inkorg i CacheService, en cache-filskrivning per körning, ICS-värmare) + restid tydlig (paus-block, 0 min samma adress, Teams-fix, mejltext) + rebook släpper reservation (valfria fält: MIN_SCRIPT_VERSION förblir 4)
+const SCRIPT_VERSION = 13;                      // 13 = bokarkonton (steg 3, Konton.gs): e-post + lösenord ersätter bokarkoden för vanliga bokare (k bara för CJ-bokare/arCj), fjärde brevlådefil telexia-bokning-konton.json (KONTON_FILE_ID, ägs av scriptet), tillåtelselista config.domaner (domän eller hel adress → pipeline), endpoints konto-registrera/-verifiera/-logga-in/-glomt/-aterstall/-byt-losenord/-profil + admin konton-list/konto-radera, session s i alla bokar-endpoints, hello.bokare fornamn/efternamn/epost/mobil/harKonto, inkorgspost.bokare-snapshot + "Bokad av: namn, e-post, mobil" i kalendern (B9), felkoder E_DOMAN/E_LOGIN/E_OVERIFIERAD/E_INAKTIV/E_SESSION/E_TOKEN, Script Properties SESSION_SECRET/LOSEN_PEPPER (install), ping kontonFil/kontonAntal/kontoMailIdag/inloggningsforsokIdag, dailyMaintenance gallrar overifierade konton – MIN_SCRIPT_VERSION höjs till 13 i index.html och bokning.js (CJ:s beslut 2026-09-19); 12 = prestanda (Script Properties-memo per körning, batchade CacheService-läsningar i Availability.gs, förberäknad calendar-preview i refreshIcsCache – CacheService preview:snap + busy:<datum> 11 min, calendar-preview svarar cachad:true/snapshotTs/tider, availability tider – valfria fält: MIN_SCRIPT_VERSION förblir 4; CJ 2026-09-17: "kalendern är väldigt långsam att ladda"); 11 = blocksynk till Google Kalender (installningar.blockSynkAktiv, Script Properties BLOCK_KALENDER_ID/BLOCK_SYNK_SENAST, egen kalender "Pipeline – restid" som aldrig läses, admin-endpoint block-sync, ping.blockSynk, calendars-list blockKalender – valfria fält: MIN_SCRIPT_VERSION förblir 4; A61, CJ:s beslut 2026-09-17); 10 = ren restid (råa Distance Matrix-minuter, inget påslag), marginal efter varje möte (installningar.marginalFysisktMin/marginalOnlineMin → effektiv buffert cooldownMin i Calendar.gs finalizeBusy; ersätter marginalMinstMin/marginalProcent) och restid delad runt platslösa möten (availability slot.restid.inDelar/utDelar + data.pausMin, calendar-preview resor[].delar – valfria fält, inBlock/utBlock = yttre spann: MIN_SCRIPT_VERSION förblir 4; CJ:s beslut 2026-09-17); 9 = manuell restidsklassning + rättad adress per händelse (KALENDER_IGNORERA-postens valfria online/adress/lat/lng/omrade och lage 'restid', Calendar.gs applyIgnore; calendar-preview overrideOnline/overrideAdress/serieId, geocode.omrade – valfria fält: MIN_SCRIPT_VERSION förblir 4); 8 = online-möten ("Microsoft Teams-möte" m.fl. i platsfältet är aldrig restidsankare, Calendar.gs kalLooksLikePlace – MIN_SCRIPT_VERSION förblir 4); MIN_SCRIPT_VERSION i index.html/bokning.js jämförs mot denna (4.12); 3 = M5 (purge, dailyMaintenance, nya ping-fält); 4 = steg 2a (egen-rebook/egen-cancel/egen-update, hello.egna med kanAndras); 5 = steg 2b (adressforslag via Places, placeId i geokodning – valfritt: MIN_SCRIPT_VERSION förblir 4); 6 = steg 2c (block.omrade i availability, omrade + resor i calendar-preview – valfria fält: MIN_SCRIPT_VERSION förblir 4); 7 = optimering (inkorg i CacheService, en cache-filskrivning per körning, ICS-värmare) + restid tydlig (paus-block, 0 min samma adress, Teams-fix, mejltext) + rebook släpper reservation (valfria fält: MIN_SCRIPT_VERSION förblir 4)
 const TZ = 'Europe/Stockholm';
 const APP_URL = 'https://speeedfreeak.github.io/telexia-pipeline/';   // länk i notismejlet (4.9)
 const MAX_BODY_BYTES = 16384;                   // body kontrolleras före JSON.parse (4.3)
@@ -135,7 +138,11 @@ const PROP = {
   MAPS_API_KEY: 'MAPS_API_KEY',
   MAPS_DAILY_CAP: 'MAPS_DAILY_CAP',
   BLOCK_KALENDER_ID: 'BLOCK_KALENDER_ID',     // version 11 (A61): id för kalendern "Pipeline – restid" som scriptet skapar – läses aldrig av readBusy
-  BLOCK_SYNK_SENAST: 'BLOCK_SYNK_SENAST'      // version 11: JSON { ts, in, bort, andrade, kvar, antal, fel } från senaste syncBlock_ (ping.blockSynk.senast)
+  BLOCK_SYNK_SENAST: 'BLOCK_SYNK_SENAST',     // version 11: JSON { ts, in, bort, andrade, kvar, antal, fel } från senaste syncBlock_ (ping.blockSynk.senast)
+  KONTON_FILE_ID: 'KONTON_FILE_ID',           // version 13 (steg 3, 4.2): fjärde brevlådefilen telexia-bokning-konton.json – valfri i setup (kontonFileId); saknas → konto-* svarar E_SETUP
+  KONTON_REV: 'KONTON_REV',                   // version 13: rev för den kontokopia som senast lades i CacheService (som INBOX_REV)
+  SESSION_SECRET: 'SESSION_SECRET',           // version 13: HMAC-nyckel för sessioner – skapas av install()/setup om den saknas; rotation loggar ut alla
+  LOSEN_PEPPER: 'LOSEN_PEPPER'                // version 13: server-hemlighet i lösenordshashen – skapas av install()/setup; får ALDRIG roteras när konton finns
 };
 const MAPS_DAILY_CAP_DEFAULT = 1000;
 
@@ -157,7 +164,14 @@ const FEL_TEXT = {
   E_CALENDAR: 'Kalendern kunde inte uppdateras – inget har bokats',
   E_LOCK: 'Tjänsten är upptagen – försök igen',
   E_INTERNAL: 'Internt fel i tjänsten',
-  E_NOT_IMPLEMENTED: 'Funktionen är inte tillgänglig i den här versionen'
+  E_NOT_IMPLEMENTED: 'Funktionen är inte tillgänglig i den här versionen',
+  // Version 13 (steg 3, 4.3) – bokarkonton
+  E_DOMAN: 'Din e-postadress är inte upplagd för bokning. Kontakta CJ.',
+  E_LOGIN: 'Fel e-postadress eller lösenord.',
+  E_OVERIFIERAD: 'Bekräfta din e-postadress först – vi har skickat ett nytt mail.',
+  E_INAKTIV: 'Kontot är avstängt. Kontakta CJ.',
+  E_SESSION: 'Din inloggning har gått ut – logga in igen.',
+  E_TOKEN: 'Länken har redan använts eller gått ut.'
 };
 
 // ============================================================
@@ -178,8 +192,8 @@ const DEFAULT_BOKNINGSFORMULAR = {
 
 const DEFAULT_BOKNINGSINSTALLNINGAR = {
   version: 1,
-  adminNyckel: '', brevladaFiler: { config: '', inbox: '', cache: '' },
-  senastSyncTs: '', senastSyncRev: 0, senasteKonfigAndringTs: '',
+  adminNyckel: '', brevladaFiler: { config: '', inbox: '', cache: '', konton: '' },
+  senastSyncTs: '', senastSyncRev: 0, senasteKonfigAndringTs: '', kontonModifiedTime: '',
   bokningSidaUrl: 'https://redneckengineering.se/bokning',
   arbetstider: { '1': { start: '08:00', slut: '17:00' }, '2': { start: '08:00', slut: '17:00' }, '3': { start: '08:00', slut: '17:00' },
                  '4': { start: '08:00', slut: '17:00' }, '5': { start: '08:00', slut: '17:00' }, '6': null, '0': null },
@@ -519,8 +533,9 @@ function brevladaFile(id) {
 }
 function clearSetupCache() {
   const c = CacheService.getScriptCache();
-  [PROP.CONFIG_FILE_ID, PROP.INBOX_FILE_ID, PROP.CACHE_FILE_ID].forEach(p => { const id = getProp(p); if (id) c.remove('setupok:' + id); });
+  [PROP.CONFIG_FILE_ID, PROP.INBOX_FILE_ID, PROP.CACHE_FILE_ID, PROP.KONTON_FILE_ID].forEach(p => { const id = getProp(p); if (id) c.remove('setupok:' + id); });
   inboxCacheRensa_();   // setup kan så inkorgsfilen (seedBrevladaFile) – en cachad kopia av ett tidigare innehåll får inte överleva
+  kontonCacheRensa_();  // version 13: samma för kontofilen
 }
 
 function readJsonFile(id) {
@@ -571,14 +586,15 @@ function normalizeConfig(raw) {
     formular: fillDefaults(isPlainObject(raw.formular) ? raw.formular : {}, DEFAULT_BOKNINGSFORMULAR),
     installningar: fillDefaults(isPlainObject(raw.installningar) ? raw.installningar : {}, DEFAULT_BOKNINGSINSTALLNINGAR),
     ignorerade: Array.isArray(raw.ignorerade) ? raw.ignorerade.filter(isPlainObject).map(normalizeIgnoreradPost) : [],
-    pipelines: Array.isArray(raw.pipelines) ? raw.pipelines.filter(isPlainObject) : []
+    pipelines: Array.isArray(raw.pipelines) ? raw.pipelines.filter(isPlainObject) : [],
+    domaner: Array.isArray(raw.domaner) ? raw.domaner.filter(isPlainObject) : []   // version 13: tillåtelselistan (steg 3, 3.2) – { id, doman (domän eller hel adress), pipelineId, aktiv }
   };
   if (!Array.isArray(cfg.formular.extrafalt)) cfg.formular.extrafalt = [];
   if (!Array.isArray(cfg.installningar.kalendrar)) cfg.installningar.kalendrar = [];
   if (!isPlainObject(cfg.installningar.paus)) cfg.installningar.paus = deepClone(DEFAULT_BOKNINGSINSTALLNINGAR.paus);
   // Fält som aldrig ska finnas här (lämnar aldrig appen) nollas för säkerhets skull.
   cfg.installningar.adminNyckel = '';
-  cfg.installningar.brevladaFiler = { config: '', inbox: '', cache: '' };
+  cfg.installningar.brevladaFiler = { config: '', inbox: '', cache: '', konton: '' };
   return cfg;
 }
 
@@ -753,12 +769,19 @@ function badKod() {
 // Returnerar { bokare, config }; sätter ctx.bokareId/ctx.kodKey; tillämpar anropsgränser per kod.
 // opts.anropsgrans === false (adressforslag, steg 2b): de allmänna räknarna rl:<kod>:m/h rörs inte – endpointen har egna gränser
 // (MAX_ADRESSFORSLAG_PER_KOD_M/D), annars skulle ett adressfälts tangenttryck äta upp bokarens 30 anrop/min för availability/book.
+// Version 13 (steg 3, 4.5): req.s = session (konto, Konton.gs authSession_ → effektiv bokare, E_SESSION/E_INAKTIV). req.k = bokarkod,
+// numera BARA för CJ-bokare (arCj) i det inbäddade läget (B1/B12) – alla andra koder svarar E_KEY som okända. Utan s och k → E_SESSION.
+// Räknarnyckeln (kodKey) blir 'id_<kontoId>' för kontobokare (ingen kodHash) – alla per-kod-gränser fungerar oförändrat.
 function authBokare(req, ctx, opts) {
-  const k = req.k;
-  if (typeof k !== 'string' || !KOD_RE.test(k)) badKod();
   const config = loadConfig(ctx);
-  const bokare = findBokareByKod(k, config);
-  if (!bokare) badKod();
+  let bokare = null;
+  if (typeof req.s === 'string' && req.s) {
+    bokare = authSession_(req.s, config);
+  } else if (typeof req.k === 'string' && req.k) {
+    if (!KOD_RE.test(req.k)) badKod();
+    bokare = findBokareByKod(req.k, config);
+    if (!bokare || bokare.arCj !== true) badKod();
+  } else fel('E_SESSION');
   ctx.bokareId = String(bokare.id || '');
   ctx.kodKey = kodKey(bokare);
   if (!(opts && opts.anropsgrans === false)) {
@@ -1110,7 +1133,9 @@ function handlePing(req, ctx) {
     underhallSenast: getProp(MAINT_PROP_SENAST),
     avstamningSaknas: avstamningSaknas().antal,
     // Version 11 (A61): blocksynkens status { aktiv, kalenderId, senast:{ ts, in, bort, andrade, kvar, antal, fel } | null } – Inställningar › Kalendrar + Drift.
-    blockSynk: blockSynkForPing_(config)
+    blockSynk: blockSynkForPing_(config),
+    // Version 13 (steg 3): { kontonFil, kontonAntal, kontoMailIdag, inloggningsforsokIdag, hemligheter } – Drift-panelen (Konton.gs).
+    konton: kontonForPing_()
   };
 }
 // Kontroll av de tre brevlådefilerna (4.2, cachad 10 min per id). Returnerar '' när allt är i ordning, annars '<roll>: <statisk orsak>'.
@@ -1157,10 +1182,8 @@ function icsStatusForPing(config) {
 function handleHello(req, ctx) {
   const a = authBokare(req, ctx), bokare = a.bokare, config = a.config, inst = config.installningar;
   const idag = todayStr();
-  const pipeline = config.pipelines.find(p => p.id === bokare.pipelineId) || {};
   return {
-    bokare: { id: str(bokare.id), arCj: bokare.arCj === true, namn: str(bokare.namn), organisation: str(bokare.organisation),
-              pipelineNamn: str(pipeline.name), pipelineFarg: str(pipeline.color) },
+    bokare: helloBokareExport_(bokare, config),   // version 13: + fornamn, efternamn, epost, mobil, harKonto (Konton.gs)
     motestyper: tillatnaMotestyper(config, bokare).map(motestypExport),
     formular: config.formular,
     paus: pausInfo(inst),
@@ -1432,6 +1455,7 @@ function handleBook(req, ctx) {
     bokning = {
       bokningId: Utilities.getUuid(), clientBokningId: input.clientBokningId, rev: 1, status: 'ny',
       bokareId: str(bokare.id), pipelineId: str(bokare.pipelineId), motestypId: typ.id,
+      bokare: bokareSnapshot_(bokare),   // version 13 (B9): { namn, epost, mobil } – följer med i kalenderbeskrivningen och till appens händelse
       start: st.iso, slut: slutIso,
       adress: input.adress, geo: geo, restid: restidFromSlot(slot, typ, geo),
       kund: input.kund, kontakt: input.kontakt, notering: input.notering, extrafalt: input.extrafalt,
@@ -1481,10 +1505,14 @@ function bookingEventResource(config, bokare, typ, bokning) {
   const kontakt = isPlainObject(bokning.kontakt) ? bokning.kontakt : {};
   const kund = isPlainObject(bokning.kund) ? bokning.kund : {};
   const medRestid = typ.restid === true;
+  // Version 13 (B9): bokarens namn, e-post och mobil ur inkorgspostens snapshot (bokning.bokare) – alltid, oberoende av
+  // kontaktuppgifterIKalender (den styr KUNDENS kontakt; bokaren är CJ:s motpart). Äldre poster utan snapshot: bara namnet.
+  const bk = isPlainObject(bokning.bokare) ? bokning.bokare : { namn: bokare.namn, epost: '', mobil: '' };
+  const bokadAv = [s(bk.namn) || s(bokare.namn), s(bk.epost), s(bk.mobil)].filter(Boolean).join(', ');
   const resurs = {
     summary: s(typ.titel) + ': ' + s(kund.namn),
     location: medRestid ? s(bokning.adress) : '',
-    description: 'Bokad av: ' + s(bokare.namn) + '\nBokningId: ' + bokning.bokningId +
+    description: 'Bokad av: ' + bokadAv + '\nBokningId: ' + bokning.bokningId +
                  (inst.kontaktuppgifterIKalender === true
                    ? '\nKontakt: ' + s(kontakt.namn) + ', ' + s(kontakt.telefon) + ', ' + s(kontakt.epost)
                    : '\nKontakt: ' + s(kontakt.namn)) +
@@ -1647,9 +1675,9 @@ function handleGeocode(req, ctx) {
 
 function handleAdressforslag(req, ctx) {
   let kod = '';
-  if (typeof req.k === 'string' && req.k) { authBokare(req, ctx, { anropsgrans: false }); kod = ctx.kodKey; }
+  if ((typeof req.s === 'string' && req.s) || (typeof req.k === 'string' && req.k)) { authBokare(req, ctx, { anropsgrans: false }); kod = ctx.kodKey; }   // version 13: session eller CJ-bokarkod
   else if (typeof req.adminKey === 'string' && req.adminKey) { authAdmin(req, ctx); kod = 'admin'; }
-  else badKod();
+  else fel('E_SESSION');
   const q = strField(req.q, 'q', ADRESSFORSLAG_Q_MAX, false);
   const sessionToken = req.sessionToken === undefined || req.sessionToken === null || req.sessionToken === '' ? '' : req.sessionToken;
   if (sessionToken && (typeof sessionToken !== 'string' || !SESSION_TOKEN_RE.test(sessionToken))) valideringsfel({ sessionToken: 'Ogiltigt värde' });
@@ -1865,34 +1893,48 @@ function handleSetup(req, ctx) {
     catch (e) { if (errorCode(e) !== 'E_SETUP') throw e; throw apiError('E_SETUP', e.message, { fil: roll }); }
   });
 
+  // Version 13 (steg 3, 4.1): fjärde filen telexia-bokning-konton.json är VALFRI i anropet (äldre app skickar den inte) – saknas den
+  // behålls ett ev. tidigare KONTON_FILE_ID och ping svarar kontonFil:false tills appen kör Återanslut med fältet.
+  let kontonFil = null;
+  if (ids.konton) {
+    try { kontonFil = verifyBrevladaFile(ids.konton, { farsk: true }); }
+    catch (e) { if (errorCode(e) !== 'E_SETUP') throw e; throw apiError('E_SETUP', e.message, { fil: 'konton' }); }
+  }
+
   setProp(PROP.CONFIG_FILE_ID, ids.config);
   setProp(PROP.INBOX_FILE_ID, ids.inbox);
   setProp(PROP.CACHE_FILE_ID, ids.cache);
+  if (ids.konton) setProp(PROP.KONTON_FILE_ID, ids.konton);
   clearSetupCache();
   clearConfigCache();
   previewSnapRensa_();   // version 12 (K5)
   withScriptLock(() => {
-    seedBrevladaFile(filer.config, 'config', { bokare: [], motestyper: [], formular: deepClone(DEFAULT_BOKNINGSFORMULAR), installningar: {}, ignorerade: [], pipelines: [] });
+    seedBrevladaFile(filer.config, 'config', { bokare: [], motestyper: [], formular: deepClone(DEFAULT_BOKNINGSFORMULAR), installningar: {}, ignorerade: [], pipelines: [], domaner: [] });
     seedBrevladaFile(filer.inbox, 'inbox', { bokningar: [] });
     seedBrevladaFile(filer.cache, 'cache', { geokod: {}, restid: {}, icsReserv: null });
+    if (kontonFil) seedBrevladaFile(kontonFil, 'konton', { konton: [] });
   });
-  install();
+  install();   // triggers + (version 13) SESSION_SECRET/LOSEN_PEPPER om de saknas
 
   let kalendrar = [];
   try { kalendrar = listCalendars(); } catch (e) { kalendrar = []; }   // best effort – Anslut-guiden kan hämta om via calendars-list
-  return { version: SCRIPT_VERSION, scriptVersion: SCRIPT_VERSION, konfigurerad: true, ownerEmail: Session.getEffectiveUser().getEmail(), kalendrar: kalendrar };
+  return { version: SCRIPT_VERSION, scriptVersion: SCRIPT_VERSION, konfigurerad: true, ownerEmail: Session.getEffectiveUser().getEmail(), kalendrar: kalendrar,
+           kontonFil: !!getProp(PROP.KONTON_FILE_ID) };
 }
 function setupFileIds(req) {
   const f = isPlainObject(req.fileIds) ? req.fileIds : {};
   const ids = {
     config: typeof f.config === 'string' ? f.config : str(req.configFileId),
     inbox: typeof f.inbox === 'string' ? f.inbox : str(req.inboxFileId),
-    cache: typeof f.cache === 'string' ? f.cache : str(req.cacheFileId)
+    cache: typeof f.cache === 'string' ? f.cache : str(req.cacheFileId),
+    konton: typeof f.konton === 'string' ? f.konton : str(req.kontonFileId)   // version 13: valfri
   };
   const falt = {};
   ['config', 'inbox', 'cache'].forEach(k => { if (!FIL_ID_RE.test(ids[k])) falt[k] = 'Ogiltigt fil-id'; });
+  if (ids.konton && !FIL_ID_RE.test(ids.konton)) falt.konton = 'Ogiltigt fil-id';
   if (Object.keys(falt).length) valideringsfel(falt);
-  if (ids.config === ids.inbox || ids.config === ids.cache || ids.inbox === ids.cache) valideringsfel({ fileIds: 'Samma fil angiven två gånger' });
+  const alla = [ids.config, ids.inbox, ids.cache].concat(ids.konton ? [ids.konton] : []);
+  if (new Set(alla).size !== alla.length) valideringsfel({ fileIds: 'Samma fil angiven två gånger' });
   return ids;
 }
 // Tom fil ('' / '{}' / 'null') → initial struktur med gemensamt huvud (4.1). Annat innehåll måste vara ett JSON-objekt.
@@ -1935,8 +1977,15 @@ function configVarningar(cfg) {
   if (inst.outlookIcsUrl && !/^https:\/\/\S+$/i.test(String(inst.outlookIcsUrl))) v.push('Fältet Outlook-ICS är inte en https-adress');
   const utanPipeline = cfg.bokare.filter(b => !b.pipelineId).length;
   if (utanPipeline) v.push('Bokare utan pipeline: ' + utanPipeline);
-  const utanKod = cfg.bokare.filter(b => b.aktiv === true && !(typeof b.kodHash === 'string' && /^[0-9a-f]{64}$/.test(b.kodHash))).length;
-  if (utanKod) v.push('Aktiva bokare utan giltig kodhash: ' + utanKod);
+  // Version 13: bara CJ-bokare loggar in med kod – vanliga bokare har konto (Konton.gs) och skickar ingen kodHash.
+  const utanKod = cfg.bokare.filter(b => b.arCj === true && b.aktiv === true && !(typeof b.kodHash === 'string' && /^[0-9a-f]{64}$/.test(b.kodHash))).length;
+  if (utanKod) v.push('CJ-bokare utan giltig kodhash: ' + utanKod);
+  const domaner = Array.isArray(cfg.domaner) ? cfg.domaner : [];
+  const domUtanPl = domaner.filter(d => !d.pipelineId || !cfg.pipelines.some(p => p.id === d.pipelineId)).length;
+  if (domUtanPl) v.push('Poster i tillåtelselistan utan giltig pipeline: ' + domUtanPl);
+  const domFel = domaner.filter(d => typeof d.doman !== 'string' || !(d.doman.indexOf('@') >= 0 ? EPOST_RE.test(d.doman) : /^[a-z0-9-]+(\.[a-z0-9-]+)+$/.test(d.doman))).length;
+  if (domFel) v.push('Poster i tillåtelselistan med ogiltigt format: ' + domFel);
+  if (!domaner.some(d => d.aktiv === true)) v.push('Tillåtelselistan är tom – ingen bokare kan registrera sig');
   const typUtan = cfg.motestyper.filter(t => t.global !== true && !t.pipelineId).length;
   if (typUtan) v.push('Mötestyper utan pipeline som inte är globala: ' + typUtan);
   const okandaPl = cfg.bokare.filter(b => b.pipelineId && !cfg.pipelines.some(p => p.id === b.pipelineId)).length;
@@ -2125,7 +2174,7 @@ function calendarEventGone(e) {
 }
 // Mejl till bokaren efter avvisning (4.9, A25): plain text med kundnamn, tid, orsak och "Du kontaktar kunden.". Aldrig kontaktuppgifter.
 function notifyBokareAvvisad(config, bokning, orsak) {
-  const bokare = config.bokare.find(b => b.id === bokning.bokareId) || null;
+  const bokare = bokareForPost_(config, bokning);   // version 13: config-post, annars kontot
   const epost = bokare ? normalizeEmail(bokare.epost) : '';
   if (!epost || !EPOST_RE.test(epost)) return false;
   const s = v => String(v || '').replace(/[<>]/g, ' ');
@@ -2598,7 +2647,7 @@ function rebookStartIso(v) {
 // Bokaren som tillgängligheten räknas för: bokningens egen bokare (även inaktiv), annars en syntetisk CJ-bokare i bokningens
 // pipeline (bokaren borttagen ur config) – typen slås ändå upp via undantaPost, och kundnamn/egen-flaggor spelar ingen roll för admin.
 function rebookBokare(config, post) {
-  const b = config.bokare.find(x => x.id === post.bokareId) || null;
+  const b = bokareForPost_(config, post);   // version 13: config-post, annars kontot (nyregistrerad, ej importerad)
   if (b) return b;
   return { id: str(post.bokareId), namn: 'Borttagen bokare', epost: '', pipelineId: str(post.pipelineId), tillatnaMotestypIds: [], aktiv: false, arCj: true };
 }
@@ -2648,7 +2697,7 @@ function patchEllerSkapa(config, bokare, typ, uppdaterad, resurs) {
 }
 // Mejl till bokaren efter ombokning (4.9, A25): kundnamn, gammal och ny tid, CJ:s orsak, "Du kontaktar kunden.". Aldrig kontaktuppgifter.
 function notifyBokareOmbokad(config, bokning, franIso, orsak) {
-  const bokare = config.bokare.find(b => b.id === bokning.bokareId) || null;
+  const bokare = bokareForPost_(config, bokning);   // version 13: config-post, annars kontot
   const epost = bokare ? normalizeEmail(bokare.epost) : '';
   if (!epost || !EPOST_RE.test(epost)) return false;
   const s = v => String(v || '').replace(/[<>]/g, ' ');
@@ -2743,7 +2792,7 @@ function cancelUtfor(config, inbox, b, opts) {
 }
 // Mejl till bokaren efter avbokning (4.9, A25): kundnamn, tid, orsak, "Du kontaktar kunden.". Aldrig kontaktuppgifter.
 function notifyBokareAvbokad(config, bokning, orsak) {
-  const bokare = config.bokare.find(b => b.id === bokning.bokareId) || null;
+  const bokare = bokareForPost_(config, bokning);   // version 13: config-post, annars kontot
   const epost = bokare ? normalizeEmail(bokare.epost) : '';
   if (!epost || !EPOST_RE.test(epost)) return false;
   const s = v => String(v || '').replace(/[<>]/g, ' ');
@@ -3268,7 +3317,17 @@ const HANDLERS = {
   'cancel': handleCancel,
   'rebook': handleRebook,
   'purge': handlePurge,
-  'block-sync': handleBlockSync
+  'block-sync': handleBlockSync,
+  // Version 13 (steg 3, Konton.gs)
+  'konto-registrera': handleKontoRegistrera,
+  'konto-verifiera': handleKontoVerifiera,
+  'konto-logga-in': handleKontoLoggaIn,
+  'konto-glomt': handleKontoGlomt,
+  'konto-aterstall': handleKontoAterstall,
+  'konto-byt-losenord': handleKontoBytLosenord,
+  'konto-profil': handleKontoProfil,
+  'konton-list': handleKontonList,
+  'konto-radera': handleKontoRadera
 };
 
 // ============================================================
@@ -3287,7 +3346,10 @@ function install() {
     .forEach(t => ScriptApp.deleteTrigger(t));
   ScriptApp.newTrigger('dailyMaintenance').timeBased().everyDays(1).atHour(3).create();
   ScriptApp.newTrigger('refreshIcsCache').timeBased().everyMinutes(ICS_VARMARE_MIN).create();
-  return 'Triggers skapade: dailyMaintenance (kl 03–04) och refreshIcsCache (var ' + ICS_VARMARE_MIN + ':e minut). Scriptversion ' + SCRIPT_VERSION + '.';
+  const hemligheter = sakerstallHemligheter_();   // version 13: SESSION_SECRET + LOSEN_PEPPER om de saknas (Konton.gs)
+  return 'Triggers skapade: dailyMaintenance (kl 03–04) och refreshIcsCache (var ' + ICS_VARMARE_MIN + ':e minut). ' +
+         (hemligheter ? hemligheter + ' hemlighet(er) för bokarkonton skapade i Script Properties. ' : 'Hemligheter för bokarkonton fanns redan. ') +
+         'Scriptversion ' + SCRIPT_VERSION + '.';
 }
 
 // ICS-värmare (version 7): håller CacheService-cachen ics:busy (15 min, Calendar.gs) varm så att bokningssidans/appens anrop
@@ -3357,7 +3419,7 @@ function dailyMaintenanceInner_() {
   if (typeof kalResetMemo_ === 'function') kalResetMemo_();
   brevladaResetMemo_();
   propResetMemo_();
-  const rad = { trigger: 'dailyMaintenance', ok: true, ms: 0, raknare: 0, inkorg: 0, utanImport: 0, geokod: 0, restid: 0, omrade: 0, saknas: 0, fel: [] };
+  const rad = { trigger: 'dailyMaintenance', ok: true, ms: 0, raknare: 0, inkorg: 0, utanImport: 0, geokod: 0, restid: 0, omrade: 0, saknas: 0, konton: 0, tokens: 0, fel: [] };
   const nuMs = Date.now();
   // 1. Räknare i Script Properties äldre än 7 dagar (4.2, 4.11) – oberoende av brevlådan.
   try { rad.raknare = gallraRaknare(todayStr()); } catch (e) { rad.ok = false; rad.fel.push('raknare:' + felKlass(e)); }
@@ -3400,6 +3462,9 @@ function dailyMaintenanceInner_() {
       }
     } catch (e) { rad.ok = false; rad.fel.push('avstamning:' + (errorCode(e) || felKlass(e))); }
   }
+  // 4. Bokarkonton (version 13, steg 3 4.9): overifierade konton äldre än 7 dagar raderas, utgångna tokens nollas. Eget lås.
+  try { const g = gallraKonton_(nuMs); rad.konton = g.borttagna; rad.tokens = g.tokens; }
+  catch (e) { rad.ok = false; rad.fel.push('konton:' + (errorCode(e) || felKlass(e))); }
   rad.ms = Date.now() - t0;
   if (rad.ok) { try { setProp(MAINT_PROP_SENAST, nowIso()); } catch (e) { /* best effort */ } }
   console.log(JSON.stringify(rad));
@@ -3411,7 +3476,7 @@ function gallraRaknare(idag) {
   const grans = ymdCompact(addDays(idag, -7));
   let n = 0;
   Object.keys(props.getProperties()).forEach(k => {
-    const m = /^(maps_elements_|book_count_|andr_count_)(\d{8})$/.exec(k);
+    const m = /^(maps_elements_|book_count_|andr_count_|login_fail_|konto_mail_)(\d{8})$/.exec(k);   // version 13: + inloggnings- och kontomailräknare
     if (m && m[2] < grans) { deleteProp(k); n++; }   // via deleteProp så att körningens memo (version 12) hålls koherent
   });
   return n;
