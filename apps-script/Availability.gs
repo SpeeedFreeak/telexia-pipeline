@@ -371,6 +371,19 @@ function arbetstidFor(at) { return at ? { start: at.start, slut: at.slut, lunch:
 // (även egna bokningar och reservationer) – men ALDRIG för kalla 'privat' (kalender i läge "bara tider": den exporterar tider, inte
 // var CJ befinner sig; platsen används bara för restiden). egen:true + kundnamn/bokningId bara för anropande bokarens egna
 // bokningar/reservation. Sortering på start som förut.
+// Online-klassning av ett upptaget-block (version 15) → 'teams' | 'online' | ''. Bara en etikett lämnar scriptet – aldrig platstexten,
+// länken eller titeln. Privata händelser ('tider') och restidsankare (fysiska möten) märks aldrig. Positiva signaler: CJ:s manuella
+// klassning (override.online), ett online-ord eller en länk i platsfältet (Calendar.gs KAL_ONLINE_RE/kalIsUrl), eller en bokning
+// gjord i modulen med en mötestyp utan restid (Teams-typen).
+function blockOnline_(b) {
+  if (!b || b.kalla === 'privat' || b.heldag || b.isTravelMeeting) return '';
+  const text = b.plats && typeof b.plats.text === 'string' ? b.plats.text.trim() : '';
+  const teams = /\bteams\b/i.test(text);
+  if (b.override && b.override.online === true) return teams || !text ? 'teams' : 'online';
+  if (text && (kalIsUrl(text) || KAL_ONLINE_RE.test(text))) return teams ? 'teams' : 'online';
+  if ((b.kalla === 'bokningar' || b.kalla === 'reservation') && b.motestypId && !b.hasPlace) return 'teams';
+  return '';
+}
 function blockFor(aktiva, at, bokareId) {
   const block = [];
   aktiva.forEach(b => {
@@ -379,6 +392,9 @@ function blockFor(aktiva, at, bokareId) {
     // privat ('tider') → aldrig omrade.
     const omrade = b.kalla === 'privat' ? '' : platsOmrade(b.plats);
     if (omrade) o.omrade = omrade;
+    // Version 15 (CJ 2026-10-01): online-möten märks 'teams'/'online' så att bokningssidan skriver "Teamsmöte" där platsen annars står.
+    const online = blockOnline_(b);
+    if (online) { o.online = online; delete o.omrade; }
     const egenKalla = b.kalla === 'bokningar' || b.kalla === 'reservation';
     const egen = egenKalla && (b.egen === true || (!!bokareId && b.bokareId === bokareId));
     if (egen) {
