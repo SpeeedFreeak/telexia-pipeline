@@ -94,9 +94,21 @@ Höjs `SCRIPT_VERSION` i `Code.gs` ska `MIN_SCRIPT_VERSION` höjas i samma ordni
 
 **Version 13 = SCRIPT_VERSION 13** (bokarkonton – steg 3, CJ:s beslut 2026-09-19): **Ny version av den befintliga distributionen**, men **kontraktet ändras**: `MIN_SCRIPT_VERSION` höjs till **13 i både `index.html` och `bokning.js`**. Bokarkoden `k` accepteras bara för CJ-bokare (`arCj`) – alla gamla `?k=`-länkar för vanliga bokare svarar `E_KEY` från och med distributionen (inga befintliga bokare sparas, B12). **Driftinstruktion:** (1) klistra in alla fyra `.gs`-filer (ny fil `Konton.gs`), (2) kör `install()` en gång i redigeraren – skapar `SESSION_SECRET` och `LOSEN_PEPPER` (triggarna återskapas som förut), (3) kör `runKontoTests()` och läs av hashtiden, (4) Ny version, (5) i appen: Inställningar › **Återanslut** (skapar `telexia-bokning-konton.json` och kör `setup` med fyra id:n → `ping.konton.kontonFil:true`), (6) lägg upp tillåtelselistan under Bokare, (7) deploya sajten. Inga nya scopes (MailApp/Drive/Properties fanns redan). Se "Version 13" nedan.
 
+**Version 16 = SCRIPT_VERSION 16** (snabbare inloggning, CJ 2026-10-01): **Ny version av den befintliga distributionen**. `MIN_SCRIPT_VERSION` **förblir 13** – ändringen är intern. Klistra in `Code.gs` och `Konton.gs`; ingen `install()` behövs. Kör `runKontoTests()` (48 test). `?action=ping` → `scriptVersion: 16`.
+
 **Version 15 = SCRIPT_VERSION 15** (snabbare kalender, CJ 2026-10-01): **Ny version av den befintliga distributionen**. `MIN_SCRIPT_VERSION` **förblir 13** – allt nytt är internt eller valfritt (`ping.tider`, `availability.tider.auth`). Klistra in `Code.gs` och `Availability.gs`; ingen `install()` behövs. Kör `runAvailabilityTests()` (88 test). `?action=ping` → `scriptVersion: 15` och fältet `tider`.
 
 **Version 14 = SCRIPT_VERSION 14** (snabbare bokningsflöde, CJ 2026-10-01): **Ny version av den befintliga distributionen**. `MIN_SCRIPT_VERSION` **förblir 13** – allt nytt är valfritt (`hello` i inloggningssvaren, endpointen `varm`, auth-kopian är intern). Klistra in `Code.gs` och `Konton.gs`; ingen `install()` behövs. Kör `runKontoTests()` (48 test). `?action=ping` → `scriptVersion: 14`. Se "Version 14" nedan.
+
+## Version 16 – snabbare inloggning: "senast inloggad" skrivs av triggern (SCRIPT_VERSION 16)
+
+CJ 2026-10-01: *"varför tar det tid att logga in"*. `konto-logga-in` skrev kontofilen till Drive under låset (`kontoUppdatera_`: lås + läs + skriv + cachebitar, ca 1,5 s) vid dagens första inloggning, bara för att stämpla `senastInloggadTs` – och de flesta bokare loggar in en gång per dag.
+
+- **Kö i stället för filskrivning** (`Konton.gs` `kontoInloggStash_`): stämpeln läggs i CacheService som `{ <kontoId>: ts }` under `kinl:index` (6 h, högst 300 konton). Är dagens stämpel redan köad görs ingenting.
+- **Triggern tömmer** (`kontoInloggDrain_` i `refreshIcsCache`, var 10:e minut): alla väntande stämplar skrivs i en filskrivning under låset, med historikraden `inloggad` vid dagsbyte. Loggrad `{ trigger: 'inloggDrain', ok, konton }`.
+- **`konton-list`** lägger väntande stämplar ovanpå filens värden, så appens Bokare-flik visar rätt "senast inloggad" direkt.
+- **Oförändrat:** måste något annat skrivas (felräknare eller spärr att nollställa, omhashning) skrivs filen direkt som förut; är kön full eller CacheService otillgänglig likaså.
+- **Test:** `node "[C] testverktyg/konto-harness.js"` – bl.a. att dagens första inloggning gör noll skrivningar till kontofilen, att triggern skriver exakt en gång och att felräknaren fortfarande nollställs direkt.
 
 ## Version 15 – snabbare kalender: cache-filen utanför bokarens väntan, restid för hela perioden i ett anrop, tidslogg (SCRIPT_VERSION 15)
 

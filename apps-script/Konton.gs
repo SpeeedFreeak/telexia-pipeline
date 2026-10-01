@@ -124,6 +124,56 @@ function kontoUppdatera_(id, fn) {
     return k;
   });
 }
+// --- Version 16 (CJ 2026-10-01: "varför tar det tid att logga in"): "senast inloggad" skrivs inte längre medan bokaren väntar ---
+// Dagens första inloggning skrev kontofilen till Drive under låset (kontoUppdatera_: lås + läs + skriv + cachebitar, ~1,5 s) bara för
+// att stämpla senastInloggadTs – och de flesta bokare loggar in en gång per dag, så nästan varje inloggning tog den vägen. Nu läggs
+// stämpeln i CacheService ({ <kontoId>: ts } under 'kinl:index', 6 h) och triggern refreshIcsCache (var 10:e minut) skriver alla väntande
+// stämplar i EN filskrivning (kontoInloggDrain_). konton-list lägger väntande stämplar ovanpå filens värden, så appen visar rätt direkt.
+// Måste något annat skrivas (nollställd felräknare/spärr, omhashning) görs skrivningen direkt som förut. Kartan uppdateras get→put utan
+// lås: en förlorad post betyder bara att "senast inloggad" uppdateras vid nästa inloggning i stället.
+const KONTO_INLOGG_KEY = 'kinl:index';
+const KONTO_INLOGG_S = 21600;
+const KONTO_INLOGG_MAX = 300;
+function kontoInloggLas_() {
+  try { const o = JSON.parse(CacheService.getScriptCache().get(KONTO_INLOGG_KEY) || '{}'); return isPlainObject(o) ? o : {}; }
+  catch (e) { return {}; }
+}
+// → true när stämpeln ligger i kön (eller dagens redan gör det); false → anroparen skriver filen direkt. Kastar aldrig.
+function kontoInloggStash_(id, ts) {
+  try {
+    if (typeof id !== 'string' || !KONTO_ID_RE.test(id) || !ts) return false;
+    const m = kontoInloggLas_();
+    if (str(m[id]).slice(0, 10) === str(ts).slice(0, 10)) return true;
+    if (Object.keys(m).length >= KONTO_INLOGG_MAX) return false;
+    m[id] = str(ts);
+    CacheService.getScriptCache().put(KONTO_INLOGG_KEY, JSON.stringify(m), KONTO_INLOGG_S);
+    return true;
+  } catch (e) { return false; }
+}
+// Triggern: väntande stämplar → kontofilen. → antal uppdaterade konton (0 = inget väntade, -1 = låset/filen gick inte – kön ligger kvar).
+function kontoInloggDrain_() {
+  try {
+    const m = kontoInloggLas_(), ids = Object.keys(m);
+    if (!ids.length) return 0;
+    let n = 0;
+    withScriptLock(() => {
+      const konton = readKonton();
+      ids.forEach(id => {
+        const ts = str(m[id]), k = konton.konton.find(x => x.id === id);
+        if (!k || !ts || str(k.senastInloggadTs) >= ts) return;
+        if (str(k.senastInloggadTs).slice(0, 10) !== ts.slice(0, 10)) historik_(k, 'inloggad');
+        k.senastInloggadTs = ts;
+        n++;
+      });
+      if (n) writeKonton(konton);
+    });
+    const nu = kontoInloggLas_(), kvar = {};
+    Object.keys(nu).forEach(id => { if (nu[id] !== m[id]) kvar[id] = nu[id]; });   // stämplar som tillkom under tömningen ligger kvar
+    const cache = CacheService.getScriptCache();
+    if (Object.keys(kvar).length) cache.put(KONTO_INLOGG_KEY, JSON.stringify(kvar), KONTO_INLOGG_S); else cache.remove(KONTO_INLOGG_KEY);
+    return n;
+  } catch (e) { return -1; }
+}
 function findKontoById_(id) {
   if (typeof id !== 'string' || !KONTO_ID_RE.test(id)) return null;
   return readKonton().konton.find(k => k.id === id) || null;
@@ -566,7 +616,10 @@ function handleKontoLoggaIn(req, ctx) {
   if (!bokare.aktiv) fel('E_INAKTIV');
   const idag = todayStr();
   const omhasha = losenordIter_(konto.losenord.hash) !== KONTO_LOSEN_ITER;
-  if ((Number(konto.misslyckade) || 0) > 0 || konto.sparradTill || str(konto.senastInloggadTs).slice(0, 10) !== idag || omhasha) {
+  // Version 16: bara dagsstämpeln att skriva → kön (kontoInloggStash_), triggern skriver filen. Annat (felräknare, spärr, omhashning) skrivs direkt.
+  const maste = (Number(konto.misslyckade) || 0) > 0 || !!konto.sparradTill || omhasha;
+  const dagsbyte = str(konto.senastInloggadTs).slice(0, 10) !== idag;
+  if (maste || (dagsbyte && !kontoInloggStash_(konto.id, nowIso()))) {
     const nyHash = omhasha ? losenordHashStrang_(losenord) : '';
     try {
       kontoUppdatera_(konto.id, k => {
@@ -684,7 +737,12 @@ function kontoExport_(k) {
 function handleKontonList(req, ctx) {
   authAdmin(req, ctx);
   const konton = readKonton();
-  return { konton: konton.konton.map(kontoExport_), rev: Number(konton.rev) || 0 };
+  const vantar = kontoInloggLas_();   // version 16: inloggningsstämplar som triggern ännu inte skrivit till filen
+  return { konton: konton.konton.map(k => {
+    const e = kontoExport_(k), ts = str(vantar[k.id]);
+    if (ts && ts > str(e.senastInloggadTs)) e.senastInloggadTs = ts;
+    return e;
+  }), rev: Number(konton.rev) || 0 };
 }
 function handleKontoRadera(req, ctx) {
   authAdmin(req, ctx);
