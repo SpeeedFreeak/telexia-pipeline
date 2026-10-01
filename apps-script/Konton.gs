@@ -75,9 +75,37 @@ function readKonton() {
 // Anroparen håller låset.
 function writeKonton(k) {
   try { cacheChunkedRemove_(kontonCacheKey_()); } catch (e) { /* best effort */ }
+  kontoAuthRensa_(k.konton);   // version 14: auth-kopiorna får aldrig överleva en skrivning (lösenordsbyte, profil, radering) – före OCH efter skrivningen
   const ut = writeJsonFile(kontonFileId_(), k);
   kontonCacheSpara_(ut);
+  kontoAuthRensa_(ut.konton);
   return ut;
+}
+// --- Auth-kopia per konto (version 14, prestanda) ---
+// authSession_ körs i VARJE bokar-anrop. Hela kontofilen ur CacheService (index + bitar + base64 + gunzip + JSON) plus den färska
+// KONTON_REV-läsningen (PropertiesService, ~50–150 ms) kostade 0,1–0,3 s per anrop. Auth behöver bara ett konto: en lätt kopia
+// { id, epost, doman, fornamn, efternamn, mobil, pipelineId, status, losenord:{ version } } under 'kauth:<id>' = ETT cache.get.
+// Skrivaren tar bort alla kopior vid varje skrivning (ovan); en läsare som läste filen strax före en skrivning kan i värsta fall lägga
+// tillbaka en gammal kopia – därför kort TTL (180 s): en gammal session/profil kan leva högst tre minuter efter ett lösenordsbyte.
+// CJ:s avstängning (Aktiv-kryssrutan, borttagen listpost) går via config och påverkas inte av den här cachen.
+const KONTO_AUTH_CACHE_S = 180;
+function kontoAuthKey_(id) { return 'kauth:' + id; }
+function kontoAuthRensa_(konton) {
+  try {
+    const nycklar = (Array.isArray(konton) ? konton : []).map(x => isPlainObject(x) ? kontoAuthKey_(str(x.id)) : (typeof x === 'string' ? kontoAuthKey_(x) : '')).filter(Boolean);
+    if (nycklar.length) CacheService.getScriptCache().removeAll(nycklar);
+  } catch (e) { /* best effort – TTL 180 s är skyddsnätet */ }
+}
+function kontoForAuth_(id) {
+  if (typeof id !== 'string' || !KONTO_ID_RE.test(id)) return null;
+  const cache = CacheService.getScriptCache();
+  try { const raw = cache.get(kontoAuthKey_(id)); if (raw) { const k = JSON.parse(raw); if (isPlainObject(k) && k.id === id && isPlainObject(k.losenord)) return k; } } catch (e) { /* trasig post → filen */ }
+  const konto = findKontoById_(id);
+  if (!konto) return null;
+  const lat = { id: str(konto.id), epost: str(konto.epost), doman: str(konto.doman), fornamn: str(konto.fornamn), efternamn: str(konto.efternamn), mobil: str(konto.mobil),
+                pipelineId: str(konto.pipelineId), status: str(konto.status), losenord: { version: Number(konto.losenord && konto.losenord.version) || 0 } };
+  try { cache.put(kontoAuthKey_(id), JSON.stringify(lat), KONTO_AUTH_CACHE_S); } catch (e) { /* best effort */ }
+  return lat;
 }
 function kontonCacheSpara_(k) {
   try { setProp(PROP.KONTON_REV, Number(k.rev) || 0); cacheChunkedPut_(kontonCacheKey_(), k, KONTON_CACHE_S); } catch (e) { /* best effort */ }
@@ -182,7 +210,7 @@ function sessionVerifiera_(s, secret, nuMs) {
 // Anropas av Code.gs authBokare när req.s finns: session → konto → effektiv bokare. E_SESSION / E_INAKTIV.
 function authSession_(s, config) {
   const p = sessionVerifiera_(s);
-  const konto = findKontoById_(p.id);
+  const konto = kontoForAuth_(p.id);   // version 14: lätt auth-kopia (ett cache.get) i stället för hela kontofilen
   if (!konto || konto.status !== 'aktiv' || !isPlainObject(konto.losenord) || (Number(konto.losenord.version) || 0) !== Number(p.pv)) fel('E_SESSION');
   const bokare = effectiveBokare_(konto, config);
   if (!bokare.aktiv) fel('E_INAKTIV');
@@ -493,7 +521,7 @@ function handleKontoVerifiera(req, ctx) {
   notifyCjNyBokare_(config, konto);
   const bokare = effectiveBokare_(konto, config);
   const s = sessionSkapa_(konto, KONTO_SESSION_KORT_S);
-  return { session: s.session, exp: s.exp, bokare: helloBokareExport_(bokare, config) };
+  return { session: s.session, exp: s.exp, bokare: helloBokareExport_(bokare, config), hello: helloForLogin_(bokare, config) };   // version 14: hello i samma svar – sidan slipper ett anrop (2–3 s)
 }
 
 // ============================================================
@@ -550,7 +578,12 @@ function handleKontoLoggaIn(req, ctx) {
     } catch (e) { /* best effort – inloggningen lyckas ändå */ }
   }
   const s = sessionSkapa_(konto, komIhag ? KONTO_SESSION_LANG_S : KONTO_SESSION_KORT_S);
-  return { session: s.session, exp: s.exp };
+  return { session: s.session, exp: s.exp, hello: helloForLogin_(bokare, config) };   // version 14: hello i samma svar
+}
+// hello-svaret för en nyss inloggad bokare (version 14) – samma data som endpointen hello (Code.gs helloData_). Fel här (t.ex. inkorgen
+// oläsbar) får aldrig fälla inloggningen: null → sidan anropar hello som förut.
+function helloForLogin_(bokare, config) {
+  try { return helloData_(bokare, config); } catch (e) { return null; }
 }
 
 // ============================================================
@@ -605,7 +638,7 @@ function handleKontoAterstall(req, ctx) {
   const bokare = effectiveBokare_(konto, config);
   if (!bokare.aktiv) fel('E_INAKTIV');   // lösenordet är bytt, men ett avstängt konto får ingen session
   const s = sessionSkapa_(konto, KONTO_SESSION_KORT_S);
-  return { session: s.session, exp: s.exp };
+  return { session: s.session, exp: s.exp, hello: helloForLogin_(bokare, config) };   // version 14: hello i samma svar
 }
 
 // ============================================================
@@ -661,7 +694,7 @@ function handleKontoRadera(req, ctx) {
     const konton = readKonton();
     const kvar = konton.konton.filter(k => k.id !== id);
     borttaget = kvar.length !== konton.konton.length;
-    if (borttaget) { konton.konton = kvar; writeKonton(konton); }
+    if (borttaget) { konton.konton = kvar; writeKonton(konton); kontoAuthRensa_([id]); }   // det borttagna kontot finns inte längre i listan som writeKonton rensar
   });
   return { borttaget: borttaget };
 }
