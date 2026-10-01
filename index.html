@@ -1079,6 +1079,7 @@
 // använder konstanten BOK_SCRIPT_URL. Båda är publika, inga hemligheter. bokAdminApi finns bara här (appen).
 const BOK_SCRIPT_URL = 'https://script.google.com/macros/s/AKfycbxqBn2wQt8pqF0USTj81kiyGHOmV3ICNqxBRYPksJiwBkvkqFjFCHZ1SzYtAo1gRdeROg/exec';   // publik, ej hemlighet – CJ byter efter script-deploy
 const MIN_SCRIPT_VERSION = 13;    // 13 = steg 3: bokarkonton (konton-list/konto-radera, setup kontonFileId, ping.konton, config.domaner, session s på bokningssidan); tidigare 4 (steg 2a)
+const BOKTIDER_SCRIPT_VERSION = 15;   // scriptversion med tidslogg för bokarflödet (ping.tider) – äldre script: raden utelämnas i Drift-panelen
 const KONTON_SCRIPT_VERSION = 13;   // scriptversion med bokarkonton (steg 3); äldre script → Bokare-fliken kan inte hämta konton (Drift-panelen varnar)
 const PURGE_SCRIPT_VERSION = 3;   // scriptversion med purge på riktigt (M5); äldre script → radering av processer/kunder med bokningar avbryts (Drift-panelen varnar)
 const SJALVSERVICE_SCRIPT_VERSION = 4;   // scriptversion med bokarens självservice (steg 2a); äldre script → bokningssidan saknar Omboka/Ändra/Avboka (Drift-panelen varnar)
@@ -4126,8 +4127,32 @@ function normPing(d) {
     icsStatus: ics ? { ok: ics.ok === true, hamtadTs: bstr(ics.hamtadTs, 40), antal: Math.max(0, Number(ics.antal) || 0), medPlats: Math.max(0, Number(ics.medPlats) || 0), preliminara: Math.max(0, Number(ics.preliminara) || 0), fel: bstr(ics.fel, 200),
       hamtningMs: Math.max(0, Number(ics.hamtningMs) || 0), cachad: ics.cachad === true, langsam: ics.langsam === true } : null,
     blockSynk: normBlockSynk(d.blockSynk),   // version 11 (A61, K5): null = fältet saknas (äldre script)
-    konton: normKonton(d.konton)   // steg 3 (4.3): { kontonFil, kontonAntal, kontoMailIdag, inloggningsforsokIdag, hemligheter } | null (äldre script)
+    konton: normKonton(d.konton),   // steg 3 (4.3): { kontonFil, kontonAntal, kontoMailIdag, inloggningsforsokIdag, hemligheter } | null (äldre script)
+    tider: normPingTider(d.tider)   // version 15: bokarflödets senaste anrop [{ ts, a, ms, ok, t }] | null (äldre script)
   };
+}
+// ping.tider (scriptversion 15): de senaste anropen i bokarens väntan – bara mätvärden. a = action, ms = tid inne i scriptet,
+// t = availability-stegen { total, auth, busy, geo, restid, plan } (ms). Okända actions och trasiga rader släpps.
+const BOKTIDER_ETIKETT = { 'konto-logga-in': 'inloggning', 'hello': 'start', 'availability': 'kalender', 'reserve': 'reservera', 'book': 'boka', 'egen-rebook': 'omboka' };
+function normPingTider(l) {
+  if (!Array.isArray(l)) return null;
+  const n = v => Math.max(0, Math.round(Number(v) || 0));
+  return l.filter(x => isPlainObject(x) && Object.prototype.hasOwnProperty.call(BOKTIDER_ETIKETT, x.a)).slice(-30).map(x => {
+    const rad = { ts: bstr(x.ts, 40), a: x.a, ms: n(x.ms), ok: x.ok === true, t: null };
+    if (isPlainObject(x.t)) { rad.t = {}; ['total', 'auth', 'busy', 'geo', 'restid', 'plan'].forEach(k => { rad.t[k] = n(x.t[k]); }); }
+    return rad;
+  });
+}
+// Drift-panelens rader för bokarflödet: senaste kalenderanropet uppdelat per steg + median per anropstyp (lyckade anrop).
+function bokTiderRader(tider) {
+  const rader = [];
+  if (!tider || !tider.length) return rader;
+  const median = a => { const x = a.slice().sort((p, q) => p - q); return x.length % 2 ? x[(x.length - 1) / 2] : Math.round((x[x.length / 2 - 1] + x[x.length / 2]) / 2); };
+  const delar = Object.keys(BOKTIDER_ETIKETT).map(a => { const ms = tider.filter(x => x.a === a && x.ok).map(x => x.ms); return ms.length ? BOKTIDER_ETIKETT[a] + ' ' + msLabel(median(ms)) + ' (' + ms.length + ')' : ''; }).filter(Boolean);
+  if (delar.length) rader.push({ text: 'Bokarflödet, tid i scriptet (median, antal anrop sedan ' + kortTidLabel(tider[0].ts) + '): ' + delar.join(' · ') + ' – därtill ca 2 s fast väntan hos Google per anrop', kind: 'info', omrade: 'boktider' });
+  const kal = tider.filter(x => x.a === 'availability' && x.t).slice(-1)[0];
+  if (kal) rader.push({ text: 'Bokarflödet, senaste kalenderanrop ' + msLabel(kal.ms) + ': behörighet ' + msLabel(kal.t.auth) + ' · kalender ' + msLabel(kal.t.busy) + ' · adress ' + msLabel(kal.t.geo) + ' · restid ' + msLabel(kal.t.restid) + ' · planering ' + msLabel(kal.t.plan) + ' · ' + kortTidLabel(kal.ts), kind: 'info', omrade: 'boktider' });
+  return rader;
 }
 function normKonton(k) {
   if (!isPlainObject(k)) return null;
@@ -4250,6 +4275,12 @@ function bokDriftRader() {   // gemensamma rader för Drift-panelen; statusraden
     else if (!ko) rader.push({ text: 'Bokarkonton: status saknas i svaret', kind: 'info', omrade: 'konton' });
     else if (!ko.kontonFil) rader.push({ text: 'Bokarkonton: kontofilen saknas i scriptet – kör Återanslut (Anslut brevlåda) så att telexia-bokning-konton.json skapas', kind: p.konfigurerad ? 'warn' : 'info', omrade: 'konton' });
     else rader.push({ text: 'Bokarkonton: ' + ko.kontonAntal + ' konton · ' + ko.kontoMailIdag + ' kontomail idag av 30 · ' + ko.inloggningsforsokIdag + ' misslyckade inloggningar idag' + (ko.hemligheter ? '' : ' · OBS: hemligheter saknas – kör install() i scriptet'), kind: ko.hemligheter && ko.inloggningsforsokIdag < 100 && ko.kontoMailIdag < 30 ? 'info' : 'warn', omrade: 'konton' });
+  }
+  // Bokarflödet (version 15): var tiden går när bokaren väntar – ur ping.tider. Tom logg = inga bokaranrop de senaste 6 timmarna.
+  if (p && !bokDrift.pingFel) {
+    if (p.tider && p.tider.length) bokTiderRader(p.tider).forEach(r => rader.push(r));
+    else if (p.tider) rader.push({ text: 'Bokarflödet: inga bokaranrop de senaste 6 timmarna (tiderna visas här efter nästa bokning)', kind: 'info', omrade: 'boktider' });
+    else if (bokDrift.pingVersion > 0 && bokDrift.pingVersion < BOKTIDER_SCRIPT_VERSION) rader.push({ text: 'Bokarflödet: tidsmätning kräver scriptversion ' + BOKTIDER_SCRIPT_VERSION + ' (Hantera distributioner › Ny version)', kind: 'info', omrade: 'boktider' });
   }
   // Kalender (version 12, K7): senaste calendar-preview – klientmätt total + scriptets tider (K4) och källa snapshot/live. Saknar svaret
   // tider (äldre script) visas bara klienttiden med en hint om scriptversionen.

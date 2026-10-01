@@ -494,7 +494,29 @@ function computeAvailabilityCore(req, deps) {
   // samma texter till cache-filen, så anropet är i regel en cache-träff.
   if (typeof deps.geocode === 'function') busy = geokodaAnkare(busy, deps.geocode);
   if (tider) { tider.geo = Date.now() - tDel; tDel = Date.now(); }
-  if (typ.restid) T = buildTravelTable(X, X && X.geokodad ? unikaPlatser(busy, cfg) : [], cfg, deps.travelSek);
+  if (typ.restid) {
+    const platser = X && X.geokodad ? unikaPlatser(busy, cfg) : [];
+    let travelFn = deps.travelSek;
+    // Version 15: hela bokningsperiodens ankarplatser (deps.horisontPlatser – triggerns lista) frågas i SAMMA omgång som veckans, så att
+    // nästa vecka för samma adress blir cacheträffar. Veckans platser står först (per-anrop-taket drabbar bara de förvärmda).
+    if (X && X.geokodad && typeof deps.horisontPlatser === 'function' && typeof deps.travelSek === 'function') {
+      let extra = [];
+      try { extra = deps.horisontPlatser() || []; } catch (e) { extra = []; }
+      if (extra.length) {
+        const sett = {};
+        platser.forEach(p => { sett[platsnyckel(p)] = true; });
+        const alla = platser.slice();
+        // Högst ett Distance Matrix-anrop (AVAIL_MATRIX_BATCH destinationer) – listan är kronologisk, så de närmaste veckorna värms först.
+        extra.forEach(p => { if (alla.length < AVAIL_MATRIX_BATCH && platsGeokodad(p) && !sett[platsnyckel(p)]) { sett[platsnyckel(p)] = true; alla.push(p); } });
+        if (alla.length > platser.length) {
+          const svarAlla = deps.travelSek(X, alla) || {};
+          // Nekades hela omgången (dagstaket räcker inte till de förvärmda) får veckans platser ett eget, mindre försök som förut.
+          if (!platser.some(p => svarAlla[cachenyckel(X, p)] === undefined)) travelFn = () => svarAlla;
+        }
+      }
+    }
+    T = buildTravelTable(X, platser, cfg, travelFn);
+  }
   if (tider) { tider.restid = Date.now() - tDel; tDel = Date.now(); }
 
   // 7. Dag för dag
@@ -754,6 +776,95 @@ function availFlushGeokod_() {
     return true;
   });
 }
+// --- Version 15 (CJ 2026-10-01: "kalenderladdningen är seg"): cache-filen skrivs inte längre medan bokaren väntar ---
+// Körloggen visade 6–7 s i scriptet per kalendervecka med restid. För en ny adress gjorde varje anrop tre Drive-operationer i väntan:
+// cache-filen lästes (restidsparen kan inte finnas där), och efter Distance Matrix lästes den IGEN och skrevs (availFlushGeokod_ i
+// doPost:s finally – svaret skickas först därefter). Nu: doPost lägger körningens nya poster i CacheService (availStashPending_,
+// 'pend:<uuid>' + index 'pend:index', 6 h) och triggern refreshIcsCache (var 10:e minut) tömmer dem till cache-filen
+// (availDrainPending_). Värdena finns hela tiden i CacheService ('restid:<nyckel>'/'geo:<hash>', 6 h), så inget anrop behöver filen
+// under tiden. Indexet uppdateras get→put utan lås: en förlorad post betyder bara att paret räknas om efter 6 h (filen är en ren cache).
+const AVAIL_PEND_INDEX = 'pend:index';
+const AVAIL_PEND_TTL_S = 21600;
+const AVAIL_PEND_MAX_NYCKLAR = 200;      // fler väntande omgångar än så (triggern har stått stilla) → skriv filen direkt som förut
+const AVAIL_PEND_MAX_BYTES = 90000;      // CacheService tar 100 KB per värde
+// → 'stash' | 'fil' | '' (inget att spara). Kastar aldrig.
+function availStashPending_() {
+  const geoNycklar = Object.keys(AVAIL_GEOKOD_PENDING), restidNycklar = Object.keys(AVAIL_RESTID_PENDING);
+  if (!geoNycklar.length && !restidNycklar.length) return '';
+  try {
+    const json = JSON.stringify({ geokod: AVAIL_GEOKOD_PENDING, restid: AVAIL_RESTID_PENDING });
+    if (json.length > AVAIL_PEND_MAX_BYTES) return availFlushGeokod_() ? 'fil' : '';
+    const cache = availCache();
+    let idx = [];
+    try { idx = JSON.parse(cache.get(AVAIL_PEND_INDEX) || '[]'); } catch (e) { idx = []; }
+    if (!Array.isArray(idx)) idx = [];
+    if (idx.length >= AVAIL_PEND_MAX_NYCKLAR) return availFlushGeokod_() ? 'fil' : '';
+    const key = 'pend:' + Utilities.getUuid();
+    cache.put(key, json, AVAIL_PEND_TTL_S);
+    idx.push(key);
+    cache.put(AVAIL_PEND_INDEX, JSON.stringify(idx), AVAIL_PEND_TTL_S);
+    AVAIL_GEOKOD_PENDING = {}; AVAIL_RESTID_PENDING = {};
+    return 'stash';
+  } catch (e) { return availFlushGeokod_() ? 'fil' : ''; }
+}
+// Triggern (och purge/dailyMaintenance före sina egna filändringar): alla väntande omgångar → cache-filen i EN läs + EN skrivning.
+// → antal poster som skrevs (0 = inget väntade, -1 = filen kunde inte skrivas – omgångarna ligger kvar till nästa körning). Kastar aldrig.
+function availDrainPending_() {
+  try {
+    const cache = availCache();
+    let idx = [];
+    try { idx = JSON.parse(cache.get(AVAIL_PEND_INDEX) || '[]'); } catch (e) { idx = []; }
+    if (!Array.isArray(idx) || !idx.length) return 0;
+    idx = idx.filter(k => typeof k === 'string' && /^pend:[0-9a-f-]{36}$/.test(k));
+    const hits = idx.length ? (cache.getAll(idx) || {}) : {};
+    const geo = {}, restid = {};
+    idx.forEach(k => {
+      let o = null; try { o = JSON.parse(hits[k] || 'null'); } catch (e) { o = null; }
+      if (!o || typeof o !== 'object') return;
+      if (o.geokod && typeof o.geokod === 'object') Object.keys(o.geokod).forEach(n => { geo[n] = o.geokod[n]; });
+      if (o.restid && typeof o.restid === 'object') Object.keys(o.restid).forEach(n => { restid[n] = o.restid[n]; });
+    });
+    const antal = Object.keys(geo).length + Object.keys(restid).length;
+    if (antal) {
+      const skrev = updateCacheFile(obj => {
+        if (!obj.geokod || typeof obj.geokod !== 'object') obj.geokod = {};
+        if (!obj.restid || typeof obj.restid !== 'object') obj.restid = {};
+        Object.keys(geo).forEach(n => { obj.geokod[n] = geo[n]; });
+        Object.keys(restid).forEach(n => { obj.restid[n] = restid[n]; });
+        return true;
+      });
+      if (!skrev) return -1;
+    }
+    if (idx.length) cache.removeAll(idx);
+    let nu = [];
+    try { nu = JSON.parse(cache.get(AVAIL_PEND_INDEX) || '[]'); } catch (e) { nu = []; }
+    const kvar = (Array.isArray(nu) ? nu : []).filter(k => idx.indexOf(k) < 0);   // omgångar som tillkom under tömningen ligger kvar
+    if (kvar.length) cache.put(AVAIL_PEND_INDEX, JSON.stringify(kvar), AVAIL_PEND_TTL_S); else cache.remove(AVAIL_PEND_INDEX);
+    return antal;
+  } catch (e) { return -1; }
+}
+// --- Version 15: bokningsperiodens ankarplatser (för restid i en enda Distance Matrix-omgång per ny adress) ---
+// Triggern (previewSnapKor_) har redan hela fönstrets busy-lista och sparar de unika, geokodade mötesplatserna från i dag och framåt
+// (+ basadressen) som [[lat, lng], …] i CacheService. availability för en mötestyp med restid läser listan (ETT cache.get) och frågar
+// Google om restiden mellan bokarens adress och ALLA platserna i samma omgång som veckans – vecka två och framåt blir rena cacheträffar
+// i stället för ett nytt Google-anrop per vecka. Saknas listan (triggern har inte kört) räknas bara veckans platser, som förut.
+// Koordinaterna lämnar aldrig scriptet (bokaren ser bara restidsblock, spec 5.12).
+const AVAIL_ANKARE_KEY = 'ankare:horisont';
+const AVAIL_ANKARE_S = 1800;             // 30 min: överlever en utebliven triggerkörning; en gammal lista ger bara färre förvärmda par
+const AVAIL_ANKARE_MAX = 40;             // tak på listan; per adress värms högst så många att veckans + förvärmda ryms i ETT anrop (AVAIL_MATRIX_BATCH)
+function ankareHorisontSpara_(busy, cfg, idag) {
+  try {
+    const kommande = (busy || []).filter(b => { if (!b) return false; const d = String(b.datum || '') || (b.start ? tzParts(new Date(b.start)).datum : ''); return d >= idag; });
+    const platser = unikaPlatser(kommande, cfg).slice(0, AVAIL_ANKARE_MAX).map(p => [p.lat, p.lng]);
+    availCache().put(AVAIL_ANKARE_KEY, JSON.stringify(platser), AVAIL_ANKARE_S);
+    return platser.length;
+  } catch (e) { return 0; }
+}
+function ankareHorisontLas_() {
+  const l = cacheGetJson(AVAIL_ANKARE_KEY);
+  return (Array.isArray(l) ? l : []).filter(p => Array.isArray(p) && typeof p[0] === 'number' && typeof p[1] === 'number' && isFinite(p[0]) && isFinite(p[1]))
+    .slice(0, AVAIL_ANKARE_MAX).map(p => ({ lat: p[0], lng: p[1], geokodad: true }));
+}
 function readCacheFileSafe() {
   if (AVAIL_FIL_MEMO) return AVAIL_FIL_MEMO;
   try { AVAIL_FIL_MEMO = readCacheFile(); } catch (e) { AVAIL_FIL_MEMO = null; }
@@ -830,7 +941,9 @@ function geocodeAddress(adress, opts) {
   const cacheKey = 'geo:' + sha256hex(key);
   const hit = cacheGetJson(cacheKey);
   if (hit && (hit.status === 'ok' || hit.status === 'okand')) { AVAIL_GEO_MEMO[key] = hit; return hit; }
-  const fil = readCacheFileSafe();
+  // Version 15: opts.utanFil (bokarens egen adress, Code.gs geoForBooking) hoppar över cache-filen – en Drive-läsning (0,5–1 s) för en
+  // adress som i regel är ny; saknas den i CacheService frågas Google direkt (1 element). Ankartexter läser filen som förut.
+  const fil = opts && opts.utanFil === true ? null : readCacheFileSafe();
   const post = fil && fil.geokod ? fil.geokod[key] : null;
   if (post && post.status === 'ok' && typeof post.lat === 'number' && typeof post.lng === 'number') {
     const ut = { status: 'ok', lat: post.lat, lng: post.lng, formaterad: String(post.formaterad || '') };
@@ -1098,14 +1211,16 @@ function debugPlaces(q) {
 // Cachekedja per par: CacheService (6 h) → cache-filens restid[nyckel] → Distance Matrix (batch ≤ 25, symmetriantagande).
 // Returnerar { <cachenyckel>: sek | { sek, forLangt:true } | null }. null = schablon.
 function travelSecondsFor(X, platser) {
-  return travelSecondsForPairs_(platser.map(p => ({ a: X, b: p })), AVAIL_MATRIX_MAX_PER_FRAGA).svar;
+  // Version 15: utanFil – paren går från bokarens adress X, som i regel är ny: saknas de i CacheService frågas Distance Matrix direkt
+  // i stället för att cache-filen först läses från Drive (0,5–1 s per anrop med minst en miss).
+  return travelSecondsForPairs_(platser.map(p => ({ a: X, b: p })), AVAIL_MATRIX_MAX_PER_FRAGA, { utanFil: true }).svar;
 }
 // Generisk parversion (steg 2c, A57 – delas av availability och calendar-preview): par = [{ a, b }] med geokodade platser.
 // Samma cachekedja per par; bara par som saknas i CacheService/cache-filen (och inte är "för långt") anropar Distance Matrix,
 // högst maxNya per körning – resten blir null (schablon/okand) och räknas i overCap. Anropen grupperas per origin (den punkt som
 // förekommer i flest par, vid lika den första i paret) i batchar om ≤ 25 destinationer; taket/blocket eller ett toppnivåfel avbryter
 // resterande anrop. → { svar:{ <cachenyckel>: sek | { sek, forLangt:true } | null }, overCap:antal }.
-function travelSecondsForPairs_(par, maxNya) {
+function travelSecondsForPairs_(par, maxNya, opts) {
   const ut = {}, saknas = [], sett = {}, unika = [];
   (par || []).forEach(p => {
     if (!p || !platsGeokodad(p.a) || !platsGeokodad(p.b)) return;
@@ -1122,7 +1237,7 @@ function travelSecondsForPairs_(par, maxNya) {
   });
   if (!saknas.length) return { svar: ut, overCap: 0 };
 
-  const fil = readCacheFileSafe();
+  const fil = opts && opts.utanFil === true ? null : readCacheFileSafe();   // version 15: availability (bokarens adress) läser inte filen
   const attAnropa = [];
   saknas.forEach(s => {
     const post = fil && fil.restid ? fil.restid[s.key] : null;
@@ -1230,6 +1345,7 @@ function computeAvailability(req) {
     }),
     geocode: adress => geocodeAddress(adress),
     travelSek: (X, platser) => travelSecondsFor(X, platser),
+    horisontPlatser: req.farsk ? null : () => ankareHorisontLas_(),   // version 15: bara i availability (inte findSlot under låset i reserve/book)
     findBokning: null,
     medTider: true   // version 12 (K6): data.tider { total, busy, geo, restid, plan } (heltal ms)
   };

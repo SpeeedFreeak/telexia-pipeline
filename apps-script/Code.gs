@@ -46,7 +46,7 @@
 // Konstanter
 // ============================================================
 
-const SCRIPT_VERSION = 14;                      // 14 = snabbare bokningsflöde (CJ 2026-10-01: "bokningsflödet är otroligt segt"): auth-kopia per konto i CacheService (Konton.gs kontoForAuth_, ett cache.get per bokar-anrop i stället för kontofil + KONTON_REV), konto-logga-in/-verifiera/-aterstall svarar med hello i samma svar (helloData_), väckningsendpointen 'varm' – allt valfritt: MIN_SCRIPT_VERSION förblir 13; 13 = bokarkonton (steg 3, Konton.gs): e-post + lösenord ersätter bokarkoden för vanliga bokare (k bara för CJ-bokare/arCj), fjärde brevlådefil telexia-bokning-konton.json (KONTON_FILE_ID, ägs av scriptet), tillåtelselista config.domaner (domän eller hel adress → pipeline), endpoints konto-registrera/-verifiera/-logga-in/-glomt/-aterstall/-byt-losenord/-profil + admin konton-list/konto-radera, session s i alla bokar-endpoints, hello.bokare fornamn/efternamn/epost/mobil/harKonto, inkorgspost.bokare-snapshot + "Bokad av: namn, e-post, mobil" i kalendern (B9), felkoder E_DOMAN/E_LOGIN/E_OVERIFIERAD/E_INAKTIV/E_SESSION/E_TOKEN, Script Properties SESSION_SECRET/LOSEN_PEPPER (install), ping kontonFil/kontonAntal/kontoMailIdag/inloggningsforsokIdag, dailyMaintenance gallrar overifierade konton – MIN_SCRIPT_VERSION höjs till 13 i index.html och bokning.js (CJ:s beslut 2026-09-19); 12 = prestanda (Script Properties-memo per körning, batchade CacheService-läsningar i Availability.gs, förberäknad calendar-preview i refreshIcsCache – CacheService preview:snap + busy:<datum> 11 min, calendar-preview svarar cachad:true/snapshotTs/tider, availability tider – valfria fält: MIN_SCRIPT_VERSION förblir 4; CJ 2026-09-17: "kalendern är väldigt långsam att ladda"); 11 = blocksynk till Google Kalender (installningar.blockSynkAktiv, Script Properties BLOCK_KALENDER_ID/BLOCK_SYNK_SENAST, egen kalender "Pipeline – restid" som aldrig läses, admin-endpoint block-sync, ping.blockSynk, calendars-list blockKalender – valfria fält: MIN_SCRIPT_VERSION förblir 4; A61, CJ:s beslut 2026-09-17); 10 = ren restid (råa Distance Matrix-minuter, inget påslag), marginal efter varje möte (installningar.marginalFysisktMin/marginalOnlineMin → effektiv buffert cooldownMin i Calendar.gs finalizeBusy; ersätter marginalMinstMin/marginalProcent) och restid delad runt platslösa möten (availability slot.restid.inDelar/utDelar + data.pausMin, calendar-preview resor[].delar – valfria fält, inBlock/utBlock = yttre spann: MIN_SCRIPT_VERSION förblir 4; CJ:s beslut 2026-09-17); 9 = manuell restidsklassning + rättad adress per händelse (KALENDER_IGNORERA-postens valfria online/adress/lat/lng/omrade och lage 'restid', Calendar.gs applyIgnore; calendar-preview overrideOnline/overrideAdress/serieId, geocode.omrade – valfria fält: MIN_SCRIPT_VERSION förblir 4); 8 = online-möten ("Microsoft Teams-möte" m.fl. i platsfältet är aldrig restidsankare, Calendar.gs kalLooksLikePlace – MIN_SCRIPT_VERSION förblir 4); MIN_SCRIPT_VERSION i index.html/bokning.js jämförs mot denna (4.12); 3 = M5 (purge, dailyMaintenance, nya ping-fält); 4 = steg 2a (egen-rebook/egen-cancel/egen-update, hello.egna med kanAndras); 5 = steg 2b (adressforslag via Places, placeId i geokodning – valfritt: MIN_SCRIPT_VERSION förblir 4); 6 = steg 2c (block.omrade i availability, omrade + resor i calendar-preview – valfria fält: MIN_SCRIPT_VERSION förblir 4); 7 = optimering (inkorg i CacheService, en cache-filskrivning per körning, ICS-värmare) + restid tydlig (paus-block, 0 min samma adress, Teams-fix, mejltext) + rebook släpper reservation (valfria fält: MIN_SCRIPT_VERSION förblir 4)
+const SCRIPT_VERSION = 15;                      // 15 = snabbare kalender (CJ 2026-10-01: "kalenderladdningen är seg" – körloggen visade 6–7 s per vecka med restid): cache-filen skrivs inte längre i bokarens väntan (availStashPending_ i doPost → CacheService, triggern tömmer med availDrainPending_), bokarens adress och dess restidspar läser inte cache-filen (utanFil), restid mot hela bokningsperiodens ankarplatser i en Distance Matrix-omgång (ankare:horisont från triggern), tidslogg för bokarflödet i ping.tider (tiderLogga_) + tider.auth – allt valfritt: MIN_SCRIPT_VERSION förblir 13; 14 = snabbare bokningsflöde (CJ 2026-10-01: "bokningsflödet är otroligt segt"): auth-kopia per konto i CacheService (Konton.gs kontoForAuth_, ett cache.get per bokar-anrop i stället för kontofil + KONTON_REV), konto-logga-in/-verifiera/-aterstall svarar med hello i samma svar (helloData_), väckningsendpointen 'varm' – allt valfritt: MIN_SCRIPT_VERSION förblir 13; 13 = bokarkonton (steg 3, Konton.gs): e-post + lösenord ersätter bokarkoden för vanliga bokare (k bara för CJ-bokare/arCj), fjärde brevlådefil telexia-bokning-konton.json (KONTON_FILE_ID, ägs av scriptet), tillåtelselista config.domaner (domän eller hel adress → pipeline), endpoints konto-registrera/-verifiera/-logga-in/-glomt/-aterstall/-byt-losenord/-profil + admin konton-list/konto-radera, session s i alla bokar-endpoints, hello.bokare fornamn/efternamn/epost/mobil/harKonto, inkorgspost.bokare-snapshot + "Bokad av: namn, e-post, mobil" i kalendern (B9), felkoder E_DOMAN/E_LOGIN/E_OVERIFIERAD/E_INAKTIV/E_SESSION/E_TOKEN, Script Properties SESSION_SECRET/LOSEN_PEPPER (install), ping kontonFil/kontonAntal/kontoMailIdag/inloggningsforsokIdag, dailyMaintenance gallrar overifierade konton – MIN_SCRIPT_VERSION höjs till 13 i index.html och bokning.js (CJ:s beslut 2026-09-19); 12 = prestanda (Script Properties-memo per körning, batchade CacheService-läsningar i Availability.gs, förberäknad calendar-preview i refreshIcsCache – CacheService preview:snap + busy:<datum> 11 min, calendar-preview svarar cachad:true/snapshotTs/tider, availability tider – valfria fält: MIN_SCRIPT_VERSION förblir 4; CJ 2026-09-17: "kalendern är väldigt långsam att ladda"); 11 = blocksynk till Google Kalender (installningar.blockSynkAktiv, Script Properties BLOCK_KALENDER_ID/BLOCK_SYNK_SENAST, egen kalender "Pipeline – restid" som aldrig läses, admin-endpoint block-sync, ping.blockSynk, calendars-list blockKalender – valfria fält: MIN_SCRIPT_VERSION förblir 4; A61, CJ:s beslut 2026-09-17); 10 = ren restid (råa Distance Matrix-minuter, inget påslag), marginal efter varje möte (installningar.marginalFysisktMin/marginalOnlineMin → effektiv buffert cooldownMin i Calendar.gs finalizeBusy; ersätter marginalMinstMin/marginalProcent) och restid delad runt platslösa möten (availability slot.restid.inDelar/utDelar + data.pausMin, calendar-preview resor[].delar – valfria fält, inBlock/utBlock = yttre spann: MIN_SCRIPT_VERSION förblir 4; CJ:s beslut 2026-09-17); 9 = manuell restidsklassning + rättad adress per händelse (KALENDER_IGNORERA-postens valfria online/adress/lat/lng/omrade och lage 'restid', Calendar.gs applyIgnore; calendar-preview overrideOnline/overrideAdress/serieId, geocode.omrade – valfria fält: MIN_SCRIPT_VERSION förblir 4); 8 = online-möten ("Microsoft Teams-möte" m.fl. i platsfältet är aldrig restidsankare, Calendar.gs kalLooksLikePlace – MIN_SCRIPT_VERSION förblir 4); MIN_SCRIPT_VERSION i index.html/bokning.js jämförs mot denna (4.12); 3 = M5 (purge, dailyMaintenance, nya ping-fält); 4 = steg 2a (egen-rebook/egen-cancel/egen-update, hello.egna med kanAndras); 5 = steg 2b (adressforslag via Places, placeId i geokodning – valfritt: MIN_SCRIPT_VERSION förblir 4); 6 = steg 2c (block.omrade i availability, omrade + resor i calendar-preview – valfria fält: MIN_SCRIPT_VERSION förblir 4); 7 = optimering (inkorg i CacheService, en cache-filskrivning per körning, ICS-värmare) + restid tydlig (paus-block, 0 min samma adress, Teams-fix, mejltext) + rebook släpper reservation (valfria fält: MIN_SCRIPT_VERSION förblir 4)
 const TZ = 'Europe/Stockholm';
 const APP_URL = 'https://speeedfreeak.github.io/telexia-pipeline/';   // länk i notismejlet (4.9)
 const MAX_BODY_BYTES = 16384;                   // body kontrolleras före JSON.parse (4.3)
@@ -374,7 +374,34 @@ function errEnvelope(code, message, details) {
 
 function doPost(e) {
   try { return doPostInner_(e); }
-  finally { if (typeof availFlushGeokod_ === 'function') availFlushGeokod_(); }   // körningens nya geokod- OCH restidsposter → cache-filen, en skrivning (A51, version 7)
+  // Version 15: körningens nya geokod-/restidsposter läggs i CacheService (availStashPending_) i stället för att cache-filen läses och
+  // skrivs medan klienten väntar på svaret (1–2,5 s per anrop med nya restidspar). Triggern refreshIcsCache tömmer dem till filen.
+  finally { if (typeof availStashPending_ === 'function') availStashPending_(); else if (typeof availFlushGeokod_ === 'function') availFlushGeokod_(); }
+}
+// --- Tidslogg för bokarflödet (version 15, Drift-panelen) ---
+// De senaste anropen i bokarens väntan (hello, inloggning, availability, reserve, book, egen ombokning) sparas som
+// { ts, a:action, ms, ok, t:tider? } i CacheService och följer med i ping.tider – bara mätvärden, aldrig indata eller id:n.
+// ms = tiden inne i scriptet (transporten ~1–2 s tillkommer hos klienten); availability bär t = { total, auth, busy, geo, restid, plan }.
+const TIDER_LOGG_KEY = 'tider:logg';
+const TIDER_LOGG_MAX = 30;
+const TIDER_LOGG_S = 21600;
+const TIDER_ACTIONS = { 'hello': 1, 'konto-logga-in': 1, 'availability': 1, 'reserve': 1, 'book': 1, 'egen-rebook': 1 };
+function tiderLogga_(action, ms, ok, tider) {
+  if (!TIDER_ACTIONS[action]) return;
+  try {
+    const cache = CacheService.getScriptCache();
+    let l = [];
+    try { l = JSON.parse(cache.get(TIDER_LOGG_KEY) || '[]'); } catch (e) { l = []; }
+    if (!Array.isArray(l)) l = [];
+    const rad = { ts: nowIso(), a: action, ms: Math.round(ms), ok: ok === true };
+    if (isPlainObject(tider)) { rad.t = {}; ['total', 'auth', 'busy', 'geo', 'restid', 'plan'].forEach(k => { if (typeof tider[k] === 'number') rad.t[k] = Math.round(tider[k]); }); }
+    l.push(rad);
+    cache.put(TIDER_LOGG_KEY, JSON.stringify(l.slice(-TIDER_LOGG_MAX)), TIDER_LOGG_S);
+  } catch (e) { /* best effort – mätningen får aldrig fälla ett anrop */ }
+}
+function tiderForPing_() {
+  try { const l = JSON.parse(CacheService.getScriptCache().get(TIDER_LOGG_KEY) || '[]'); return Array.isArray(l) ? l.slice(-TIDER_LOGG_MAX) : []; }
+  catch (e) { return []; }
 }
 function doPostInner_(e) {
   const t0 = Date.now(); let action = '?', bokareId = '';
@@ -394,6 +421,7 @@ function doPostInner_(e) {
     const out = route(req, ctx => { bokareId = ctx.bokareId || ''; loggExtra = isPlainObject(ctx.logg) ? ctx.logg : null; });
     // Version 12: handlern kan lägga statiska mätfält i ctx.logg (calendar-preview/availability: tider i ms) – aldrig indata.
     console.log(JSON.stringify(Object.assign({ action, bokareId, ok: out.ok, code: out.ok ? '' : out.error.code, ms: Date.now() - t0 }, loggExtra || {})));
+    tiderLogga_(action, Date.now() - t0, out.ok, loggExtra && loggExtra.tider);   // version 15: senaste bokaranropen → ping.tider (Drift-panelen)
     return respond(out);
   } catch (err) {
     console.error(JSON.stringify({ action, bokareId, ok: false, code: 'E_INTERNAL', ms: Date.now() - t0, fel: felKlass(err) }));
@@ -1049,7 +1077,7 @@ function geoForBooking(adress, ctx, placeId) {
   const tom = { lat: null, lng: null, formaterad: '', status: 'okand' };
   if (!adress) return Object.assign(tom, { status: 'saknas' });
   try {
-    const g = geocodeAddress(adress, placeId ? { placeId: placeId } : undefined);
+    const g = geocodeAddress(adress, placeId ? { placeId: placeId, utanFil: true } : { utanFil: true });   // version 15: bokarens adress läser aldrig cache-filen (Drive) i väntan
     if (g && g.nyttAnrop === true) countGeocodeCall(ctx);
     if (g && g.status === 'ok' && typeof g.lat === 'number' && typeof g.lng === 'number') {
       const ut = { lat: g.lat, lng: g.lng, formaterad: str(g.formaterad), status: 'ok' };
@@ -1135,7 +1163,9 @@ function handlePing(req, ctx) {
     // Version 11 (A61): blocksynkens status { aktiv, kalenderId, senast:{ ts, in, bort, andrade, kvar, antal, fel } | null } – Inställningar › Kalendrar + Drift.
     blockSynk: blockSynkForPing_(config),
     // Version 13 (steg 3): { kontonFil, kontonAntal, kontoMailIdag, inloggningsforsokIdag, hemligheter } – Drift-panelen (Konton.gs).
-    konton: kontonForPing_()
+    konton: kontonForPing_(),
+    // Version 15: de senaste bokaranropen [{ ts, a, ms, ok, t? }] (tiderLogga_) – Drift-panelen visar var tiden går i bokarflödet.
+    tider: tiderForPing_()
   };
 }
 // Kontroll av de tre brevlådefilerna (4.2, cachad 10 min per id). Returnerar '' när allt är i ordning, annars '<roll>: <statisk orsak>'.
@@ -1247,6 +1277,7 @@ function egenKanAndras(b, nuMs) {
 function handleAvailability(req, ctx) {
   const t0 = Date.now();
   const a = authBokare(req, ctx), bokare = a.bokare, config = a.config, inst = config.installningar;
+  const tAuth = Date.now() - t0;   // version 15: auth-delen (config + session/konto) i tider.auth
   const from = datumField(req.from, 'from'), to = datumField(req.to, 'to');
   if (to < from) valideringsfel({ to: 'Slutdatum ligger före startdatum' });
   if (daysBetween(from, to) > 14) valideringsfel({ to: 'Högst 14 dagar per förfrågan' });
@@ -1270,7 +1301,7 @@ function handleAvailability(req, ctx) {
   });
   // Version 12 (K6): valfritt tider { total, busy, geo, restid, plan } i heltal ms (Availability.gs computeAvailabilityCore mäter delarna;
   // total = hela handlern inkl. auth/geokodning av bokarens adress) – bara mätvärden, aldrig indata. Speglas i loggraden.
-  if (data && isPlainObject(data.tider)) { data.tider.total = Date.now() - t0; ctx.logg = { tider: data.tider }; }
+  if (data && isPlainObject(data.tider)) { data.tider.total = Date.now() - t0; data.tider.auth = tAuth; ctx.logg = { tider: data.tider }; }
   return data;
 }
 
@@ -2419,6 +2450,9 @@ function previewSnapKor_(config, genFore) {
     } else {
       rad.ok = previewSnapSkriv_(ber);
       ut = { busy: ber.busy, resor: ber.resor, varningar: ber.varningar, from: W.from, to: W.to };
+      // Version 15: bokningsperiodens ankarplatser → CacheService, så att availability kan fråga restiden för en ny adress mot alla
+      // kommande möten i en enda Distance Matrix-omgång (Availability.gs ankareHorisontSpara_/ankareHorisontLas_).
+      if (typeof ankareHorisontSpara_ === 'function') rad.ankare = ankareHorisontSpara_(ber.busy, mapCfg(config.installningar), todayStr());
     }
   } catch (e) { rad.ok = false; rad.klass = felKlass(e); }
   rad.ms = Date.now() - t0;
@@ -2934,6 +2968,7 @@ function handlePurge(req, ctx) {
     // Cache-filen (geokod) + CacheService (geo:<hash>, busy:<datum>, avstämning).
     const nycklar = Object.keys(adressNycklar);
     if (nycklar.length) {
+      if (typeof availDrainPending_ === 'function') availDrainPending_();   // version 15: väntande poster först, annars kan en nyss geokodad adress skrivas tillbaka efter raderingen
       updateCacheFile(obj => { let n = 0; nycklar.forEach(k => { if (obj.geokod && Object.prototype.hasOwnProperty.call(obj.geokod, k)) { delete obj.geokod[k]; n++; } }); ut.geokodBorttagna = n; return n > 0; });
       try { CacheService.getScriptCache().removeAll(nycklar.map(k => 'geo:' + sha256hex(k))); } catch (e) { /* best effort */ }
     }
@@ -3391,6 +3426,10 @@ function refreshIcsCache() {
     console.log(JSON.stringify({ trigger: 'refreshIcsCache', ok: ok, ms: Date.now() - t0, kalla: kalla }));
   }
   if (!config) return;
+  // Version 15: bokaranropens väntande geokod-/restidsposter (availStashPending_ i doPost) → cache-filen, en läs + en skrivning.
+  try {
+    if (typeof availDrainPending_ === 'function') { const n = availDrainPending_(); if (n) console.log(JSON.stringify({ trigger: 'drainPending', ok: n > 0, poster: n })); }
+  } catch (e) { console.log(JSON.stringify({ trigger: 'drainPending', ok: false, klass: felKlass(e) })); }
   // Version 12 (K3): förberäknad calendar-preview + varma cacher (inkorg, busy:<datum> 11 min) – egen loggrad, fäller aldrig.
   let forberaknat = null;
   try { forberaknat = previewSnapKor_(config, snapGen); }
@@ -3433,6 +3472,7 @@ function dailyMaintenanceInner_() {
   // 2. Inkorg + cache-fil under lås (4.8: 20 s). Kräver ansluten brevlåda (annars hoppas steget över, ingen felrad).
   let config = null, inbox = null, gallradeIds = {};
   try { config = loadConfig(); } catch (e) { config = null; if (errorCode(e) !== 'E_SETUP') { rad.ok = false; rad.fel.push('config:' + felKlass(e)); } }
+  if (config) { try { if (typeof availDrainPending_ === 'function') availDrainPending_(); } catch (e) { /* version 15: väntande poster in i filen före gallringen – best effort */ } }
   if (config) {
     try {
       withScriptLock(() => {
