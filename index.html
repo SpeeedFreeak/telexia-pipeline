@@ -176,6 +176,22 @@
   .paste-row { display: flex; gap: 8px; align-items: center; margin-top: 6px; }
   .ai-status { font-size: 11px; color: #93c5fd; }
   .ai-status.err { color: #fca5a5; }
+  /* Skärmdumpsinläsning med flera bilder (script v17, spec "[C] Skärmdumpsinläsning – specifikation (Claude Haiku)") */
+  .las-tummar { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
+  .las-tumme { position: relative; width: 72px; height: 54px; border: 1px solid #2a2e37; border-radius: 6px; overflow: hidden; background: #11141b; }
+  .las-tumme img { width: 100%; height: 100%; object-fit: cover; display: block; }
+  .las-tumme .las-nr { position: absolute; left: 3px; top: 2px; font-size: 10px; font-weight: 600; color: #fff; background: rgba(15,17,21,.8); border-radius: 4px; padding: 0 4px; }
+  .las-tumme .las-bort { position: absolute; right: 2px; top: 2px; width: 18px; height: 18px; line-height: 16px; padding: 0; border: none; border-radius: 50%; background: rgba(15,17,21,.85); color: #fca5a5; font-size: 12px; cursor: pointer; }
+  .las-kalla { font-size: 10px; color: #6b7280; margin-top: 2px; }
+  .las-kalla.osaker { color: #fbbf24; }
+  input.las-osaker { border-color: #b45309 !important; }
+  .las-chips { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 4px; }
+  .las-chip { font-size: 11px; padding: 2px 8px; border-radius: 10px; border: 1px solid #b45309; background: #1f1a10; color: #fcd34d; cursor: pointer; }
+  .las-fler { font-size: 12px; color: #d1d5db; margin: 2px 0 8px; }
+  .las-fler label { display: flex; gap: 6px; align-items: center; margin-top: 3px; font-weight: normal; }
+  .las-inst { margin-top: 6px; font-size: 12px; color: #9ca3af; }
+  .las-inst summary { cursor: pointer; }
+  .las-inst .field { margin-top: 6px; }
 
   .auth-gate { display: flex; align-items: center; justify-content: center; min-height: 70vh; padding: 20px; }
   .auth-gate-box { text-align: center; max-width: 380px; }
@@ -832,12 +848,23 @@
 <div class="modal-backdrop" id="custQuickModalBackdrop">
   <div class="modal">
     <h2>Ny kund</h2>
-    <div class="paste-zone" id="custQuickPasteZone" contenteditable="true" tabindex="0" data-placeholder="Frivilligt: klistra in en skärmdump med kunduppgifter (Ctrl+V) så fylls fälten i automatiskt">Frivilligt: klistra in en skärmdump med kunduppgifter (Ctrl+V) så fylls fälten i automatiskt</div>
+    <div class="paste-zone" id="custQuickPasteZone" contenteditable="true" tabindex="0" data-placeholder="Frivilligt: klistra in skärmdumpar med kunduppgifter (Ctrl+V, upp till 5) så fylls fälten i automatiskt">Frivilligt: klistra in skärmdumpar med kunduppgifter (Ctrl+V, upp till 5) så fylls fälten i automatiskt</div>
+    <div class="las-tummar" id="custQuickTummar"></div>
     <div class="paste-row">
-      <button class="btn ghost" id="custQuickPasteFileBtn">Välj fil istället</button>
-      <input type="file" id="custQuickPasteFileInput" accept="image/*" style="display:none">
+      <button class="btn ghost" id="custQuickPasteFileBtn">Välj filer istället</button>
+      <input type="file" id="custQuickPasteFileInput" accept="image/*" multiple style="display:none">
       <span class="ai-status" id="custQuickOcrStatus"></span>
     </div>
+    <details class="las-inst" id="custQuickLasInst">
+      <summary>Inställningar för inläsning</summary>
+      <div class="field"><label>Inläsning</label>
+        <select id="lasLage"><option value="ai">AI (behandlas i EU)</option><option value="lokal">Lokalt i webbläsaren (OCR)</option></select>
+      </div>
+      <div class="field"><label>Egna uppgifter att ignorera (en per rad)</label>
+        <textarea id="lasIgnorera" rows="3" placeholder="Ditt namn, ditt företag, din e-post …"></textarea>
+        <div class="hint" style="margin:4px 0 0">Läses aldrig in som kund eller kontakt – t.ex. din egen mailsignatur. Sparas på den här enheten.</div>
+      </div>
+    </details>
     <div class="field" style="margin-top:10px"><label>Kundnamn</label><input type="text" id="custQuickNamn"></div>
     <div class="field">
       <label>Organisationsnummer</label>
@@ -850,6 +877,7 @@
       <div class="field"><label>Telefon</label><input type="text" id="custQuickTelefon"></div>
     </div>
     <div class="field"><label>E-post</label><input type="text" id="custQuickEmail"></div>
+    <div class="las-fler" id="custQuickFler" hidden></div>
     <div class="modal-actions">
       <div class="left"><button class="btn ghost" id="custQuickCancelBtn">Avbryt</button></div>
       <button class="btn" id="custQuickSaveBtn">Skapa kund</button>
@@ -861,11 +889,12 @@
 <div class="modal-backdrop" id="shotModalBackdrop">
   <div class="modal">
     <h2>Ny kund från skärmdump</h2>
-    <div class="hint">Klistra in en skärmdump med kunduppgifter (t.ex. från mail eller Upsale). Texten läses av automatiskt (OCR, lokalt i din webbläsare) och kundfälten förifylls i nästa steg — skärmdumpen sparas dessutom i processens logg.</div>
-    <div class="paste-zone" id="shotPasteZone" contenteditable="true" tabindex="0" data-placeholder="Klicka här och klistra in en skärmdump (Ctrl+V)">Klicka här och klistra in en skärmdump (Ctrl+V)</div>
+    <div class="hint">Klistra in en eller flera skärmdumpar med kunduppgifter (t.ex. från mail och Upsale – upp till 5). Uppgifterna läses av automatiskt och kundfälten förifylls i nästa steg — skärmdumparna sparas dessutom i processens logg.</div>
+    <div class="paste-zone" id="shotPasteZone" contenteditable="true" tabindex="0" data-placeholder="Klicka här och klistra in skärmdumpar (Ctrl+V)">Klicka här och klistra in skärmdumpar (Ctrl+V)</div>
+    <div class="las-tummar" id="shotTummar"></div>
     <div class="paste-row">
-      <button class="btn ghost" id="shotPasteFileBtn">Välj fil istället</button>
-      <input type="file" id="shotPasteFileInput" accept="image/*" style="display:none">
+      <button class="btn ghost" id="shotPasteFileBtn">Välj filer istället</button>
+      <input type="file" id="shotPasteFileInput" accept="image/*" multiple style="display:none">
     </div>
     <div class="ai-status" id="shotAiStatus" style="margin-top:8px"></div>
     <div class="modal-actions">
@@ -1086,7 +1115,7 @@ const SJALVSERVICE_SCRIPT_VERSION = 4;   // scriptversion med bokarens självser
 const ADRESSFORSLAG_SCRIPT_VERSION = 5;   // scriptversion med adressförslag (steg 2b, 'adressforslag'); äldre script → fritext utan fel (Drift-panelen visar "Adressförslag: av")
 const BLOCKSYNK_SCRIPT_VERSION = 11;   // scriptversion med blocksynk till Google Kalender (A61, 'block-sync' + ping.blockSynk); äldre script → inställningen har ingen verkan (Drift-panelen varnar)
 const KALSNAPSHOT_SCRIPT_VERSION = 12;   // scriptversion med förberäknad kalender (K3/K4: calendar-preview svarar cachad/snapshotTs/tider, tar farsk); äldre script → svaret saknar fälten, appen ritar som förut
-const BOK_TIMEOUT_MS = { hello: 15000, availability: 15000, geocode: 15000, ping: 15000, adressforslag: 10000, 'block-sync': 180000 };   // övriga (skrivande) 45 000; block-sync (K4/K5): upp till 80 kalenderskrivningar + restidsberäkning i samma körning (Apps Script-tak 6 min)
+const BOK_TIMEOUT_MS = { hello: 15000, availability: 15000, geocode: 15000, ping: 15000, adressforslag: 10000, 'las-skarmdump': 20000, 'block-sync': 180000 };   // övriga (skrivande) 45 000; block-sync (K4/K5): upp till 80 kalenderskrivningar + restidsberäkning i samma körning (Apps Script-tak 6 min)
 function bokScriptUrl() {
   const u = (typeof BOKNINGSINSTALLNINGAR === 'object' && BOKNINGSINSTALLNINGAR) ? BOKNINGSINSTALLNINGAR.scriptUrl : '';
   return /^https:\/\/script\.google\.com\/macros\/s\/[A-Za-z0-9_-]+\/exec$/.test(String(u || '')) ? u : BOK_SCRIPT_URL;
@@ -3141,59 +3170,296 @@ document.getElementById('customerDeleteBtn').addEventListener('click', async () 
   visaPurgeResultat(purge, 'Kunden borttagen');
 });
 
+// ---------- Skärmdumpsinläsning: flera bilder, AI i EU + lokal reserv (script v17) ----------
+// Spec "[C] Skärmdumpsinläsning - specifikation (Claude Haiku).md" (avsnitt 4–7). 1–5 skärmdumpar läses TILLSAMMANS 1,2 s efter
+// senaste inklistringen: i första hand AI via scriptets las-skarmdump (Gemini 2.5 Flash eller Claude Haiku 4.5 – valet görs i scriptet) (Vertex AI europe-west1 – datan stannar i EU,
+// ingen nyckel i appen), annars lokalt med Tesseract (inställning "Lokalt", bokningsmodulen inte ansluten, script < v17, kvot/tak,
+// fel eller inget svar inom 20 s). Bilderna skalas ned i webbläsaren innan de skickas (≤ 1568 px, ~1,15 MP – samma gräns som
+// modellen själv skalar till); originalen sparas i loggen som förut.
+const LASNING_KEY = 'telexia_pipeline_lasning_v1';   // per enhet, synkas ej (som ENHET_KEY): { lage: 'ai'|'lokal', ignorera: [text] }
+const LAS_FALT = ['namn', 'orgnr', 'adress', 'kontakt', 'telefon', 'email'];
+const LAS_MAX_BILDER = 5;
+const LAS_VANTA_MS = 1200;
+const LAS_AI_PAUS_MS = 10 * 60000;   // efter "inte aktiverad"/okänd åtgärd (script < v17): direkt till lokal läsning i 10 min
+const LAS_MAX_SIDA = 1568, LAS_MAX_PIXLAR = 1150000;
+let lasAiPausTill = 0;
+
+function lasInstallningar() {
+  let s = null;
+  try { s = JSON.parse(localStorage.getItem(LASNING_KEY) || 'null'); } catch (e) { s = null; }
+  s = isPlainObject(s) ? s : {};
+  const std = ['Telexia', 'Redneck Engineering'];
+  if (typeof BOKNINGSINSTALLNINGAR === 'object' && BOKNINGSINSTALLNINGAR && typeof BOKNINGSINSTALLNINGAR.notisEpost === 'string' && BOKNINGSINSTALLNINGAR.notisEpost) std.push(BOKNINGSINSTALLNINGAR.notisEpost);
+  return {
+    lage: s.lage === 'lokal' ? 'lokal' : 'ai',
+    ignorera: Array.isArray(s.ignorera) ? s.ignorera.map(x => String(x).trim()).filter(Boolean).slice(0, 20) : std
+  };
+}
+function sparaLasInstallningar(s) { try { localStorage.setItem(LASNING_KEY, JSON.stringify(s)); } catch (e) { /* privat läge – inställningen gäller sessionen ut */ } }
+
+function lasNedskala(dataUrl) {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => {
+      let w = img.naturalWidth || 1, h = img.naturalHeight || 1;
+      const f = Math.min(1, LAS_MAX_SIDA / Math.max(w, h), Math.sqrt(LAS_MAX_PIXLAR / (w * h)));
+      w = Math.max(1, Math.round(w * f)); h = Math.max(1, Math.round(h * f));
+      const c = document.createElement('canvas'); c.width = w; c.height = h;
+      const g = c.getContext('2d'); g.fillStyle = '#fff'; g.fillRect(0, 0, w, h); g.drawImage(img, 0, 0, w, h);
+      resolve({ typ: 'image/jpeg', data: c.toDataURL('image/jpeg', 0.85).split(',')[1] });
+    };
+    img.onerror = () => reject(new Error('bilden kunde inte läsas'));
+    img.src = dataUrl;
+  });
+}
+
+function lasFelText(r) {
+  const kod = r && r.error ? r.error.code : '';
+  if (kod === 'E_RATE') return 'taket för inläsning är nått';
+  if (kod === 'E_ABORT') return 'inget svar inom 20 s';
+  if (kod === 'E_NETWORK') return 'ingen anslutning';
+  if (kod === 'E_LASNING_EJ_AKTIV') return 'AI-inläsningen är inte aktiverad';
+  if (kod === 'E_LASNING') return bstr(r.error.message, 120) || 'fel i AI-tjänsten';   // scriptets egen förklaring, t.ex. "Kvoten för Gemini 2.5 Flash i europe-west3 är slut"
+  if (kod === 'E_VALIDATION' && r.error.details && r.error.details.falt && r.error.details.falt.action) return 'scriptet behöver version 17';
+  return bokFelText(r);
+}
+// Scriptets svar → samma form som den lokala läsningen: { vag, falt, kallor, osakra, konflikter, fler }
+function lasNormAi(d) {
+  d = isPlainObject(d) ? d : {};
+  const k = isPlainObject(d.kund) ? d.kund : {};
+  const postOrt = [bstr(k.postnr, 10), bstr(k.ort, 60)].filter(Boolean).join(' ');
+  const kontakter = (Array.isArray(d.kontakter) ? d.kontakter : []).filter(isPlainObject).slice(0, 5)
+    .map(c => ({ namn: bstr(c.namn, 120), roll: bstr(c.roll, 80), telefon: bstr(c.telefon, 30), email: bstr(c.email, 120) }));
+  const huvud = kontakter[0] || { namn: '', roll: '', telefon: '', email: '' };
+  const kl = isPlainObject(d.kallor) ? d.kallor : {};
+  const n = v => Math.max(0, Math.round(Number(v) || 0));
+  return {
+    vag: 'ai',
+    falt: { namn: bstr(k.namn, 120), orgnr: bstr(k.orgnr, 13), adress: [bstr(k.adress, 200), postOrt].filter(Boolean).join(', '),
+            kontakt: huvud.namn, telefon: huvud.telefon, email: huvud.email },
+    roll: huvud.roll,
+    kallor: { namn: n(kl.namn), orgnr: n(kl.orgnr), adress: n(kl.adress), kontakt: n(kl.kontakt), telefon: n(kl.kontakt), email: n(kl.kontakt) },
+    osakra: (Array.isArray(d.osakra) ? d.osakra : []).filter(f => LAS_FALT.includes(f)),
+    konflikter: (Array.isArray(d.konflikter) ? d.konflikter : []).filter(c => isPlainObject(c) && LAS_FALT.includes(c.falt))
+      .map(c => ({ falt: c.falt, varden: (Array.isArray(c.varden) ? c.varden : []).map(v => bstr(v, 200)).filter(Boolean).slice(0, 4) }))
+      .filter(c => c.varden.length >= 2),
+    fler: kontakter.slice(1)
+  };
+}
+async function lasMedAi(bilder) {   // → { ok:true, res } | { ok:false, orsak, tyst }
+  const inst = lasInstallningar();
+  if (inst.lage !== 'ai') return { ok: false, orsak: 'inställt på lokal läsning', tyst: true };
+  if (!bokAnsluten()) return { ok: false, orsak: 'bokningsmodulen är inte ansluten', tyst: true };
+  if (Date.now() < lasAiPausTill) return { ok: false, orsak: 'AI-inläsningen är inte tillgänglig just nu' };
+  const sma = [];
+  for (const b of bilder) { if (!b.liten) b.liten = await lasNedskala(b.dataUrl); sma.push(b.liten); }
+  const r = await bokAdminApi('las-skarmdump', { bilder: sma, ignorera: inst.ignorera });
+  if (r && r.ok) return { ok: true, res: lasNormAi(r.data) };
+  const kod = r && r.error ? r.error.code : '';
+  if (kod === 'E_LASNING_EJ_AKTIV' || (kod === 'E_VALIDATION' && r.error.details && r.error.details.falt && r.error.details.falt.action)) lasAiPausTill = Date.now() + LAS_AI_PAUS_MS;
+  return { ok: false, orsak: lasFelText(r) };
+}
+async function lasLokalt(bilder, statusEl) {
+  const texter = [];
+  for (const b of bilder) texter.push(await ocrImage(b.dataUrl, statusEl));
+  const p = parseOcrText(texter.join('\n'));
+  return { vag: 'lokal', falt: { namn: p.namn, orgnr: p.orgnr, adress: p.adress, kontakt: p.kontakt, telefon: p.telefon, email: p.email },
+           roll: '', kallor: {}, osakra: [], konflikter: [], fler: [] };
+}
+function lasSammanfattning(res) {
+  return ocrSummary({ namn: res.falt.namn, orgnr: res.falt.orgnr, kontakt: res.falt.kontakt, telefon: res.falt.telefon, email: res.falt.email, adress: res.falt.adress });
+}
+
+// Inklistringsyta för flera bilder (setupPasteZone ovan är kvar för loggarna – en bild åt gången).
+function setupMultiPaste(zoneEl, fileBtn, fileInput, onImage) {
+  zoneEl.addEventListener('paste', e => {
+    e.preventDefault();
+    const items = (e.clipboardData || window.clipboardData).items || [];
+    let found = false;
+    for (const item of items) {
+      if (item.type && item.type.indexOf('image') !== -1) { const f = item.getAsFile(); if (f) { readFileAsDataUrl(f, onImage); found = true; } }
+    }
+    if (!found) zoneEl.textContent = zoneEl.dataset.placeholder;
+  });
+  zoneEl.addEventListener('keydown', e => { if (!(e.ctrlKey || e.metaKey)) e.preventDefault(); });
+  fileBtn.addEventListener('click', () => fileInput.click());
+  fileInput.addEventListener('change', e => {
+    Array.from(e.target.files || []).forEach(f => readFileAsDataUrl(f, onImage));
+    fileInput.value = '';
+  });
+}
+
+// Läsare för en inklistringsyta: håller bilderna, ritar numrerade miniatyrer, läser om alla bilder 1,2 s efter senaste ändringen.
+// Ett svar som kommer efter en ny ändring kastas (gen). o: { zon, filKnapp, filInput, tummar, status, onResultat(res|null), onAndrad(bilder) }
+function skapaLasare(o) {
+  const L = { bilder: [], gen: 0, timer: null, senaste: null, pagar: false };
+  const status = (text, fel) => { o.status.className = 'ai-status' + (fel ? ' err' : ''); o.status.textContent = text; };
+  function ritaTummar() {
+    o.tummar.innerHTML = '';
+    L.bilder.forEach((b, i) => {
+      const d = document.createElement('div');
+      d.className = 'las-tumme';
+      d.innerHTML = '<img alt=""><span class="las-nr">' + (i + 1) + '</span><button type="button" class="las-bort" title="Ta bort bild ' + (i + 1) + '" aria-label="Ta bort bild ' + (i + 1) + '">×</button>';
+      d.querySelector('img').src = b.dataUrl;
+      d.querySelector('.las-bort').addEventListener('click', () => { L.bilder = L.bilder.filter(x => x.id !== b.id); andrat(); });
+      o.tummar.appendChild(d);
+    });
+    resetZone(o.zon);
+    if (L.bilder.length >= LAS_MAX_BILDER) o.zon.textContent = 'Max ' + LAS_MAX_BILDER + ' skärmdumpar – ta bort en för att lägga till en ny';
+  }
+  function andrat() {
+    ritaTummar();
+    if (o.onAndrad) o.onAndrad(L.bilder);
+    clearTimeout(L.timer); L.gen++;
+    if (!L.bilder.length) { L.senaste = null; L.pagar = false; status(''); if (o.onResultat) o.onResultat(null); return; }
+    L.pagar = true;
+    status(L.bilder.length + (L.bilder.length > 1 ? ' skärmdumpar' : ' skärmdump') + ' – läser strax …');
+    L.timer = setTimeout(las, LAS_VANTA_MS);
+  }
+  function laggTill(dataUrl) {
+    if (L.bilder.length >= LAS_MAX_BILDER) { status('Max ' + LAS_MAX_BILDER + ' skärmdumpar per kund', true); return; }
+    L.bilder.push({ id: uid(), dataUrl: dataUrl });
+    andrat();
+  }
+  async function las() {
+    const gen = ++L.gen, bilder = L.bilder.slice();
+    if (!bilder.length) return;
+    L.pagar = true;
+    const ord = bilder.length + (bilder.length > 1 ? ' skärmdumpar' : ' skärmdump');
+    let res = null, notis = '';
+    status('Läser ' + ord + ' …');
+    let ai;
+    try { ai = await lasMedAi(bilder); } catch (e) { ai = { ok: false, orsak: e.message }; }
+    if (gen !== L.gen) return;
+    if (ai.ok) res = ai.res;
+    else {
+      notis = ai.tyst ? '' : 'AI-inläsningen gick inte (' + ai.orsak + ') – läste lokalt i stället. ';
+      try { res = await lasLokalt(bilder, o.status); }
+      catch (e) { if (gen !== L.gen) return; L.pagar = false; status(notis + 'Inläsningen misslyckades (' + e.message + ') — fyll i fälten manuellt.', true); return; }
+      if (gen !== L.gen) return;
+    }
+    L.senaste = res; L.pagar = false;
+    const traffar = LAS_FALT.filter(f => res.falt[f]).length;
+    status(notis + (traffar ? 'Ifyllt från ' + ord + (res.vag === 'ai' ? ' (AI, EU)' : ' (lokalt)') + ' — kontrollera och justera vid behov.'
+                            : 'Ingen kundinfo hittades — fyll i fälten manuellt.'), !traffar && !!notis);
+    if (o.onResultat) o.onResultat(res);
+  }
+  setupMultiPaste(o.zon, o.filKnapp, o.filInput, laggTill);
+  return {
+    get bilder() { return L.bilder; },
+    get resultat() { return L.senaste; },
+    get pagar() { return L.pagar; },
+    status: status,
+    lasNu() { clearTimeout(L.timer); return las(); },
+    nollstall() { clearTimeout(L.timer); L.gen++; L.bilder = []; L.senaste = null; L.pagar = false; ritaTummar(); status(''); },
+    importera(bilder, res) { clearTimeout(L.timer); L.gen++; L.bilder = bilder.slice(); L.senaste = res || null; L.pagar = false; ritaTummar(); }
+  };
+}
+
 // ---------- Quick-add customer modal ----------
-let custQuickShotDataUrl = null;
-let custQuickOcrResult = null;
+// Fältregler (spec 4.3): fält CJ själv skrivit i skrivs aldrig över; fält som inläsningen fyllt får skrivas om av en ny inläsning
+// (fler bilder). Källbild, osäkerhet och motstridiga värden visas under fältet; fler kontakter sparas som extra poster.
+const CQ_FALT = { namn: 'custQuickNamn', orgnr: 'custQuickOrgnr', adress: 'custQuickAdress', kontakt: 'custQuickKontakt', telefon: 'custQuickTelefon', email: 'custQuickEmail' };
+let cqAiFyllt = new Set(), cqAndrat = new Set(), cqFler = [];
+let custQuickSparaBilder = true;   // false när bilderna kom från "Ny kund från skärmdump" – de sparas då i processens logg
 function openCustQuickAddModal(context) {
   custQuickAddContext = context;
-  custQuickShotDataUrl = null;
-  custQuickOcrResult = null;
-  document.getElementById('custQuickNamn').value = '';
-  document.getElementById('custQuickOrgnr').value = '';
-  document.getElementById('custQuickAdress').value = '';
-  document.getElementById('custQuickKontakt').value = '';
-  document.getElementById('custQuickTelefon').value = '';
-  document.getElementById('custQuickEmail').value = '';
+  custQuickSparaBilder = true;
+  cqAiFyllt = new Set(); cqAndrat = new Set(); cqFler = [];
+  Object.keys(CQ_FALT).forEach(f => { document.getElementById(CQ_FALT[f]).value = ''; cqMarkering(f, null); });
+  ritaCqFler();
   checkCustQuickOrgnr();
-  document.getElementById('custQuickOcrStatus').textContent = '';
-  document.getElementById('custQuickOcrStatus').className = 'ai-status';
-  resetZone(document.getElementById('custQuickPasteZone'));
+  custQuickLasare.nollstall();
   document.getElementById('custQuickModalBackdrop').classList.add('open');
 }
 const checkCustQuickOrgnr = bindOrgnrField('custQuickOrgnr', 'custQuickOrgnrHint');
 
-// OCR-zon i Ny kund-rutan: klistra in skärmdump → fälten fylls i automatiskt.
-setupPasteZone(
-  document.getElementById('custQuickPasteZone'),
-  document.getElementById('custQuickPasteFileBtn'),
-  document.getElementById('custQuickPasteFileInput'),
-  async dataUrl => {
-    custQuickShotDataUrl = dataUrl;
-    showImageInZone(document.getElementById('custQuickPasteZone'), dataUrl);
-    const status = document.getElementById('custQuickOcrStatus');
-    try {
-      const text = await ocrImage(dataUrl, status);
-      const ocr = parseOcrText(text);
-      custQuickOcrResult = ocr;
-      // Fyll bara i fält som är tomma — skriv inte över det du redan skrivit
-      const setIfEmpty = (id, val) => { const el = document.getElementById(id); if (val && !el.value.trim()) el.value = val; };
-      setIfEmpty('custQuickNamn', ocr.namn);
-      // Orgnr förifylls bara när OCR-träffen är giltig (Luhn) – annars hamnar den som loggpost vid Spara (som före M1)
-      setIfEmpty('custQuickOrgnr', normalizeOrgnr(ocr.orgnr));
-      setIfEmpty('custQuickAdress', ocr.adress);
-      setIfEmpty('custQuickKontakt', ocr.kontakt);
-      setIfEmpty('custQuickTelefon', ocr.telefon);
-      setIfEmpty('custQuickEmail', ocr.email);
-      checkCustQuickOrgnr();
-      const bits = ocrSummary(ocr);
-      status.className = 'ai-status';
-      status.textContent = bits.length ? 'Ifyllt från skärmdumpen — kontrollera och justera vid behov.' : 'Ingen kundinfo hittades i texten — fyll i fälten manuellt.';
-    } catch (e) {
-      status.className = 'ai-status err';
-      status.textContent = 'OCR misslyckades (' + e.message + ') — fyll i fälten manuellt.';
-    }
+function cqMarkering(f, m) {   // m: { kalla, osaker, varden } | null
+  const inp = document.getElementById(CQ_FALT[f]);
+  const fd = inp.closest('.field');
+  fd.querySelectorAll('[data-las]').forEach(e => e.remove());
+  inp.classList.toggle('las-osaker', !!(m && m.osaker));
+  if (!m) return;
+  if (m.kalla || m.osaker) {
+    const d = document.createElement('div');
+    d.dataset.las = '1';
+    d.className = 'las-kalla' + (m.osaker ? ' osaker' : '');
+    d.textContent = (m.kalla ? 'Från bild ' + m.kalla : 'Inläst') + (m.osaker ? ' · osäker – kontrollera' : '');
+    fd.appendChild(d);
   }
-);
+  if (m.varden && m.varden.length > 1) {
+    const c = document.createElement('div');
+    c.dataset.las = '1';
+    c.className = 'las-chips';
+    c.appendChild(Object.assign(document.createElement('span'), { className: 'las-kalla', textContent: 'Bilderna visar olika värden:' }));
+    m.varden.forEach(v => {
+      const b = document.createElement('button');
+      b.type = 'button'; b.className = 'las-chip'; b.textContent = v;
+      b.addEventListener('click', () => {
+        inp.value = f === 'orgnr' ? (normalizeOrgnr(v) || v) : v;
+        cqAndrat.add(f); cqAiFyllt.delete(f);
+        if (f === 'orgnr') checkCustQuickOrgnr();
+        cqMarkering(f, null);
+      });
+      c.appendChild(b);
+    });
+    fd.appendChild(c);
+  }
+}
+function ritaCqFler() {
+  const el = document.getElementById('custQuickFler');
+  el.innerHTML = '';
+  el.hidden = !cqFler.length;
+  if (!cqFler.length) return;
+  el.appendChild(Object.assign(document.createElement('div'), { textContent: 'Fler kontakter i skärmdumparna – sparas också:' }));
+  cqFler.forEach(c => {
+    const l = document.createElement('label');
+    const cb = document.createElement('input');
+    cb.type = 'checkbox'; cb.checked = c.med;
+    cb.addEventListener('change', () => { c.med = cb.checked; });
+    l.appendChild(cb);
+    l.appendChild(document.createTextNode([c.namn, c.roll ? '(' + c.roll + ')' : '', c.telefon, c.email].filter(Boolean).join(' · ')));
+    el.appendChild(l);
+  });
+}
+function cqTillampa(res) {
+  Object.keys(CQ_FALT).forEach(f => cqMarkering(f, null));
+  cqFler = [];
+  if (res) {
+    Object.keys(CQ_FALT).forEach(f => {
+      const el = document.getElementById(CQ_FALT[f]);
+      const v = f === 'orgnr' ? normalizeOrgnr(res.falt.orgnr) : (res.falt[f] || '');   // ogiltigt orgnr förifylls inte – loggpost vid Spara
+      const far = !cqAndrat.has(f) && (!el.value.trim() || cqAiFyllt.has(f));
+      if (v && far) { el.value = v; cqAiFyllt.add(f); }
+      else if (!v && far && cqAiFyllt.has(f)) { el.value = ''; cqAiFyllt.delete(f); }   // stöds inte längre av bilderna (bild borttagen)
+      const konf = res.konflikter.find(c => c.falt === f);
+      if (cqAiFyllt.has(f) || konf) cqMarkering(f, { kalla: cqAiFyllt.has(f) ? (res.kallor[f] || 0) : 0, osaker: cqAiFyllt.has(f) && res.osakra.includes(f), varden: konf ? konf.varden : null });
+    });
+    cqFler = res.fler.filter(c => c.namn || c.telefon || c.email).map(c => Object.assign({ med: true }, c));
+  }
+  checkCustQuickOrgnr();
+  ritaCqFler();
+}
+Object.keys(CQ_FALT).forEach(f => document.getElementById(CQ_FALT[f]).addEventListener('input', () => {
+  cqAndrat.add(f); cqAiFyllt.delete(f); cqMarkering(f, null);
+}));
+const custQuickLasare = skapaLasare({
+  zon: document.getElementById('custQuickPasteZone'),
+  filKnapp: document.getElementById('custQuickPasteFileBtn'),
+  filInput: document.getElementById('custQuickPasteFileInput'),
+  tummar: document.getElementById('custQuickTummar'),
+  status: document.getElementById('custQuickOcrStatus'),
+  onResultat: cqTillampa
+});
+(function () {   // inläsningsinställningar (per enhet)
+  const sel = document.getElementById('lasLage'), ta = document.getElementById('lasIgnorera');
+  const fyll = () => { const s = lasInstallningar(); sel.value = s.lage; ta.value = s.ignorera.join('\n'); };
+  const spara = () => sparaLasInstallningar({ lage: sel.value === 'lokal' ? 'lokal' : 'ai', ignorera: ta.value.split('\n').map(x => x.trim()).filter(Boolean).slice(0, 20) });
+  sel.addEventListener('change', spara);
+  ta.addEventListener('change', spara);
+  document.getElementById('custQuickLasInst').addEventListener('toggle', fyll);
+  fyll();
+})();
 function closeCustQuickAddModal() {
   document.getElementById('custQuickModalBackdrop').classList.remove('open');
   custQuickAddContext = null;
@@ -3210,12 +3476,15 @@ document.getElementById('custQuickSaveBtn').addEventListener('click', () => {
   const kontaktNamn = document.getElementById('custQuickKontakt').value.trim();
   const telefon = document.getElementById('custQuickTelefon').value.trim();
   const email = document.getElementById('custQuickEmail').value.trim();
-  const kontakter = (kontaktNamn || telefon || email) ? [{ id: uid(), namn: kontaktNamn, telefon, email, roll: '' }] : [];
+  const res = custQuickLasare.resultat;
+  const roll = res && cqAiFyllt.has('kontakt') ? (res.roll || '') : '';   // huvudkontaktens roll när namnet kom från inläsningen
+  const kontakter = (kontaktNamn || telefon || email) ? [{ id: uid(), namn: kontaktNamn, telefon, email, roll }] : [];
+  cqFler.filter(c => c.med).forEach(c => kontakter.push({ id: uid(), namn: c.namn, telefon: c.telefon, email: c.email, roll: c.roll || '' }));
   const log = [];
-  if (custQuickShotDataUrl) log.push({ id: uid(), type: 'image', content: custQuickShotDataUrl, ts: nowLabel() });
-  // Giltigt OCR-orgnr ligger redan i orgnr-fältet; ogiltig OCR-träff behålls som loggpost så informationen inte tappas
-  if (custQuickOcrResult && custQuickOcrResult.orgnr && !normalizeOrgnr(custQuickOcrResult.orgnr)) {
-    log.push({ id: uid(), type: 'text', content: 'Orgnr (OCR): ' + custQuickOcrResult.orgnr, ts: nowLabel() });
+  if (custQuickSparaBilder) custQuickLasare.bilder.forEach(b => log.push({ id: uid(), type: 'image', content: b.dataUrl, ts: nowLabel() }));
+  // Giltigt inläst orgnr ligger redan i orgnr-fältet; ogiltig träff behålls som loggpost så informationen inte tappas
+  if (res && res.falt.orgnr && !normalizeOrgnr(res.falt.orgnr)) {
+    log.push({ id: uid(), type: 'text', content: 'Orgnr (inläst): ' + res.falt.orgnr, ts: nowLabel() });
   }
   const kund = {
     id: uid(),
@@ -3597,37 +3866,25 @@ function ocrSummary(p) {
 }
 
 // ---------- New customer from screenshot (Pipeline-fliken) ----------
-let shotDataUrl = null;
-let shotOcrResult = null;
-setupPasteZone(
-  document.getElementById('shotPasteZone'),
-  document.getElementById('shotPasteFileBtn'),
-  document.getElementById('shotPasteFileInput'),
-  async dataUrl => {
-    shotDataUrl = dataUrl;
-    shotOcrResult = null;
-    showImageInZone(document.getElementById('shotPasteZone'), dataUrl);
-    document.getElementById('shotCreateBtn').disabled = false;
-    const status = document.getElementById('shotAiStatus');
-    try {
-      const text = await ocrImage(dataUrl, status);
-      shotOcrResult = parseOcrText(text);
-      const bits = ocrSummary(shotOcrResult);
-      status.textContent = bits.length ? 'Hittat — ' + bits.join(' · ') : 'Ingen kundinfo hittades i texten — fyll i fälten manuellt i nästa steg.';
-    } catch (e) {
-      status.className = 'ai-status err';
-      status.textContent = 'OCR misslyckades (' + e.message + ') — fyll i fälten manuellt i nästa steg.';
-    }
+// Samma läsare som Ny kund-rutan (flera bilder, AI i EU + lokal reserv). Vid 'Skapa kund' hamnar bilderna i processens logg och
+// resultatet följer med in i Ny kund (som då inte sparar bilderna en gång till). Pågår läsningen fortsätter den i Ny kund.
+const shotLasare = skapaLasare({
+  zon: document.getElementById('shotPasteZone'),
+  filKnapp: document.getElementById('shotPasteFileBtn'),
+  filInput: document.getElementById('shotPasteFileInput'),
+  tummar: document.getElementById('shotTummar'),
+  status: document.getElementById('shotAiStatus'),
+  onAndrad: bilder => { document.getElementById('shotCreateBtn').disabled = !bilder.length; },
+  onResultat: res => {
+    if (!res) return;
+    const bits = lasSammanfattning(res);
+    if (bits.length) shotLasare.status((res.vag === 'ai' ? 'Hittat (AI, EU) — ' : 'Hittat (lokalt) — ') + bits.join(' · '));
   }
-);
+});
 
 function resetShotModal() {
-  shotDataUrl = null;
-  shotOcrResult = null;
+  shotLasare.nollstall();
   document.getElementById('shotCreateBtn').disabled = true;
-  document.getElementById('shotAiStatus').innerHTML = '';
-  document.getElementById('shotAiStatus').className = 'ai-status';
-  resetZone(document.getElementById('shotPasteZone'));
 }
 
 document.getElementById('addLeadFromImageBtn').addEventListener('click', () => {
@@ -3642,27 +3899,18 @@ document.getElementById('shotModalBackdrop').addEventListener('click', e => {
 });
 
 document.getElementById('shotCreateBtn').addEventListener('click', () => {
-  if (!shotDataUrl) return;
-  const log = [{ id: uid(), type: 'image', content: shotDataUrl, ts: nowLabel() }];
-  // Giltigt OCR-orgnr fylls i kundens orgnr-fält nedan; ogiltig träff behålls som loggpost (som före M1)
-  if (shotOcrResult && shotOcrResult.orgnr && !normalizeOrgnr(shotOcrResult.orgnr)) {
-    log.push({ id: uid(), type: 'text', content: 'Orgnr (OCR): ' + shotOcrResult.orgnr, ts: nowLabel() });
-  }
-  const prefill = { log };
-  const ocr = shotOcrResult;
+  const bilder = shotLasare.bilder.slice();
+  if (!bilder.length) return;
+  const res = shotLasare.pagar ? null : shotLasare.resultat;
+  const log = bilder.map(b => ({ id: uid(), type: 'image', content: b.dataUrl, ts: nowLabel() }));
   document.getElementById('shotModalBackdrop').classList.remove('open');
-  openLeadModal(null, prefill);
-  // Öppna "Ny kund" ovanpå processmodalen, förifylld med OCR-fälten
+  openLeadModal(null, { log });
+  // Öppna 'Ny kund' ovanpå processmodalen med samma bilder och det inlästa resultatet
   openCustQuickAddModal('lead');
-  if (ocr) {
-    document.getElementById('custQuickNamn').value = ocr.namn || '';
-    document.getElementById('custQuickOrgnr').value = normalizeOrgnr(ocr.orgnr) || '';
-    checkCustQuickOrgnr();
-    document.getElementById('custQuickAdress').value = ocr.adress || '';
-    document.getElementById('custQuickKontakt').value = ocr.kontakt || '';
-    document.getElementById('custQuickTelefon').value = ocr.telefon || '';
-    document.getElementById('custQuickEmail').value = ocr.email || '';
-  }
+  custQuickSparaBilder = false;
+  custQuickLasare.importera(bilder, res);
+  if (res) { cqTillampa(res); custQuickLasare.status(shotLasare.resultat && document.getElementById('shotAiStatus').textContent || ''); }
+  else custQuickLasare.lasNu();
   resetShotModal();
 });
 
@@ -4128,7 +4376,8 @@ function normPing(d) {
       hamtningMs: Math.max(0, Number(ics.hamtningMs) || 0), cachad: ics.cachad === true, langsam: ics.langsam === true } : null,
     blockSynk: normBlockSynk(d.blockSynk),   // version 11 (A61, K5): null = fältet saknas (äldre script)
     konton: normKonton(d.konton),   // steg 3 (4.3): { kontonFil, kontonAntal, kontoMailIdag, inloggningsforsokIdag, hemligheter } | null (äldre script)
-    tider: normPingTider(d.tider)   // version 15: bokarflödets senaste anrop [{ ts, a, ms, ok, t }] | null (äldre script)
+    tider: normPingTider(d.tider),   // version 15: bokarflödets senaste anrop [{ ts, a, ms, ok, t }] | null (äldre script)
+    lasning: normLasningPing(d.lasning)   // version 17: skärmdumpsinläsningen { aktiv, projekt, region, idag, tak, senast } | null (äldre script)
   };
 }
 // ping.tider (scriptversion 15): de senaste anropen i bokarens väntan – bara mätvärden. a = action, ms = tid inne i scriptet,
@@ -4153,6 +4402,12 @@ function bokTiderRader(tider) {
   const kal = tider.filter(x => x.a === 'availability' && x.t).slice(-1)[0];
   if (kal) rader.push({ text: 'Bokarflödet, senaste kalenderanrop ' + msLabel(kal.ms) + ': behörighet ' + msLabel(kal.t.auth) + ' · kalender ' + msLabel(kal.t.busy) + ' · adress ' + msLabel(kal.t.geo) + ' · restid ' + msLabel(kal.t.restid) + ' · planering ' + msLabel(kal.t.plan) + ' · ' + kortTidLabel(kal.ts), kind: 'info', omrade: 'boktider' });
   return rader;
+}
+// ping.lasning (scriptversion 17): skärmdumpsinläsningens status – inga personuppgifter, bara räknare och senaste utfall.
+function normLasningPing(l) {
+  if (!isPlainObject(l)) return null;
+  const sen = isPlainObject(l.senast) ? { ts: bstr(l.senast.ts, 40), ok: l.senast.ok === true, kod: bstr(l.senast.kod, 40) } : null;
+  return { aktiv: l.aktiv === true, projekt: l.projekt === true, region: bstr(l.region, 40), modell: bstr(l.modell, 60), idag: Math.max(0, Math.round(Number(l.idag) || 0)), tak: Math.max(0, Math.round(Number(l.tak) || 0)), senast: sen };
 }
 function normKonton(k) {
   if (!isPlainObject(k)) return null;
@@ -4275,6 +4530,14 @@ function bokDriftRader() {   // gemensamma rader för Drift-panelen; statusraden
     else if (!ko) rader.push({ text: 'Bokarkonton: status saknas i svaret', kind: 'info', omrade: 'konton' });
     else if (!ko.kontonFil) rader.push({ text: 'Bokarkonton: kontofilen saknas i scriptet – kör Återanslut (Anslut brevlåda) så att telexia-bokning-konton.json skapas', kind: p.konfigurerad ? 'warn' : 'info', omrade: 'konton' });
     else rader.push({ text: 'Bokarkonton: ' + ko.kontonAntal + ' konton · ' + ko.kontoMailIdag + ' kontomail idag av 30 · ' + ko.inloggningsforsokIdag + ' misslyckade inloggningar idag' + (ko.hemligheter ? '' : ' · OBS: hemligheter saknas – kör install() i scriptet'), kind: ko.hemligheter && ko.inloggningsforsokIdag < 100 && ko.kontoMailIdag < 30 ? 'info' : 'warn', omrade: 'konton' });
+  }
+  // Skärmdumpsinläsning (version 17): AI i EU (Vertex AI) – annars läser appen lokalt (OCR).
+  if (p && !bokDrift.pingFel) {
+    const l = p.lasning, inst = lasInstallningar();
+    if (inst.lage === 'lokal') rader.push({ text: 'Skärmdumpsinläsning: lokalt på den här enheten (inställt i Ny kund)', kind: 'info', omrade: 'lasning' });
+    else if (!l) rader.push({ text: 'Skärmdumpsinläsning: lokalt – AI-inläsning kräver scriptversion 17', kind: 'info', omrade: 'lasning' });
+    else if (!l.projekt) rader.push({ text: 'Skärmdumpsinläsning: lokalt – VERTEX_PROJEKT saknas i scriptets Script Properties', kind: 'info', omrade: 'lasning' });
+    else rader.push({ text: 'Skärmdumpsinläsning: AI (' + (l.modell || 'modell okänd') + ', ' + (l.region || 'EU') + ') ' + (l.aktiv ? 'aktiv' : 'inte aktiverad – senaste anropet nekades (API, modell eller kvot)') + ' · ' + l.idag + ' av ' + l.tak + ' idag' + (l.senast && !l.senast.ok ? ' · senaste försöket misslyckades ' + kortTidLabel(l.senast.ts) + (l.senast.kod ? ' (' + l.senast.kod + ')' : '') + ' – appen läste lokalt' : ''), kind: l.aktiv && !(l.senast && !l.senast.ok) ? 'info' : 'warn', omrade: 'lasning' });
   }
   // Bokarflödet (version 15): var tiden går när bokaren väntar – ur ping.tider. Tom logg = inga bokaranrop de senaste 6 timmarna.
   if (p && !bokDrift.pingFel) {
