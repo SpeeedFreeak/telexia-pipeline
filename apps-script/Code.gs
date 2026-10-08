@@ -5,7 +5,10 @@
  * avsnitt 4 (brevlåda, transport, endpoints, säkerhet), 5 (tillgänglighet – anropas i Availability.gs), 9 (säkerhet/GDPR)
  * och 11 (steg 2: bokarens egen ombokning/avbokning – CJ:s beslut 2026-09-15, se "Bokar-endpoints egen-*" nedan).
  *
- * Projektet består av fyra filer (Konton.gs tillkom i version 13):
+ * Projektet består av fem filer (Konton.gs tillkom i version 13, Lasning.gs i version 17):
+ *   Lasning.gs       – skärmdumpsinläsning (SCRIPT_VERSION 17–18, spec "[C] Skärmdumpsinläsning - specifikation (Claude Haiku).md"): endpoint
+ *                      las-skarmdump → Gemini 2.5 Flash (europe-west3) eller Claude Haiku 4.5 (europe-west1) på Vertex AI med CJ:s
+ *                      Google-token (Script Property LASNING_MODELL), tak per minut/dygn, ping.lasning.
  *   Konton.gs        – bokarkonton (steg 3, SCRIPT_VERSION 13, spec "[C] Bokningsmodul - specifikation steg 3 bokarkonton.md"): kontofilen
  *                      telexia-bokning-konton.json, lösenordshash, sessioner (req.s i alla bokar-endpoints), tillåtelselistan config.domaner,
  *                      endpoints konto-* + konton-list/konto-radera, konto-mail, gallring, runKontoTests().
@@ -46,10 +49,12 @@
 // Konstanter
 // ============================================================
 
-const SCRIPT_VERSION = 16;                      // 16 = snabbare inloggning (CJ 2026-10-01): dagens första inloggning skriver inte längre kontofilen i bokarens väntan – "senast inloggad" läggs i CacheService (Konton.gs kontoInloggStash_) och skrivs av triggern (kontoInloggDrain_ i refreshIcsCache), konton-list visar väntande stämplar – internt: MIN_SCRIPT_VERSION förblir 13; 15 = snabbare kalender (CJ 2026-10-01: "kalenderladdningen är seg" – körloggen visade 6–7 s per vecka med restid): cache-filen skrivs inte längre i bokarens väntan (availStashPending_ i doPost → CacheService, triggern tömmer med availDrainPending_), bokarens adress och dess restidspar läser inte cache-filen (utanFil), restid mot hela bokningsperiodens ankarplatser i en Distance Matrix-omgång (ankare:horisont från triggern), tidslogg för bokarflödet i ping.tider (tiderLogga_) + tider.auth – allt valfritt: MIN_SCRIPT_VERSION förblir 13; 14 = snabbare bokningsflöde (CJ 2026-10-01: "bokningsflödet är otroligt segt"): auth-kopia per konto i CacheService (Konton.gs kontoForAuth_, ett cache.get per bokar-anrop i stället för kontofil + KONTON_REV), konto-logga-in/-verifiera/-aterstall svarar med hello i samma svar (helloData_), väckningsendpointen 'varm' – allt valfritt: MIN_SCRIPT_VERSION förblir 13; 13 = bokarkonton (steg 3, Konton.gs): e-post + lösenord ersätter bokarkoden för vanliga bokare (k bara för CJ-bokare/arCj), fjärde brevlådefil telexia-bokning-konton.json (KONTON_FILE_ID, ägs av scriptet), tillåtelselista config.domaner (domän eller hel adress → pipeline), endpoints konto-registrera/-verifiera/-logga-in/-glomt/-aterstall/-byt-losenord/-profil + admin konton-list/konto-radera, session s i alla bokar-endpoints, hello.bokare fornamn/efternamn/epost/mobil/harKonto, inkorgspost.bokare-snapshot + "Bokad av: namn, e-post, mobil" i kalendern (B9), felkoder E_DOMAN/E_LOGIN/E_OVERIFIERAD/E_INAKTIV/E_SESSION/E_TOKEN, Script Properties SESSION_SECRET/LOSEN_PEPPER (install), ping kontonFil/kontonAntal/kontoMailIdag/inloggningsforsokIdag, dailyMaintenance gallrar overifierade konton – MIN_SCRIPT_VERSION höjs till 13 i index.html och bokning.js (CJ:s beslut 2026-09-19); 12 = prestanda (Script Properties-memo per körning, batchade CacheService-läsningar i Availability.gs, förberäknad calendar-preview i refreshIcsCache – CacheService preview:snap + busy:<datum> 11 min, calendar-preview svarar cachad:true/snapshotTs/tider, availability tider – valfria fält: MIN_SCRIPT_VERSION förblir 4; CJ 2026-09-17: "kalendern är väldigt långsam att ladda"); 11 = blocksynk till Google Kalender (installningar.blockSynkAktiv, Script Properties BLOCK_KALENDER_ID/BLOCK_SYNK_SENAST, egen kalender "Pipeline – restid" som aldrig läses, admin-endpoint block-sync, ping.blockSynk, calendars-list blockKalender – valfria fält: MIN_SCRIPT_VERSION förblir 4; A61, CJ:s beslut 2026-09-17); 10 = ren restid (råa Distance Matrix-minuter, inget påslag), marginal efter varje möte (installningar.marginalFysisktMin/marginalOnlineMin → effektiv buffert cooldownMin i Calendar.gs finalizeBusy; ersätter marginalMinstMin/marginalProcent) och restid delad runt platslösa möten (availability slot.restid.inDelar/utDelar + data.pausMin, calendar-preview resor[].delar – valfria fält, inBlock/utBlock = yttre spann: MIN_SCRIPT_VERSION förblir 4; CJ:s beslut 2026-09-17); 9 = manuell restidsklassning + rättad adress per händelse (KALENDER_IGNORERA-postens valfria online/adress/lat/lng/omrade och lage 'restid', Calendar.gs applyIgnore; calendar-preview overrideOnline/overrideAdress/serieId, geocode.omrade – valfria fält: MIN_SCRIPT_VERSION förblir 4); 8 = online-möten ("Microsoft Teams-möte" m.fl. i platsfältet är aldrig restidsankare, Calendar.gs kalLooksLikePlace – MIN_SCRIPT_VERSION förblir 4); MIN_SCRIPT_VERSION i index.html/bokning.js jämförs mot denna (4.12); 3 = M5 (purge, dailyMaintenance, nya ping-fält); 4 = steg 2a (egen-rebook/egen-cancel/egen-update, hello.egna med kanAndras); 5 = steg 2b (adressforslag via Places, placeId i geokodning – valfritt: MIN_SCRIPT_VERSION förblir 4); 6 = steg 2c (block.omrade i availability, omrade + resor i calendar-preview – valfria fält: MIN_SCRIPT_VERSION förblir 4); 7 = optimering (inkorg i CacheService, en cache-filskrivning per körning, ICS-värmare) + restid tydlig (paus-block, 0 min samma adress, Teams-fix, mejltext) + rebook släpper reservation (valfria fält: MIN_SCRIPT_VERSION förblir 4)
+const SCRIPT_VERSION = 18;                      // 18 = Gemini 2.5 Flash som valbar modell i skärmdumpsinläsningen (CJ 2026-10-08, efter att Googles automatiska svar på Claude-kvoten var nej): Script Property LASNING_MODELL = gemini (standard) | claude, region per modell (Gemini europe-west3 Frankfurt – Googles tabell för datalagring stöder inte europe-west1 för Gemini; Claude europe-west1), ping.lasning.modell/region följer valet – valfritt: MIN_SCRIPT_VERSION förblir 13; 17 = skärmdumpsinläsning (CJ 2026-10-08, Lasning.gs): admin-endpoint las-skarmdump (1–5 bilder → Claude Haiku 4.5 på Vertex AI europe-west1, datan stannar i EU, ingen API-nyckel – CJ:s token via scope cloud-platform), större body bara för den (MAX_BODY_BYTES_BILD), Script Properties VERTEX_PROJEKT/LASNING_DAG/LASNING_SENAST, felkoder E_LASNING/E_LASNING_EJ_AKTIV, ping.lasning – valfritt: MIN_SCRIPT_VERSION förblir 13; 16 = snabbare inloggning (CJ 2026-10-01): dagens första inloggning skriver inte längre kontofilen i bokarens väntan – "senast inloggad" läggs i CacheService (Konton.gs kontoInloggStash_) och skrivs av triggern (kontoInloggDrain_ i refreshIcsCache), konton-list visar väntande stämplar – internt: MIN_SCRIPT_VERSION förblir 13; 15 = snabbare kalender (CJ 2026-10-01: "kalenderladdningen är seg" – körloggen visade 6–7 s per vecka med restid): cache-filen skrivs inte längre i bokarens väntan (availStashPending_ i doPost → CacheService, triggern tömmer med availDrainPending_), bokarens adress och dess restidspar läser inte cache-filen (utanFil), restid mot hela bokningsperiodens ankarplatser i en Distance Matrix-omgång (ankare:horisont från triggern), tidslogg för bokarflödet i ping.tider (tiderLogga_) + tider.auth – allt valfritt: MIN_SCRIPT_VERSION förblir 13; 14 = snabbare bokningsflöde (CJ 2026-10-01: "bokningsflödet är otroligt segt"): auth-kopia per konto i CacheService (Konton.gs kontoForAuth_, ett cache.get per bokar-anrop i stället för kontofil + KONTON_REV), konto-logga-in/-verifiera/-aterstall svarar med hello i samma svar (helloData_), väckningsendpointen 'varm' – allt valfritt: MIN_SCRIPT_VERSION förblir 13; 13 = bokarkonton (steg 3, Konton.gs): e-post + lösenord ersätter bokarkoden för vanliga bokare (k bara för CJ-bokare/arCj), fjärde brevlådefil telexia-bokning-konton.json (KONTON_FILE_ID, ägs av scriptet), tillåtelselista config.domaner (domän eller hel adress → pipeline), endpoints konto-registrera/-verifiera/-logga-in/-glomt/-aterstall/-byt-losenord/-profil + admin konton-list/konto-radera, session s i alla bokar-endpoints, hello.bokare fornamn/efternamn/epost/mobil/harKonto, inkorgspost.bokare-snapshot + "Bokad av: namn, e-post, mobil" i kalendern (B9), felkoder E_DOMAN/E_LOGIN/E_OVERIFIERAD/E_INAKTIV/E_SESSION/E_TOKEN, Script Properties SESSION_SECRET/LOSEN_PEPPER (install), ping kontonFil/kontonAntal/kontoMailIdag/inloggningsforsokIdag, dailyMaintenance gallrar overifierade konton – MIN_SCRIPT_VERSION höjs till 13 i index.html och bokning.js (CJ:s beslut 2026-09-19); 12 = prestanda (Script Properties-memo per körning, batchade CacheService-läsningar i Availability.gs, förberäknad calendar-preview i refreshIcsCache – CacheService preview:snap + busy:<datum> 11 min, calendar-preview svarar cachad:true/snapshotTs/tider, availability tider – valfria fält: MIN_SCRIPT_VERSION förblir 4; CJ 2026-09-17: "kalendern är väldigt långsam att ladda"); 11 = blocksynk till Google Kalender (installningar.blockSynkAktiv, Script Properties BLOCK_KALENDER_ID/BLOCK_SYNK_SENAST, egen kalender "Pipeline – restid" som aldrig läses, admin-endpoint block-sync, ping.blockSynk, calendars-list blockKalender – valfria fält: MIN_SCRIPT_VERSION förblir 4; A61, CJ:s beslut 2026-09-17); 10 = ren restid (råa Distance Matrix-minuter, inget påslag), marginal efter varje möte (installningar.marginalFysisktMin/marginalOnlineMin → effektiv buffert cooldownMin i Calendar.gs finalizeBusy; ersätter marginalMinstMin/marginalProcent) och restid delad runt platslösa möten (availability slot.restid.inDelar/utDelar + data.pausMin, calendar-preview resor[].delar – valfria fält, inBlock/utBlock = yttre spann: MIN_SCRIPT_VERSION förblir 4; CJ:s beslut 2026-09-17); 9 = manuell restidsklassning + rättad adress per händelse (KALENDER_IGNORERA-postens valfria online/adress/lat/lng/omrade och lage 'restid', Calendar.gs applyIgnore; calendar-preview overrideOnline/overrideAdress/serieId, geocode.omrade – valfria fält: MIN_SCRIPT_VERSION förblir 4); 8 = online-möten ("Microsoft Teams-möte" m.fl. i platsfältet är aldrig restidsankare, Calendar.gs kalLooksLikePlace – MIN_SCRIPT_VERSION förblir 4); MIN_SCRIPT_VERSION i index.html/bokning.js jämförs mot denna (4.12); 3 = M5 (purge, dailyMaintenance, nya ping-fält); 4 = steg 2a (egen-rebook/egen-cancel/egen-update, hello.egna med kanAndras); 5 = steg 2b (adressforslag via Places, placeId i geokodning – valfritt: MIN_SCRIPT_VERSION förblir 4); 6 = steg 2c (block.omrade i availability, omrade + resor i calendar-preview – valfria fält: MIN_SCRIPT_VERSION förblir 4); 7 = optimering (inkorg i CacheService, en cache-filskrivning per körning, ICS-värmare) + restid tydlig (paus-block, 0 min samma adress, Teams-fix, mejltext) + rebook släpper reservation (valfria fält: MIN_SCRIPT_VERSION förblir 4)
 const TZ = 'Europe/Stockholm';
 const APP_URL = 'https://speeedfreeak.github.io/telexia-pipeline/';   // länk i notismejlet (4.9)
 const MAX_BODY_BYTES = 16384;                   // body kontrolleras före JSON.parse (4.3)
+const MAX_BODY_BYTES_BILD = 6 * 1024 * 1024;    // version 17: bara las-skarmdump – kroppen måste börja exakt med BILD_BODY_PREFIX (kontroll före JSON.parse)
+const BILD_BODY_PREFIX = '{"action":"las-skarmdump"';
 const LOCK_WAIT_MS = 10000;                     // LockService – timeout → E_LOCK (4.8)
 
 const KOD_RE = /^[A-Za-z0-9_-]{24}$/;           // bokarkod (4.5)
@@ -142,7 +147,8 @@ const PROP = {
   KONTON_FILE_ID: 'KONTON_FILE_ID',           // version 13 (steg 3, 4.2): fjärde brevlådefilen telexia-bokning-konton.json – valfri i setup (kontonFileId); saknas → konto-* svarar E_SETUP
   KONTON_REV: 'KONTON_REV',                   // version 13: rev för den kontokopia som senast lades i CacheService (som INBOX_REV)
   SESSION_SECRET: 'SESSION_SECRET',           // version 13: HMAC-nyckel för sessioner – skapas av install()/setup om den saknas; rotation loggar ut alla
-  LOSEN_PEPPER: 'LOSEN_PEPPER'                // version 13: server-hemlighet i lösenordshashen – skapas av install()/setup; får ALDRIG roteras när konton finns
+  LOSEN_PEPPER: 'LOSEN_PEPPER',               // version 13: server-hemlighet i lösenordshashen – skapas av install()/setup; får ALDRIG roteras när konton finns
+  VERTEX_PROJEKT: 'VERTEX_PROJEKT'            // version 17: Google Cloud-projekt-id för skärmdumpsinläsningen (Lasning.gs) – ingen hemlighet; saknas → E_LASNING_EJ_AKTIV
 };
 const MAPS_DAILY_CAP_DEFAULT = 1000;
 
@@ -171,7 +177,10 @@ const FEL_TEXT = {
   E_OVERIFIERAD: 'Bekräfta din e-postadress först – vi har skickat ett nytt mail.',
   E_INAKTIV: 'Kontot är avstängt. Kontakta CJ.',
   E_SESSION: 'Din inloggning har gått ut – logga in igen.',
-  E_TOKEN: 'Länken har redan använts eller gått ut.'
+  E_TOKEN: 'Länken har redan använts eller gått ut.',
+  // Version 17 (Lasning.gs) – skärmdumpsinläsning; appen läser lokalt (Tesseract) vid båda
+  E_LASNING: 'Inläsningen misslyckades',
+  E_LASNING_EJ_AKTIV: 'AI-inläsningen är inte aktiverad'
 };
 
 // ============================================================
@@ -411,7 +420,10 @@ function doPostInner_(e) {
     brevladaResetMemo_();                                          // per-anrop-memo (Drive-filobjekten, version 7)
     propResetMemo_();                                              // per-anrop-memo (Script Properties, version 12 K1)
 
-    if (!e || !e.postData || typeof e.postData.contents !== 'string' || e.postData.contents.length > MAX_BODY_BYTES)
+    // Version 17: över 16 kB tillåts bara las-skarmdump (≤ 6 MB) – avgörs på kroppens början, före JSON.parse.
+    if (!e || !e.postData || typeof e.postData.contents !== 'string' ||
+        (e.postData.contents.length > MAX_BODY_BYTES &&
+         (e.postData.contents.length > MAX_BODY_BYTES_BILD || e.postData.contents.slice(0, BILD_BODY_PREFIX.length) !== BILD_BODY_PREFIX)))
       return respond(errEnvelope('E_VALIDATION', 'Ogiltig eller för stor förfrågan'));
     let req = null;
     try { req = JSON.parse(e.postData.contents); } catch (pe) { req = null; }
@@ -1165,7 +1177,9 @@ function handlePing(req, ctx) {
     // Version 13 (steg 3): { kontonFil, kontonAntal, kontoMailIdag, inloggningsforsokIdag, hemligheter } – Drift-panelen (Konton.gs).
     konton: kontonForPing_(),
     // Version 15: de senaste bokaranropen [{ ts, a, ms, ok, t? }] (tiderLogga_) – Drift-panelen visar var tiden går i bokarflödet.
-    tider: tiderForPing_()
+    tider: tiderForPing_(),
+    // Version 17: skärmdumpsinläsningens status { aktiv, projekt, region, modell, idag, tak, senast } (Lasning.gs) – Drift-panelen + appens val AI/lokalt.
+    lasning: lasningForPing_()
   };
 }
 // Kontroll av de tre brevlådefilerna (4.2, cachad 10 min per id). Returnerar '' när allt är i ordning, annars '<roll>: <statisk orsak>'.
@@ -3369,7 +3383,9 @@ const HANDLERS = {
   'konto-byt-losenord': handleKontoBytLosenord,
   'konto-profil': handleKontoProfil,
   'konton-list': handleKontonList,
-  'konto-radera': handleKontoRadera
+  'konto-radera': handleKontoRadera,
+  // Version 17 (Lasning.gs)
+  'las-skarmdump': handleLasSkarmdump
 };
 
 // ============================================================
@@ -3391,6 +3407,7 @@ function install() {
   const hemligheter = sakerstallHemligheter_();   // version 13: SESSION_SECRET + LOSEN_PEPPER om de saknas (Konton.gs)
   return 'Triggers skapade: dailyMaintenance (kl 03–04) och refreshIcsCache (var ' + ICS_VARMARE_MIN + ':e minut). ' +
          (hemligheter ? hemligheter + ' hemlighet(er) för bokarkonton skapade i Script Properties. ' : 'Hemligheter för bokarkonton fanns redan. ') +
+         (getProp(PROP.VERTEX_PROJEKT) ? 'Skärmdumpsinläsning: projekt ' + getProp(PROP.VERTEX_PROJEKT) + ', token ' + (ScriptApp.getOAuthToken() ? 'ok' : 'saknas') + '. ' : 'Skärmdumpsinläsning: VERTEX_PROJEKT saknas i Script Properties. ') +
          'Scriptversion ' + SCRIPT_VERSION + '.';
 }
 
